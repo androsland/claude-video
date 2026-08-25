@@ -27,8 +27,8 @@ from pathlib import Path
 # Default model. Overridable via WATCH_WHISPER_MODEL — accepts a faster-whisper
 # size alias ("tiny", "base", "small", "medium", "large-v3", "distil-large-v3"),
 # a Hugging Face repo id, or a path to a local CTranslate2 model directory.
-# large-v3 is a ~3 GB one-time download and matches the API backends' quality;
-# "small" (~500 MB) is the usual choice when disk or CPU time is tight.
+# large-v3 is a 2.9 GB one-time download and matches the API backends' quality;
+# "small" (464 MB) is the usual choice when disk or CPU time is tight.
 DEFAULT_MODEL = "large-v3"
 
 # GPU compute type. int8_float16 rather than float16 on purpose: it halves VRAM
