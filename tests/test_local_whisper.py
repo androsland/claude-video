@@ -284,12 +284,21 @@ class _FakeInfo:
 
 
 class _FakeModel:
-    """Stands in for a loaded WhisperModel. transcribe() returns (generator, info)."""
+    """Stands in for a loaded WhisperModel. transcribe() returns (generator, info).
 
-    def __init__(self, segments, info=None, raises=None):
+    Two failure modes, and the difference is the whole point: `raises` fires at
+    the transcribe() call, while `raises_mid_drain` fires after some segments
+    have already been yielded. CTranslate2 resolves its CUDA libraries lazily,
+    so a broken GPU install produces the second shape, not the first — a test
+    that only simulates the first would pass against a retry that wrapped the
+    load alone.
+    """
+
+    def __init__(self, segments, info=None, raises=None, raises_mid_drain=None):
         self._segments = segments
         self._info = info or _FakeInfo()
         self._raises = raises
+        self._raises_mid_drain = raises_mid_drain
         self.calls = []
 
     def transcribe(self, path, language=None, vad_filter=False):
@@ -299,8 +308,16 @@ class _FakeModel:
 
         def gen():
             yield from self._segments
+            if self._raises_mid_drain is not None:
+                raise self._raises_mid_drain
 
         return gen(), self._info
+
+
+def _progress_lines(capsys) -> list[str]:
+    """Only the percentage lines — not the detected-language line, which shares
+    the prefix up to the word 'whisper'."""
+    return [ln for ln in capsys.readouterr().err.splitlines() if "local whisper:" in ln]
 
 
 class TestCollectSegmentShape:
@@ -345,11 +362,44 @@ class TestCollectSegmentShape:
         segments = [_FakeSegment(float(i * 60), float((i + 1) * 60), f"s{i}") for i in range(3)]
         model = _FakeModel(segments, info=_FakeInfo(duration=180.0))
         local_whisper._collect(model, tmp_path / "a.mp3", None, vad=True)
-        assert "local whisper:" in capsys.readouterr().err
+        assert _progress_lines(capsys) == [
+            "[watch] local whisper: 33% (60s/180s)",
+            "[watch] local whisper: 66% (120s/180s)",
+            "[watch] local whisper: 100% (180s/180s)",
+        ]
+
+    def test_progress_marks_advance_past_a_long_segment(self, tmp_path, capsys):
+        """One segment spanning five minutes prints once, not once per minute,
+        and the next mark lands past its end so the segment right after it stays
+        quiet. Without the catch-up loop the mark would still be at 120s and
+        that following segment would print a second time."""
+        model = _FakeModel(
+            [
+                _FakeSegment(0.0, 300.0, "one long stretch"),
+                _FakeSegment(300.0, 320.0, "just after"),
+                _FakeSegment(320.0, 400.0, "past the next mark"),
+            ],
+            info=_FakeInfo(duration=600.0),
+        )
+        local_whisper._collect(model, tmp_path / "a.mp3", None, vad=True)
+        assert _progress_lines(capsys) == [
+            "[watch] local whisper: 50% (300s/600s)",
+            "[watch] local whisper: 66% (400s/600s)",
+        ]
+
+    def test_announces_the_detected_language_when_none_was_pinned(self, tmp_path, capsys):
+        model = _FakeModel([_FakeSegment(0.0, 1.0, "t")], info=_FakeInfo(language="el"))
+        local_whisper._collect(model, tmp_path / "a.mp3", None, vad=True)
+        assert "detected language: el" in capsys.readouterr().err
+
+    def test_stays_quiet_about_language_when_one_was_pinned(self, tmp_path, capsys):
+        model = _FakeModel([_FakeSegment(0.0, 1.0, "t")], info=_FakeInfo(language="el"))
+        local_whisper._collect(model, tmp_path / "a.mp3", "el", vad=True)
+        assert "detected language" not in capsys.readouterr().err
 
 
 class TestRunVadFallback:
-    def test_retries_without_vad_when_vad_is_the_problem(self, tmp_path):
+    def test_retries_without_vad_when_vad_is_the_problem(self, tmp_path, monkeypatch):
         calls = []
 
         def fake_collect(loaded, audio_path, language, vad):
@@ -358,26 +408,18 @@ class TestRunVadFallback:
                 raise RuntimeError("onnxruntime is not installed")
             return [{"start": 0.0, "end": 1.0, "text": "ok"}]
 
-        local_whisper_collect = local_whisper._collect
-        try:
-            local_whisper._collect = fake_collect
-            out = local_whisper._run(object(), tmp_path / "a.mp3", None)
-        finally:
-            local_whisper._collect = local_whisper_collect
+        monkeypatch.setattr(local_whisper, "_collect", fake_collect)
+        out = local_whisper._run(object(), tmp_path / "a.mp3", None)
         assert calls == [True, False]
         assert out == [{"start": 0.0, "end": 1.0, "text": "ok"}]
 
-    def test_device_failure_is_not_swallowed_as_a_vad_problem(self, tmp_path):
+    def test_device_failure_is_not_swallowed_as_a_vad_problem(self, tmp_path, monkeypatch):
         def fake_collect(loaded, audio_path, language, vad):
             raise RuntimeError("Library libcublas.so.12 is not found")
 
-        local_whisper_collect = local_whisper._collect
-        try:
-            local_whisper._collect = fake_collect
-            with pytest.raises(RuntimeError, match="libcublas"):
-                local_whisper._run(object(), tmp_path / "a.mp3", None)
-        finally:
-            local_whisper._collect = local_whisper_collect
+        monkeypatch.setattr(local_whisper, "_collect", fake_collect)
+        with pytest.raises(RuntimeError, match="libcublas"):
+            local_whisper._run(object(), tmp_path / "a.mp3", None)
 
 
 class TestDeviceFallbackLoop:
@@ -406,11 +448,20 @@ class TestDeviceFallbackLoop:
         assert "falling back to CPU" in capsys.readouterr().err
 
     def test_falls_back_when_the_gpu_fails_mid_transcode(self, tmp_path, monkeypatch):
+        """The real cuBLAS failure surfaces while the generator drains, after
+        segments have already been yielded — the model loads clean because
+        CTranslate2 resolves CUDA lazily and only dies at the first GEMM. So the
+        GPU model here yields one segment and then raises, and the assertion is
+        that the partial GPU output is discarded rather than merged with the
+        CPU retry's."""
         self._pin_cuda(monkeypatch)
 
         def fake_load(model, device, compute_type):
             if device == "cuda":
-                return _FakeModel([], raises=RuntimeError("Library libcublas.so.12 is not found"))
+                return _FakeModel(
+                    [_FakeSegment(0.0, 1.0, "partial gpu output")],
+                    raises_mid_drain=RuntimeError("Library libcublas.so.12 is not found"),
+                )
             return _FakeModel([_FakeSegment(0.0, 1.0, "cpu result")])
 
         monkeypatch.setattr(local_whisper, "_load_model", fake_load)
