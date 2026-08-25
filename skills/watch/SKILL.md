@@ -52,7 +52,7 @@ Branch on two fields:
 - **`first_run: true`** → genuine first-time setup. Do these in order:
   1. If `missing_binaries` is non-empty, run the installer first (it auto-installs on macOS / prints commands elsewhere — see below) and confirm the binaries land. **Do not skip this and jump to preferences.**
   2. Run the installer once more if needed so it scaffolds `~/.config/watch/.env` (it only writes the template when the file is absent, so let it create the file *before* you write any values into it).
-  3. Encourage a Whisper backend — offer BOTH `pip install faster-whisper` (no account, runs locally) and an API key — and ask the watch-preference questions below, then write the selected values into `~/.config/watch/.env` and set `SETUP_COMPLETE=true`.
+  3. Encourage a Whisper backend — offer BOTH `pip install "faster-whisper>=1.0"` (no account, runs locally) and an API key — and ask the watch-preference questions below, then write the selected values into `~/.config/watch/.env` and set `SETUP_COMPLETE=true`.
 - **`can_proceed: false` and `first_run: false`** → setup was finished before but the environment regressed (e.g. `missing_binaries` after an OS change). Run the installer to remediate, then proceed. Don't re-ask preferences.
 
 A missing Whisper backend is *encouraged to fix, not required*: on a genuine first run `status` will read `needs_key` even when binaries are present — that's your cue to encourage one, not a blocker. `needs_key` is a legacy name; either a key or faster-whisper clears it (check `has_transcription`).
@@ -83,7 +83,7 @@ python3 "${SKILL_DIR}/scripts/setup.py"
 
 On macOS with Homebrew, it auto-installs `ffmpeg` and `yt-dlp`. On Linux/Windows, it prints the exact install commands for the user to run. It scaffolds `~/.config/watch/.env` with commented placeholders and default watch settings at `0600` perms.
 
-**If no transcription backend is present after install** (`has_transcription: false`): use `AskUserQuestion` to offer the three options — run Whisper locally (`pip install faster-whisper`; no account, no upload, slower, one-time model download), a Groq key (fast and cheap), or an OpenAI key. For a key, write it into `~/.config/watch/.env` on the matching `GROQ_API_KEY=` / `OPENAI_API_KEY=` line. If they don't want Whisper at all, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
+**If no transcription backend is present after install** (`has_transcription: false`): use `AskUserQuestion` to offer the three options — run Whisper locally (`pip install "faster-whisper>=1.0"`; no account, no upload, slower, one-time model download), a Groq key (fast and cheap), or an OpenAI key. For a key, write it into `~/.config/watch/.env` on the matching `GROQ_API_KEY=` / `OPENAI_API_KEY=` line. If they don't want Whisper at all, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
 
 **First-run watch preference:** after the installer has scaffolded `~/.config/watch/.env`, use `AskUserQuestion` to ask one question:
 
@@ -225,7 +225,7 @@ The script gets a timestamped transcript in one of two ways:
 
 1. **Native captions (free, preferred).** yt-dlp pulls manual or auto-generated subtitles from the source platform if available.
 2. **Whisper fallback.** If no captions came back (or the source is a local file), the script extracts audio (`ffmpeg -vn -ac 1 -ar 16000 -b:a 64k`, ~0.5 MB/min) and transcribes it with one of three backends:
-   - **`local`** — [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on this machine. No API key, no account, and the audio never leaves the machine. Install with `pip install faster-whisper`; the model downloads once to the Hugging Face cache (~3 GB for the `large-v3` default, ~500 MB for `small`). Uses the GPU when one is usable and falls back to CPU otherwise.
+   - **`local`** — [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on this machine. No API key, no account, and the audio never leaves the machine. Install with `pip install "faster-whisper>=1.0"`; the model downloads once to the Hugging Face cache (2.9 GB for the `large-v3` default, 464 MB for `small`, 75 MB for `tiny`). Uses the GPU when one is usable and falls back to CPU otherwise.
    - **`groq`** — `whisper-large-v3`. Cheaper and faster than OpenAI. Get a key at console.groq.com/keys.
    - **`openai`** — `whisper-1`. The compatible fallback. Get a key at platform.openai.com/api-keys.
 
@@ -244,7 +244,7 @@ The script gets a timestamped transcript in one of two ways:
 
 ## Failure modes and handling
 
-- **Setup preflight failed** → run `python3 "${SKILL_DIR}/scripts/setup.py"` (auto-installs ffmpeg/yt-dlp via brew on macOS, scaffolds the `.env`). For a transcription backend, offer both options: `pip install faster-whisper` (no account) or an API key written to `~/.config/watch/.env`.
+- **Setup preflight failed** → run `python3 "${SKILL_DIR}/scripts/setup.py"` (auto-installs ffmpeg/yt-dlp via brew on macOS, scaffolds the `.env`). For a transcription backend, offer both options: `pip install "faster-whisper>=1.0"` (no account) or an API key written to `~/.config/watch/.env`.
 - **No transcript available** → captions missing AND (no Whisper backend OR Whisper failed). Script prints a hint pointing to setup. Proceed frames-only and tell the user.
 - **Long video warning printed** → acknowledge it in your answer. Offer to re-run focused on a specific section via `--start`/`--end` rather than a sparse full-video scan.
 - **Download fails** → yt-dlp's error goes to stderr. If it's a login-required or region-locked video, tell the user plainly; do not keep retrying.
@@ -265,7 +265,7 @@ If you already watched a video this session and the user asks a follow-up, do **
 **What this skill does:**
 - Runs `yt-dlp` locally to download the video and pull native captions when the source supports them (public data; the request goes directly to whatever host the URL points at)
 - Runs `ffmpeg` / `ffprobe` locally to extract frames as JPEGs and, when Whisper is needed, a mono 16 kHz audio clip
-- **When the `local` backend runs:** transcribes that audio on this machine and sends nothing anywhere. The first run downloads model weights from the Hugging Face CDN (`huggingface.co`); after that the backend makes no network request at all
+- **When the `local` backend runs:** transcribes that audio on this machine and never uploads it. The network is touched only for model weights from Hugging Face (`huggingface.co`) — a full download on first use, and a revision check on later loads, since faster-whisper resolves the model with `local_files_only=False` and falls back to the cache only when that check fails. Set `HF_HUB_OFFLINE=1` to suppress the check once the model is cached. Your audio is never part of any of these requests
 - **When the `groq` backend runs:** sends the extracted audio clip to `api.groq.com/openai/v1/audio/transcriptions`
 - **When the `openai` backend runs:** sends the extracted audio clip to `api.openai.com/v1/audio/transcriptions`
 - Writes the downloaded video, frames, audio, and an intermediate transcript to a working directory under the system temp dir (or `--out-dir` if specified) so Claude can `Read` them

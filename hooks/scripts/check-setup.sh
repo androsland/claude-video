@@ -88,5 +88,5 @@ elif [[ -n "$HAS_GROQ" || -n "$HAS_OPENAI" ]]; then
 elif has_local_whisper; then
   echo "/watch: ready — transcription runs on this machine via faster-whisper, no API key needed."
 else
-  echo "/watch: ready for videos with native captions. For the rest, either \`pip install faster-whisper\` (runs locally, no key) or add GROQ_API_KEY / OPENAI_API_KEY to ~/.config/watch/.env."
+  echo "/watch: ready for videos with native captions. For the rest, either \`pip install \"faster-whisper>=1.0\"\` (runs locally, no key) or add GROQ_API_KEY / OPENAI_API_KEY to ~/.config/watch/.env."
 fi

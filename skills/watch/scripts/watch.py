@@ -275,13 +275,13 @@ def main() -> int:
             setup_py = SCRIPT_DIR / "setup.py"
             if whisper_choice == LOCAL_BACKEND:
                 hint = ("whisper backend 'local' was requested but faster-whisper is not "
-                        "installed — run `pip install faster-whisper`")
+                        "installed — run `pip install \"faster-whisper>=1.0\"`")
             elif whisper_choice:
                 hint = (f"whisper backend '{whisper_choice}' was requested but its API key "
                         f"is missing — run `python3 {setup_py}` to set one")
             else:
                 hint = ("no subtitles and no transcription backend — run "
-                        "`pip install faster-whisper` to transcribe on-device, or "
+                        "`pip install \"faster-whisper>=1.0\"` to transcribe on-device, or "
                         f"`python3 {setup_py}` to set an API key")
             print(f"[watch] {hint}", file=sys.stderr)
     elif not transcript_segments and video_path and not meta.get("has_audio"):

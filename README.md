@@ -16,7 +16,7 @@ npx skills add bradautomates/claude-video -g
 
 More install options (claude.ai web, manual) in the [Install](#install) section below.
 
-Zero config to start — `yt-dlp` and `ffmpeg` install on first run via `brew` on macOS (Linux/Windows print exact commands). Captions cover most public videos for free. When a video has no captions, Whisper transcribes it — on your own machine with `pip install faster-whisper`, or via a Groq / OpenAI key.
+Zero config to start — `yt-dlp` and `ffmpeg` install on first run via `brew` on macOS (Linux/Windows print exact commands). Captions cover most public videos for free. When a video has no captions, Whisper transcribes it — on your own machine with `pip install "faster-whisper>=1.0"`, or via a Groq / OpenAI key.
 
 ---
 
@@ -157,7 +157,7 @@ On the first `/watch` call, the skill runs `scripts/setup.py --check`. If `ffmpe
 - **macOS** — auto-runs `brew install ffmpeg yt-dlp`.
 - **Linux** — prints the exact `apt` / `dnf` / `pipx` commands.
 - **Windows** — prints the `winget` / `pip` commands.
-- **Transcription** — offers `pip install faster-whisper` (runs locally, no account) and scaffolds `~/.config/watch/.env` (mode `0600`) with placeholders for `GROQ_API_KEY` and `OPENAI_API_KEY`. Either one clears the check.
+- **Transcription** — offers `pip install "faster-whisper>=1.0"` (runs locally, no account) and scaffolds `~/.config/watch/.env` (mode `0600`) with placeholders for `GROQ_API_KEY` and `OPENAI_API_KEY`. Either one clears the check.
 
 After setup, preflight is silent and `/watch` just works. The check is a sub-100ms lookup, so it doesn't slow you down on subsequent runs.
 
@@ -168,7 +168,7 @@ Captions cover the majority of public videos for free. The Whisper fallback only
 | Capability | What you need | Cost |
 |------------|---------------|------|
 | Download + native captions | `yt-dlp` + `ffmpeg` | Free |
-| Whisper on this machine | `pip install faster-whisper` | Free; one-time model download, then CPU/GPU time |
+| Whisper on this machine | `pip install "faster-whisper>=1.0"` | Free; one-time model download, then CPU/GPU time |
 | Whisper via Groq | [Groq API key](https://console.groq.com/keys) — `whisper-large-v3` | Cheap, fast |
 | Whisper via OpenAI | [OpenAI API key](https://platform.openai.com/api-keys) — `whisper-1` | Standard pricing |
 | Disable Whisper entirely | `--no-whisper` | Free, frames-only when no captions |

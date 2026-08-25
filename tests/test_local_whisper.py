@@ -102,7 +102,7 @@ class TestMissingDependency:
         monkeypatch.setattr(local_whisper, "is_available", lambda: False)
         with pytest.raises(SystemExit) as exc:
             local_whisper.transcribe_local(tmp_path / "nope.mp3")
-        assert "pip install faster-whisper" in str(exc.value)
+        assert "pip install \"faster-whisper>=1.0\"" in str(exc.value)
 
 
 class TestBackendResolution:
@@ -266,3 +266,177 @@ class TestFocusedExtraction:
 
 def _must_not_be_called(*args, **kwargs):
     raise AssertionError("should not be called")
+
+
+class _FakeSegment:
+    """Shaped like faster-whisper's Segment: .start / .end / .text attributes."""
+
+    def __init__(self, start, end, text):
+        self.start = start
+        self.end = end
+        self.text = text
+
+
+class _FakeInfo:
+    def __init__(self, duration=0.0, language=None):
+        self.duration = duration
+        self.language = language
+
+
+class _FakeModel:
+    """Stands in for a loaded WhisperModel. transcribe() returns (generator, info)."""
+
+    def __init__(self, segments, info=None, raises=None):
+        self._segments = segments
+        self._info = info or _FakeInfo()
+        self._raises = raises
+        self.calls = []
+
+    def transcribe(self, path, language=None, vad_filter=False):
+        self.calls.append({"path": path, "language": language, "vad_filter": vad_filter})
+        if self._raises is not None:
+            raise self._raises
+
+        def gen():
+            yield from self._segments
+
+        return gen(), self._info
+
+
+class TestCollectSegmentShape:
+    """_collect() converts faster-whisper's objects into the dict shape the rest
+    of the pipeline consumes. Nothing else in the suite touches this attribute
+    contract, so a renamed field upstream would otherwise pass CI silently."""
+
+    def test_produces_start_end_text_dicts(self, tmp_path):
+        model = _FakeModel([_FakeSegment(0.0, 1.5, "hello"), _FakeSegment(1.5, 3.0, "world")])
+        out = local_whisper._collect(model, tmp_path / "a.mp3", None, vad=True)
+        assert out == [
+            {"start": 0.0, "end": 1.5, "text": "hello"},
+            {"start": 1.5, "end": 3.0, "text": "world"},
+        ]
+
+    def test_rounds_to_two_decimals(self, tmp_path):
+        model = _FakeModel([_FakeSegment(0.123456, 1.987654, "x")])
+        out = local_whisper._collect(model, tmp_path / "a.mp3", None, vad=True)
+        assert out == [{"start": 0.12, "end": 1.99, "text": "x"}]
+
+    def test_strips_and_drops_empty_text(self, tmp_path):
+        model = _FakeModel([
+            _FakeSegment(0.0, 1.0, "  padded  "),
+            _FakeSegment(1.0, 2.0, "   "),
+            _FakeSegment(2.0, 3.0, ""),
+            _FakeSegment(3.0, 4.0, None),
+        ])
+        out = local_whisper._collect(model, tmp_path / "a.mp3", None, vad=True)
+        assert out == [{"start": 0.0, "end": 1.0, "text": "padded"}]
+
+    def test_tolerates_none_offsets(self, tmp_path):
+        model = _FakeModel([_FakeSegment(None, None, "t")])
+        out = local_whisper._collect(model, tmp_path / "a.mp3", None, vad=True)
+        assert out == [{"start": 0.0, "end": 0.0, "text": "t"}]
+
+    def test_passes_language_and_vad_through(self, tmp_path):
+        model = _FakeModel([_FakeSegment(0.0, 1.0, "t")])
+        local_whisper._collect(model, tmp_path / "a.mp3", "el", vad=False)
+        assert model.calls == [{"path": str(tmp_path / "a.mp3"), "language": "el", "vad_filter": False}]
+
+    def test_reports_progress_for_a_long_clip(self, tmp_path, capsys):
+        segments = [_FakeSegment(float(i * 60), float((i + 1) * 60), f"s{i}") for i in range(3)]
+        model = _FakeModel(segments, info=_FakeInfo(duration=180.0))
+        local_whisper._collect(model, tmp_path / "a.mp3", None, vad=True)
+        assert "local whisper:" in capsys.readouterr().err
+
+
+class TestRunVadFallback:
+    def test_retries_without_vad_when_vad_is_the_problem(self, tmp_path):
+        calls = []
+
+        def fake_collect(loaded, audio_path, language, vad):
+            calls.append(vad)
+            if vad:
+                raise RuntimeError("onnxruntime is not installed")
+            return [{"start": 0.0, "end": 1.0, "text": "ok"}]
+
+        local_whisper_collect = local_whisper._collect
+        try:
+            local_whisper._collect = fake_collect
+            out = local_whisper._run(object(), tmp_path / "a.mp3", None)
+        finally:
+            local_whisper._collect = local_whisper_collect
+        assert calls == [True, False]
+        assert out == [{"start": 0.0, "end": 1.0, "text": "ok"}]
+
+    def test_device_failure_is_not_swallowed_as_a_vad_problem(self, tmp_path):
+        def fake_collect(loaded, audio_path, language, vad):
+            raise RuntimeError("Library libcublas.so.12 is not found")
+
+        local_whisper_collect = local_whisper._collect
+        try:
+            local_whisper._collect = fake_collect
+            with pytest.raises(RuntimeError, match="libcublas"):
+                local_whisper._run(object(), tmp_path / "a.mp3", None)
+        finally:
+            local_whisper._collect = local_whisper_collect
+
+
+class TestDeviceFallbackLoop:
+    """transcribe_local()'s cuda->cpu retry. The failure it exists for happens
+    while the generator drains, not at load, so both shapes are exercised."""
+
+    def _pin_cuda(self, monkeypatch):
+        monkeypatch.setattr(local_whisper, "is_available", lambda: True)
+        monkeypatch.setattr(local_whisper, "resolve_runtime", lambda d, c: ("cuda", "int8_float16"))
+        monkeypatch.setattr(local_whisper, "_preload_cuda_libs", lambda: 0)
+
+    def test_falls_back_to_cpu_when_the_gpu_fails_at_load(self, tmp_path, monkeypatch, capsys):
+        self._pin_cuda(monkeypatch)
+        seen = []
+
+        def fake_load(model, device, compute_type):
+            seen.append((device, compute_type))
+            if device == "cuda":
+                raise RuntimeError("CUDA failed with error out of memory")
+            return _FakeModel([_FakeSegment(0.0, 1.0, "cpu result")])
+
+        monkeypatch.setattr(local_whisper, "_load_model", fake_load)
+        out = local_whisper.transcribe_local(tmp_path / "a.mp3")
+        assert seen == [("cuda", "int8_float16"), ("cpu", local_whisper.CPU_COMPUTE)]
+        assert out == [{"start": 0.0, "end": 1.0, "text": "cpu result"}]
+        assert "falling back to CPU" in capsys.readouterr().err
+
+    def test_falls_back_when_the_gpu_fails_mid_transcode(self, tmp_path, monkeypatch):
+        self._pin_cuda(monkeypatch)
+
+        def fake_load(model, device, compute_type):
+            if device == "cuda":
+                return _FakeModel([], raises=RuntimeError("Library libcublas.so.12 is not found"))
+            return _FakeModel([_FakeSegment(0.0, 1.0, "cpu result")])
+
+        monkeypatch.setattr(local_whisper, "_load_model", fake_load)
+        out = local_whisper.transcribe_local(tmp_path / "a.mp3")
+        assert out == [{"start": 0.0, "end": 1.0, "text": "cpu result"}]
+
+    def test_no_cpu_retry_when_cpu_was_the_first_choice(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(local_whisper, "is_available", lambda: True)
+        monkeypatch.setattr(local_whisper, "resolve_runtime", lambda d, c: ("cpu", "int8"))
+        seen = []
+
+        def fake_load(model, device, compute_type):
+            seen.append(device)
+            raise RuntimeError("nope")
+
+        monkeypatch.setattr(local_whisper, "_load_model", fake_load)
+        with pytest.raises(SystemExit, match="Local whisper failed"):
+            local_whisper.transcribe_local(tmp_path / "a.mp3")
+        assert seen == ["cpu"]
+
+    def test_both_attempts_failing_raises_systemexit_naming_the_last_error(self, tmp_path, monkeypatch):
+        self._pin_cuda(monkeypatch)
+
+        def fake_load(model, device, compute_type):
+            raise RuntimeError(f"{device} is broken")
+
+        monkeypatch.setattr(local_whisper, "_load_model", fake_load)
+        with pytest.raises(SystemExit, match="cpu is broken"):
+            local_whisper.transcribe_local(tmp_path / "a.mp3")

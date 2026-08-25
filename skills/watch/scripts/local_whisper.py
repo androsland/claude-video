@@ -224,7 +224,7 @@ def transcribe_local(
     if not is_available():
         raise SystemExit(
             "faster-whisper is not installed. Install the local backend with:\n"
-            "  pip install faster-whisper\n"
+            "  pip install \"faster-whisper>=1.0\"\n"
             "…or set GROQ_API_KEY / OPENAI_API_KEY to use an API backend instead."
         )
 

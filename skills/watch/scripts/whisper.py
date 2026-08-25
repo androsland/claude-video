@@ -513,7 +513,7 @@ def transcribe_video(
         setup_py = Path(__file__).resolve().parent / "setup.py"
         raise SystemExit(
             "No Whisper backend available. Either install the local backend "
-            "(`pip install faster-whisper`) for on-device transcription, or set "
+            "(`pip install \"faster-whisper>=1.0\"`) for on-device transcription, or set "
             "GROQ_API_KEY / OPENAI_API_KEY in the environment or in "
             f"~/.config/watch/.env. Run `python3 {setup_py}` to configure."
         )

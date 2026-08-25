@@ -45,7 +45,7 @@ ENV_TEMPLATE = """# /watch configuration
 # There are three backends. You need exactly one of them:
 #
 #   local  — runs on this machine, no key and no upload. Install with
-#            `pip install faster-whisper`. First use downloads the model
+#            `pip install "faster-whisper>=1.0"`. First use downloads the model
 #            (~3 GB for large-v3, ~500 MB for small) to the Hugging Face cache.
 #   groq   — whisper-large-v3 at a fraction of OpenAI's price, and faster in
 #            practice. Get a key: https://console.groq.com/keys
@@ -321,7 +321,7 @@ def cmd_check() -> int:
         parts.append(f"missing binaries: {', '.join(s['missing_binaries'])}")
     if not s["has_transcription"] and not s["setup_complete"]:
         parts.append(
-            "no Whisper backend (pip install faster-whisper, "
+            "no Whisper backend (pip install \"faster-whisper>=1.0\", "
             "or set GROQ_API_KEY / OPENAI_API_KEY)"
         )
     installer = Path(__file__).resolve()
@@ -394,7 +394,7 @@ def cmd_install() -> int:
     print("[setup] one step left: pick a Whisper backend. Either works — you need one.")
     print("")
     print("  On this machine, no account:")
-    print("    pip install faster-whisper")
+    print("    pip install \"faster-whisper>=1.0\"")
     print("    (downloads the model on first use: ~3 GB for large-v3, ~500 MB for small)")
     print("")
     print(f"  Or via an API — edit {CONFIG_FILE} and set one of:")
