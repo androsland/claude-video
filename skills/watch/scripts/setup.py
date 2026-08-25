@@ -46,7 +46,8 @@ ENV_TEMPLATE = """# /watch configuration
 #
 #   local  — runs on this machine, no key and no upload. Install with
 #            `pip install "faster-whisper>=1.0"`. First use downloads the model
-#            (2.9 GB for large-v3, 464 MB for small) to the Hugging Face cache.
+#            (2.9 GB for large-v3, 464 MB for small) to the Hugging Face cache;
+#            later runs re-check it there unless you set HF_HUB_OFFLINE=1.
 #   groq   — whisper-large-v3 at a fraction of OpenAI's price, and faster in
 #            practice. Get a key: https://console.groq.com/keys
 #   openai — the compatible fallback.
@@ -385,7 +386,8 @@ def cmd_install() -> int:
         print(f"[setup] ready. whisper backend: {backend or 'local'}")
         if has_local and not has_key:
             print("[setup] transcription runs on this machine — no API key needed.")
-            print("[setup] first use downloads the model to the Hugging Face cache.")
+            print("[setup] first use downloads the model to the Hugging Face cache;")
+            print("[setup] later runs re-check it there unless HF_HUB_OFFLINE=1 is set.")
         if installed_deps:
             print("[setup] installed dependencies; /watch is fully set up.")
         return 0

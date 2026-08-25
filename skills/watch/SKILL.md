@@ -83,7 +83,7 @@ python3 "${SKILL_DIR}/scripts/setup.py"
 
 On macOS with Homebrew, it auto-installs `ffmpeg` and `yt-dlp`. On Linux/Windows, it prints the exact install commands for the user to run. It scaffolds `~/.config/watch/.env` with commented placeholders and default watch settings at `0600` perms.
 
-**If no transcription backend is present after install** (`has_transcription: false`): use `AskUserQuestion` to offer the three options — run Whisper locally (`pip install "faster-whisper>=1.0"`; no account, no upload, slower, one-time model download), a Groq key (fast and cheap), or an OpenAI key. For a key, write it into `~/.config/watch/.env` on the matching `GROQ_API_KEY=` / `OPENAI_API_KEY=` line. If they don't want Whisper at all, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
+**If no transcription backend is present after install** (`has_transcription: false`): use `AskUserQuestion` to offer the three options — run Whisper locally (`pip install "faster-whisper>=1.0"`; no account, no upload, slower, model downloaded on first use), a Groq key (fast and cheap), or an OpenAI key. For a key, write it into `~/.config/watch/.env` on the matching `GROQ_API_KEY=` / `OPENAI_API_KEY=` line. If they don't want Whisper at all, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
 
 **First-run watch preference:** after the installer has scaffolded `~/.config/watch/.env`, use `AskUserQuestion` to ask one question:
 
@@ -225,7 +225,7 @@ The script gets a timestamped transcript in one of two ways:
 
 1. **Native captions (free, preferred).** yt-dlp pulls manual or auto-generated subtitles from the source platform if available.
 2. **Whisper fallback.** If no captions came back (or the source is a local file), the script extracts audio (`ffmpeg -vn -ac 1 -ar 16000 -b:a 64k`, ~0.5 MB/min) and transcribes it with one of three backends:
-   - **`local`** — [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on this machine. No API key, no account, and the audio never leaves the machine. Install with `pip install "faster-whisper>=1.0"`; the model downloads once to the Hugging Face cache (2.9 GB for the `large-v3` default, 464 MB for `small`, 75 MB for `tiny`). Uses the GPU when one is usable and falls back to CPU otherwise.
+   - **`local`** — [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on this machine. No API key, no account, and the audio never leaves the machine. Install with `pip install "faster-whisper>=1.0"`; the model downloads on first use to the Hugging Face cache (2.9 GB for the `large-v3` default, 464 MB for `small`, 75 MB for `tiny`), and later loads still make a revision check against `huggingface.co` — see **Security & Permissions** for exactly what touches the network and when. Uses the GPU when one is usable and falls back to CPU otherwise.
    - **`groq`** — `whisper-large-v3`. Cheaper and faster than OpenAI. Get a key at console.groq.com/keys.
    - **`openai`** — `whisper-1`. The compatible fallback. Get a key at platform.openai.com/api-keys.
 

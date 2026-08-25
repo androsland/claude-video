@@ -10,7 +10,8 @@ came from.
 Why faster-whisper rather than openai-whisper: it is a CTranslate2 reimplementation,
 so it runs several times faster at the same accuracy, has no torch dependency
 (~2.5 GB saved), and quantizes to int8 so ``large-v3`` fits on a 4 GB GPU or a
-laptop CPU. Model weights download once to the Hugging Face cache.
+laptop CPU. Model weights download on first use to the Hugging Face cache; later loads
+still make a revision check against huggingface.co unless HF_HUB_OFFLINE=1.
 
 Nothing leaves the machine: no network call at transcription time, no key, no upload.
 """
