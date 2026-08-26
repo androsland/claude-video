@@ -234,6 +234,7 @@ Other knobs (passed to `scripts/moviola.py`):
 │       ├── whisper.py            # backend selection + Groq / OpenAI clients (pure stdlib)
 │       ├── local_whisper.py      # on-device backend (optional: faster-whisper)
 │       ├── config.py             # shared config (~/.config/moviola/.env)
+│       ├── untrusted.py          # structural fencing for values this program did not write
 │       ├── setup.py              # preflight + installer
 │       └── build-skill.sh        # build dist/moviola.skill for claude.ai upload (dev-only)
 ├── hooks/                        # SessionStart status hook (Claude Code only)
