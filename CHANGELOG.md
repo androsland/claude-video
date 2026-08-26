@@ -150,7 +150,13 @@ All notable changes to `/moviola` are documented here.
   writer guarantee at all), and two tests pin both halves of that contrast so the suite
   says so if it ever stops holding. The `or` chain it replaces had a second defect the
   report did not name: `"N/A"` is truthy, so an unparseable format duration was taken and
-  the stream that knew the answer was never asked.
+  the stream that knew the answer was never asked. Review of the guard itself found one
+  class it still let through, and the guard raised the very exception it exists to
+  prevent: a Python int has no maximum, and `float()` answers one too large for a double
+  with `OverflowError` rather than `ValueError`. That is exactly the shape `json.loads`
+  produces from a bare integer literal, so it is reachable on the yt-dlp half, where
+  `info.json` is parsed as real JSON rather than read as strings. `OverflowError` joins
+  the caught set and a 400-digit `duration` degrades to "unknown" like everything else.
 - **A failed download could report on the previous run's video.** `--out-dir` is documented
   and reused, so "a file named `video.*` is in this directory" never meant "this run
   downloaded it". Right filename, wrong film, no error anywhere.

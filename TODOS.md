@@ -471,6 +471,44 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   changed, the failover has to announce the second provider before the first byte goes
   out, the same way `_announce_upload` does today.
 
+- **`finite_float` guards its input and not its `default`.** (review of the bounded-failures
+  review, 2026-08-26) Both exit paths return `default` unexamined, so
+  `finite_float(x, float("inf"))` returns inf out of a function named for finiteness. It is
+  latent rather than live — every call site in the tree passes `0.0`, and the two that pass
+  a computed value (`frames.py:156` nests one call as the other's default) pass a value the
+  same guard already vetted. Filed because the name is the promise a future caller will read,
+  and nothing enforces it. Non-goal: this is not the magnitude entry below; a checked
+  `default` still would not bound `1e300`.
+
+- **Finiteness is not magnitude, and past 1,000,000 seconds the run dies inside ffmpeg.**
+  (review of the bounded-failures review, 2026-08-26) `finite_float` rejects nan and inf and
+  has no ceiling below them, so a large duration passes intact — and `auto_fps` turns it into
+  a very small fps rather than clamping. Measured: `auto_fps` holds the frame budget at 100
+  for every magnitude, so the budget is not the problem; the fps is. At a duration of exactly
+  1e6 the fps is `0.0001` and Python reprs it plainly, and at 1,000,001 it is
+  `9.99999000001e-05`, which `extract` interpolates into `-vf fps=...` verbatim. Real ffmpeg
+  answers `Unable to parse option value "1e-05" as video rate` and exits 1, so `extract`
+  raises `SystemExit: ffmpeg frame extraction failed: ...` — named and diagnosable, but a
+  dead run, and the message points at ffmpeg rather than at the duration that caused it.
+  1,000,000 seconds is 11.6 days, which a 24/7 archive stream can genuinely reach, so this is
+  not purely theoretical. Two fixes are separable and only the first is a bound: format the
+  fps as a decimal (`f"fps={fps:.6f}"`, or a rational `100/{duration}`) so ffmpeg can parse
+  whatever `auto_fps` produces; and separately decide a maximum duration, which is a product
+  number nobody has picked. Non-goals: this is not the negative-duration entry below, and it
+  is not the `0.0` sentinel — both are about values ffmpeg would accept. It also says nothing
+  about the report, which prints a 303-character `format_time(1e300)` quite happily; that is
+  cosmetic beside the failure above.
+
+- **A negative duration passes the guard and renders as a negative clock.**
+  (review of the bounded-failures review, 2026-08-26) `-1.0` is finite, so `finite_float`
+  returns it and `format_time(-1.0)` produces `-1:59:59` — Python's `divmod` on a negative
+  float, not a bug in the formatter's arithmetic. Neither producer has been seen to emit one:
+  ffprobe would have to report a negative container duration and yt-dlp a negative extractor
+  duration. Rejecting negatives is a one-line change to the guard, but it is a semantic
+  decision — a duration of exactly `0.0` is already the unknown sentinel, so a rejected
+  negative would land on the same value and be indistinguishable from an absent key. Filed
+  with the sentinel entry it depends on rather than fixed alongside it.
+
 ## Documentation as a checked claim
 
 - **The README-to-parser direction is not checked, and cannot be.** (docs-are-checked

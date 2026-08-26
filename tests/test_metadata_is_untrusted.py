@@ -17,10 +17,25 @@ extract.
 `untrusted.finite_float` is the guard: anything that is not a finite number
 becomes the caller's default. Non-finite is included on purpose and is not
 pedantry — `float()` accepts `"nan"` and `"inf"` and returns them happily, and
-the crash then lands two functions away in `_clamp_fps`, where
-`int(round(nan))` raises `ValueError: cannot convert float NaN to integer` and
-`int(round(inf))` raises `OverflowError`, both naming a frame-budget helper the
-user never heard of rather than the metadata that was bad.
+the crash then lands two functions away in `_clamp_fps` as
+`int(round(nan))`, a `ValueError: cannot convert float NaN to integer` naming a
+frame-budget helper the user never heard of rather than the metadata that was
+bad. An INFINITE duration reaches it as nan rather than inf, and this file said
+otherwise until a review ran it: `auto_fps(inf)` and `auto_fps_focus(inf)` both
+raise that same ValueError, because an infinite duration makes `fps` 0.0 and
+`0.0 * inf` is nan. `int(round(inf))` genuinely is an OverflowError, but the
+place that expression occurs is `main()`'s `fps_override` branch, where a finite
+fps multiplies an infinite duration directly.
+
+Non-numeric, non-finite and OVERSIZED are three separate rejections and the
+third arrived last. A Python int has no maximum, `float()` raises
+`OverflowError` — not `ValueError` — on one too large for a double, and
+`json.loads` produces exactly that shape from a bare JSON integer literal. So
+the guard raised the very exception it exists to prevent, on the one producer
+whose input is real JSON rather than a string: `_read_info` at
+`download.py:178`. `TestTheGuardItself::test_an_oversized_int_becomes_the_default`
+is the pin, and it asserts the premise (`float(10**400)` is an `OverflowError`)
+alongside the fix so a future Python that changed that would fail loudly here.
 
 **The premise of the original finding was wrong, and correcting it is half of
 what this file pins.** TODOS.md recorded this as "a container that reports `N/A`
@@ -127,10 +142,39 @@ class TestTheGuardItself:
         ids=["nan", "inf", "neg-inf", "Infinity", "nan-float", "inf-float"],
     )
     def test_non_finite_numbers_become_the_default(self, value):
-        # `float()` accepts every one of these. Left alone they reach
-        # `_clamp_fps`, where int(round(...)) raises on both.
-        assert float(value) is not None  # the point: float() does NOT reject them
+        # `float()` accepts every one of these — that is the point, and it is
+        # why `math.isfinite` has to run afterwards rather than the try/except
+        # carrying the whole guard.
+        #
+        # This asserted `float(value) is not None`, which is true of everything
+        # `float()` returns and could only ever fail by raising. It pinned
+        # "float() does not reject them" while reading as though it pinned
+        # something about the result.
+        assert not math.isfinite(float(value))
         assert untrusted.finite_float(value, 0.0) == 0.0
+
+    @pytest.mark.parametrize(
+        "value",
+        [10**400, -(10**400), int("9" * 400)],
+        ids=["huge-int", "huge-negative-int", "long-digit-int"],
+    )
+    def test_an_oversized_int_becomes_the_default(self, value):
+        # A Python int has no maximum, and `float()` raises OverflowError —
+        # NOT ValueError — when asked to convert one that will not fit a
+        # double. `except (TypeError, ValueError)` therefore let it straight
+        # through, and the exception this module exists to prevent escaped the
+        # guard written to prevent it.
+        #
+        # Reachable, and only on the yt-dlp half: `_read_info` is
+        # `json.loads` over `video.info.json` (download.py:178), and a bare
+        # JSON integer literal becomes an unbounded Python int. ffprobe's JSON
+        # writer emits `duration` and `size` as strings, and a long digit
+        # STRING is safe by a different route — `float()` returns `inf` and
+        # `math.isfinite` rejects it — so this is the yt-dlp path alone.
+        with pytest.raises(OverflowError):
+            float(value)  # the premise: it is not a ValueError
+        assert untrusted.finite_float(value, 0.0) == 0.0
+        assert moviola.metadata_from_info({"duration": value})["duration_seconds"] == 0.0
 
     @pytest.mark.parametrize(
         "value,expected",
