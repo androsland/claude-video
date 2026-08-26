@@ -670,8 +670,13 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `release.yml` has never executed once in this repository. `gh run list` returns no run
   of any workflow, ever — the five `v*` tags on origin arrived *with the fork* rather
   than through a push, so no `push: tags` event has ever fired here. Cutting `v0.3.0`
-  is that workflow's first ever run, and it will run with the defects filed under
-  "Release workflow" below still in it. Pushing a tag publishes a GitHub release to the
+  is that workflow's first ever run. **Updated 2026-08-26:** it will no longer run
+  with the six defects formerly filed under "Release workflow" — those are fixed and
+  pinned by `tests/test_the_release_is_reproducible.py`. That section was deleted and
+  rewritten as `### The file a tag executes is now checked` under `## Completed`; it was
+  not moved, so its wording there is a fresh account rather than the filed one. That changes what the first run executes; it does not make the first
+  run a second one. Every assertion behind those fixes reads the workflow as TEXT, so
+  the tag is still the first time anything in that file is EXECUTED. Pushing a tag publishes a GitHub release to the
   world, so it is deliberately not automated:
   `git tag -a v0.3.0 -m "v0.3.0"`, then push that tag.
   **This entry closes when that tag exists, not when this PR merges** — until then
@@ -754,15 +759,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   cheap answer if it bites is pinning `runs-on` to a specific image rather than
   loosening the assertions; the assertions are the product.
 
-- **`softprops/action-gh-release@v2` in `release.yml` is a mutable tag under
-  `contents: write`.** (security review of ci/run-the-suite, 2026-08-26) Semgrep
-  `p/github-actions` flags mutable tags on all four actions used in this
-  repository; three are first-party `actions/*` running under `contents: read`
-  with no secrets, which is why they were adjudicated NO CHANGE. The fourth is
-  third-party and runs with a write token at publish time, which is the one
-  worth a SHA pin. Out of scope for `ci/run-the-suite` — it is a different
-  workflow and CLAUDE.md keeps executable-behaviour changes in their own PR.
-
 - **`test_ci_runs_the_whole_suite.py` reads the workflow as text, not as YAML.**
   (ci/run-the-suite, 2026-08-26; narrowed by review 2026-08-26) Two of the
   permissive cases are now closed — a name in a `#` comment and a name in a
@@ -844,56 +840,65 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   the subtree. Fixing it without extending that test to the root archive would be an
   unpinned change at the tail of a branch that is otherwise ready.
 
-## Release workflow
-
-Everything here is a defect in `.github/workflows/release.yml`, which has **never run**
-— see the README download entry above. It is filed separately and not fixed on the
-release branch because CI logic is executable behaviour and gets its own PR rather than
-riding along behind prose.
-
-- **Nothing checks the tag against the version the skill actually ships.**
-  (release staging, 2026-08-26) The workflow never compares `${GITHUB_REF_NAME#v}` to
-  the `version:` in `skills/moviola/SKILL.md` frontmatter or to either `plugin.json`.
-  The suite pins those four to each other, so a mismatch cannot exist *inside* the repo
-  — but the tag is outside it, which `test_the_docs_are_checked.py:205` already states
-  as a NON-GOAL: "It does NOT check the version against a git tag or a published
-  release." Tagging `v0.3.1` on a tree that says `0.3.0` publishes a release whose asset
-  contradicts its own name, and nothing anywhere notices. The workflow is the only place
-  that can close this, which is why it is filed here and not there.
-
-- **`tags: - "v*"` publishes a pre-release as `latest`, which is where the README
-  sends people.** (release staging, 2026-08-26) `v*` matches `v0.3.0-rc1`, and the job
-  hardcodes `prerelease: false`, so an rc tag becomes a full release and takes over
-  `/releases/latest` — the exact URL `README.md:104` and `README.md:136` point at. Fix
-  is either a stricter pattern (`v[0-9]+.[0-9]+.[0-9]+`) or deriving `prerelease` from
-  whether the ref contains a hyphen.
-
-- **A tag spelled without the `v` triggers nothing, silently.** (release staging,
-  2026-08-26) This is not hypothetical: `0.1.0` is on origin right now alongside four
-  `v`-prefixed siblings, so the spelling has already been got wrong once in this repo's
-  history. A release cut that way produces no run, no asset and no error — the person
-  cutting it has to notice the absence.
-
-- **`generate_release_notes: true` will synthesise notes from upstream churn.**
-  (release staging, 2026-08-26) GitHub builds those notes from commits since the last
-  release. There is no previous release *here*, and the fork carries upstream's history,
-  so the first run produces notes describing `bradautomates/claude-video`'s commits and
-  ignores the hand-written `CHANGELOG.md` entry that exists precisely to say what
-  changed. Use `body_path: CHANGELOG.md` or an extracted section instead.
-
-- **`softprops/action-gh-release@v2` is a floating major tag, not a pinned SHA.**
-  (release staging, 2026-08-26) The job holds `contents: write`, so whatever that tag
-  resolves to at run time can write releases and tags in this repo. Pin to a commit SHA
-  with the version in a trailing comment. (`actions/checkout@v4` is the same shape and
-  the same fix; it is first-party, which lowers the odds, not the blast radius.)
-
-- **No `concurrency:` group, and `fetch-depth: 0` buys nothing.** (release staging,
-  2026-08-26) Two tags pushed together run two jobs racing to create releases. And the
-  full-history fetch is there for a `git describe` the workflow does not do —
-  `build-skill.sh` archives `HEAD:skills/moviola`, which needs one commit. Minor next to
-  the rest; grouped here so the workflow PR closes them in one pass.
-
 ## Housekeeping
+
+- **Every action in both workflows is now SHA-pinned, and ALL THREE of those pins are
+  majors behind.** (fix/release-workflow, 2026-08-26) Verified against the tag each SHA
+  actually carries, via `gh api`: `actions/checkout` is pinned at `v4.4.0` while that
+  action's current release is **v7.0.1** — three majors; `actions/setup-python` at
+  `v5.6.0` against a current **v7.0.0** — two majors; `softprops/action-gh-release` at
+  `v2.6.2` against a current **v3.0.2** — one major. **The first version of this entry
+  said "two of those pins" and called `setup-python@v5.6.0` current. That was wrong when
+  it was written** — `v6.0.0` shipped 2025-09-04 and `v7.0.0` on 2026-07-20, both before
+  the date on this entry. The staleness of a pin is exactly the claim this file cannot
+  check for itself, which is why getting it wrong here is the predictable failure and not
+  a surprising one. The pin is the security property and it is in place; being behind is a
+  maintenance property and a separate question, which is why the majors were deliberately
+  NOT bumped in the same change. A major bump alters what the action does, so it needs its
+  own verification pass rather than riding along behind a security fix that is already
+  proven by mutation. Non-goal: nothing in the suite can tell a current pin from a stale
+  one. `test_the_release_is_reproducible.py` asserts that a `uses:` is a 40-character SHA
+  and that a trailing comment names a version; it cannot check that the comment is TRUE,
+  and it cannot reach the network to find out. The staleness above was measured by hand on
+  the date shown and nothing re-measures it. Dependabot on the `github-actions` ecosystem
+  is the mechanism that would, and it is not configured here.
+
+- **There is no dependency-update mechanism at all, for actions or for Python.**
+  (fix/release-workflow review, 2026-08-26) Verified by absence: no `.github/dependabot.yml`,
+  no `renovate.json`, no `.renovaterc`. The three SHA pins above are therefore frozen
+  until somebody bumps them by hand, and the entry above is the only record of how stale
+  they are. Dependabot on the `github-actions` ecosystem is the smallest thing that would
+  fix it, and it belongs with the CI-dependency-posture work rather than here, since the
+  same file would carry the `pip` ecosystem for the hash-pinned test requirements. Non-goal:
+  this is about the *mechanism*, not the bumps — filing it does not decide whether to take
+  `checkout@v7`, which alters what the action does and needs its own verification pass.
+
+- **`release.yml` has no `workflow_dispatch:`, so it cannot be rehearsed without cutting a
+  tag.** (fix/release-workflow review, 2026-08-26) Verified by absence: `grep -rn
+  workflow_dispatch .github/` returns nothing. Every assertion in
+  `test_the_release_is_reproducible.py` reads the file as TEXT, so the `v0.3.0` push is
+  still the first time any of it EXECUTES — and the only way to find out is to publish a
+  real release to the world. A `workflow_dispatch:` with a tag input would let the guard,
+  the CHANGELOG extraction and `build-skill.sh` all run for real first. It was neither
+  filed nor rejected in the original review; it is filed now so the decision is a decision.
+  Non-goal: a dispatch run still would not exercise the `push: tags` trigger itself, which
+  is the one thing that can only be tested by tagging.
+
+- **Round 1 stacked three branches and the stack collapsed; the remedy is to never
+  stack.** (loop round 1, 2026-08-26) Three PRs were opened with each based on the one
+  before it rather than on `main`. When the base merged, the dependents' diffs then
+  carried the parent's commits, so each one's file list stopped matching what it claimed
+  to change, and the recovery cost more than the three PRs would have. Two things made it
+  worse and both are worth writing down: a `MERGED` state from `gh pr view` is not
+  evidence the commits reached `main` — check
+  `git merge-base --is-ancestor <mergeCommit> origin/main` as well — and deleting a base
+  branch that an open PR still names CLOSES that PR, which is why
+  `feat/local-whisper-backend` must never be deleted while PR #169 is open upstream. The
+  remedy in force since: every branch bases on current `origin/main`, one PR at a time,
+  and the next does not start until the previous is merged AND on `main`. Non-goal: this
+  is not an argument against bundling — related work still accumulates as separate commits
+  on ONE branch. It is an argument against a branch whose base is another unmerged branch,
+  which is a different shape.
 
 - **`moviola.py` resolves its own directory differently from every other script.**
   (stderr review, 2026-08-26) `moviola.py:15` is `Path(__file__).parent.resolve()`;
@@ -912,33 +917,146 @@ riding along behind prose.
 - **This file is over the ~50KB archive threshold, and the split is deferred on a
   judgement, not on arithmetic.** (2026-08-26) Measured with
   `awk '/^## Completed/{f=1} f' TODOS.md | wc -c`: 98,552 bytes total, of which
-  `## Completed` is 39,314 — 40%, a genuine mass and not a rounding error. (At the merge
+  `## Completed` was 39,314 — 40%, a genuine mass and not a rounding error.
+  **Re-measured 2026-08-26 after `fix/release-workflow`: 130,470 total / 51,222
+  completed = 39%.** The ratio barely moved while the file grew 32KB, which is the
+  point — both halves grow, so waiting does not make the split cheaper. (At the merge
   base for the stderr branch it was 53,933 / 51.2%; both halves have grown since, the
   live sections faster than the completed one.)
   **The previous version of this entry said the split would "move nothing" because there
   are "only 4 entries". That was an eyeballed count and it decided the outcome.**
-  `## Completed` holds 6 `###` subsections *and* 26 bulleted findings, and the archive
-  rule — keep the 5 most recent — never says which of those is an entry. Counted by
-  subsection, one moves and the file barely shrinks. Counted by bullet, 21 of 26 move
-  and roughly 21KB with them, so "moving them would move nothing" is false by very
-  nearly the entire payoff of the split. The ambiguity is the finding; the arithmetic was never the
-  reason. (The count was 4 subsections when this was written and is 6 now; nothing
-  re-measures it, which is why it is stated with its date.)
-  The actual reason to defer: all 26 came from one investigation on one day, and 20,185
-  of the 39,314 bytes are still a single subsection. (That figure read 20,097 when this
-  entry was last written and nothing has edited that subsection since, so the two
-  measurements used different boundaries; this one is the bytes from its `###` heading to
-  the next one.) Archiving by bullet would cut that
-  investigation in half across two files and leave the surviving five as orphans of an
+  `## Completed` holds 8 `###` subsections *and* 32 bulleted findings, and the archive
+  rule — keep the 5 most recent — never says which of those is an entry. Measured
+  2026-08-26 against a section that is newest-first: counted by subsection, 3 move and
+  **25,412** bytes go with them; counted by bullet, 27 move and **47,251** of the 51,222
+  bytes go — 92% of the section against 50%. So the reading of "entry" decides a 21KB
+  difference in what gets archived. **The earlier version of this entry said one
+  subsection moves and "the file barely shrinks", which was already false when written**
+  — the single oldest subsection is 20,097 bytes on its own, half the section it sat in.
+  The ambiguity is the finding; the arithmetic was never the reason to defer, and every
+  time it has been eyeballed here it has been wrong. (Subsections read 4 when this entry
+  was first written, 6 at the previous re-measure, 8 now; nothing re-measures it, which
+  is why every figure is stated with its date and its command.)
+  The actual reason to defer: 20,097 of the 51,222 bytes are still a single subsection
+  (`### The report's fencing was built from the exploit, not from the boundary`, measured
+  from its `###` heading to the next one). Archiving by bullet would cut that
+  investigation in half across two files and leave the survivors as orphans of an
   argument that lives elsewhere. Cut at the next *distinct* body of work, when there is
-  a seam to cut along. Until then the file stays over the threshold for a reason
-  archiving cannot fix.
+  a seam to cut along. **That seam now exists (2026-08-26):** `### The file a tag
+  executes is now checked` came from a different branch on a different question, so
+  the stated reason for deferring — that every completed entry belonged to one
+  investigation — has stopped being true. The split is queued as its own change
+  rather than folded into this one, because archiving is a whole-file rewrite and
+  bundling it behind a workflow fix is exactly the review that does not happen.
   When it does run, the entries here carry reversed decisions worth lifting into
   `AGENTS.md` as constraints rather than leaving as narrative — the `find_spec`
   rejection and the ambient-key rule are both in that class. Nothing verifies that
   extraction step, so a pass that archives without lifting them is a silent regression.
 
 ## Completed
+
+### The file a tag executes is now checked
+
+(fix/release-workflow, 2026-08-26)
+
+**`.github/workflows/release.yml` went from 31 lines that had never run to 201 lines
+pinned by the 31 tests in `tests/test_the_release_is_reproducible.py`.** All six defects filed under the
+former `## Release workflow` section are closed, and the seventh entry — the
+security review's *"`softprops/action-gh-release@v2` in `release.yml` is a mutable tag
+under `contents: write`"*, filed separately under `## Documentation as a checked claim` —
+is closed by the same remedy and swept with them.
+
+What changed, finding by finding:
+
+- **The tag is now compared to the version this tree ships.** A `run:` step reads
+  `github.ref_name`, strips the `v`, then strips everything from the FIRST hyphen
+  onwards — `${VERSION%%-*}`, which is not an `-rc`-specific rule and does not care what
+  follows — and fails the job unless all three of `skills/moviola/SKILL.md`, `.claude-plugin/plugin.json` and
+  `.codex-plugin/plugin.json` carry that exact version. The suite already pinned those
+  three to each other; the tag is the fourth version and the only one outside the
+  repository, which `test_the_docs_are_checked.py` still names as an explicit NON-GOAL.
+  This step is the only place that could close it.
+- **A pre-release stays a pre-release.** `prerelease:` is derived —
+  `contains(github.ref_name, '-')` — rather than hardcoded `false`, so `v0.3.0-rc1` no
+  longer takes over `/releases/latest`, which is the URL `README.md` sends people to.
+- **A tag spelled without the `v` is now loud instead of silent.** The trigger was
+  WIDENED rather than narrowed — a block sequence of `v*` and `[0-9]*`, not the
+  flow-style `["v*", "[0-9]*"]` an earlier draft of this entry rendered. `0.1.0` is on
+  origin right now beside four `v`-prefixed siblings, so that spelling has been got wrong
+  here already, and under a `v*`-only filter it produced **no workflow run**: upstream's
+  `release.yml` has four runs on record — `v0.1.1`, `v0.1.2`, `v0.1.3`, `v0.2.0` — and
+  none for `0.1.0`. **A release for `0.1.0` exists anyway, published by hand fourteen
+  minutes before the first run ever fired**, so the earlier "no run, no asset and no
+  error" was wrong on the asset: the silence was real and somebody paid for it manually.
+  Matching the bare-numeric shape turns that silence into a red run, because the guard
+  step rejects anything that is not `vX.Y.Z`. That last clause was **false of the glob
+  the first pass shipped** — `case v[0-9]*.[0-9]*.[0-9]*` also accepts `v1.2.3.4` and
+  `v1.2.3-anything`, since `.` is literal in a shell pattern and each trailing `*`
+  swallows the rest. It is true of the anchored `grep -qE` that replaced it. Widening a
+  trigger to make a mistake fail is only safe BECAUSE the guard exists; the two changes
+  are one change and must not be separated. Scope: this closes ONE mis-spelling shape.
+  `V0.3.0`, `release-0.3.0` and `moviola-v0.3.0` still match no filter and still trigger
+  nothing at all, and nothing here can see a tag that was never pushed.
+- **Release notes come from this repository.** `generate_release_notes: true` built the
+  body from commits since the last release — of which there are none here, on a fork
+  carrying upstream's history — so the first run would have described
+  `bradautomates/claude-video`'s commits. A step now extracts the matching `## [x.y.z]`
+  section from `CHANGELOG.md`, fails if it is missing or empty, and hands it over as
+  `body_path`.
+- **Every `uses:` in BOTH workflows is a 40-character commit SHA with the version in a
+  trailing comment.** The release job holds `contents: write`, so whatever a floating tag
+  resolved to at run time had release- and tag-write access. The assertion is structural,
+  not a list: the regex matches only `owner/repo@ref` and therefore cannot fire on a
+  `./local` or `docker://` step, so the exemption cannot rot into a stale allowlist.
+- **The release cannot race itself, and cannot run forever.** The group is
+  `${{ github.workflow }}-release` with `cancel-in-progress: false` **and `queue: max`**,
+  because a cancelled publish can leave a created release with no asset attached.
+  **`cancel-in-progress: false` alone does not mean "releases queue", which is what the
+  first pass shipped and what the first version of this entry claimed.** It protects the
+  RUNNING job; GitHub keeps at most ONE pending run per group by default, and a third
+  arrival cancels the one already waiting — so `git push origin --tags` carrying three
+  new tags loses the middle release with a status of *cancelled*, which emails nobody.
+  `queue: max` raises the pending limit to 100. It is a validation error alongside
+  `cancel-in-progress: true`, so the two have to stay set together. The group carries
+  `github.workflow` because group names are repo-scoped and case-insensitive: another
+  workflow naming its group `release` would otherwise queue behind — or cancel — a
+  publish in flight. `fetch-depth: 0` is gone; `build-skill.sh` archives
+  `HEAD:skills/moviola` and needs exactly one commit. `persist-credentials: false` was
+  added: `actions/checkout` defaults it to TRUE, which left this job's `contents: write`
+  token in `.git/config` while `build-skill.sh` — a script read from the TAGGED tree, not
+  from `release.yml` — ran below it. A `timeout-minutes: 10` was added that nothing had
+  filed: GitHub's default is 360 minutes, and a wedged job under `contents: write` should
+  not sit burning a runner. `fail_on_unmatched_files: true` was added for the same class
+  of reason: it defaults to FALSE, so a `files:` pattern that quietly stopped matching
+  would have created the release with no asset attached and still gone green.
+
+**Mutation-verified: 27 of 27, plus 4 legitimate configurations proved NOT to fire.**
+The 27 are the 14 below plus one per finding from the review round that followed, and the
+must-not-fire set is the other half of the harness: a major-only pin comment (`# v4`), a
+third and wider tag pattern, an explicit `continue-on-error: false`, and a longer job
+timeout are all legitimate and all stay green. One of the new mutations survived its
+first run and the test was the weak half, not the mutation: `body_path: notes.md` passed
+because the writer check was a substring test and `"notes.md" in "release-notes.md"` is
+true. It now compares with a path boundary. The first pass reported 13 of 14 with one
+survivor —
+"delete the tag/version guard step entirely" — and the survivor was a BAD MUTATION, not a
+weak test: it replaced only the step's `name:` line and left the whole `run:` body in the
+file, so the text assertions still matched it. Rewritten to delete the step's full block,
+it is killed by six tests. But it landed on a real seam, which is now closed rather than
+excused: `test_the_guard_lives_in_one_step_that_always_runs` requires exactly one step to
+mention the ref AND all three version files, and requires that step to carry no `if:` at
+all. Two further mutations were added off the back of it — a guard narrowed to two of the
+three files, and a guard that compares but exits 0 — and both die.
+
+**The limit worth carrying forward: every assertion here reads the workflow as TEXT.**
+None of it executes, so the `v0.3.0` tag is still that workflow's first ever run. A step
+behind a false `if:` is invisible to this file everywhere except the guard, and that limit
+is recorded in the NON-GOALS list in the module docstring — the per-test docstrings carry
+the narrower note that each `if:`/`continue-on-error:` check is scoped to ONE step. The
+review round added the two adjacent holes the carve-out did not cover: a job-level
+`if: false` (which disables the guard without touching it) and a `run:`-bearing step
+inserted ABOVE the guard (which un-gates the job by ordering, since `contents: write` is
+granted before any step runs). Both are now asserted.
 
 ### CI runs the suite
 

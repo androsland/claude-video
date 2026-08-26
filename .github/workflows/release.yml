@@ -1,9 +1,58 @@
 name: Release
 
+# What a tag executes. This job holds `contents: write`, so everything it runs
+# is pinned to a commit SHA rather than to a tag that can be re-pointed at any
+# commit at any time.
+#
+# The trigger is deliberately WIDER than the tags this repository publishes.
+# `0.1.0` is on origin beside four v-prefixed siblings, and under a `v*`-only
+# filter it produced NO WORKFLOW RUN: upstream's release.yml has four runs on
+# record — v0.1.1, v0.1.2, v0.1.3, v0.2.0 — and none for `0.1.0`. A release
+# for it exists anyway, published BY HAND fourteen minutes before the first
+# run ever fired. So the silence was real and somebody paid for it manually;
+# every tag after that one carried the `v`. Matching the bare-numeric shape
+# too turns that silence into a red run.
+#
+# What this closes is ONE mis-spelling shape. `V0.3.0`, `release-0.3.0` and
+# `moviola-v0.3.0` still match no filter and still trigger nothing at all, and
+# nothing here can see a tag that was never pushed.
+#
+# ORDERING IS LOAD-BEARING. The guard below gates the job because it is the
+# first step that runs anything, and `contents: write` is granted before it.
+# Inserting any `run:`, cache or setup step above it silently un-gates the job.
+#
+# tests/test_the_release_is_reproducible.py asserts all of this. Read its
+# NON-GOALS before trusting it: it reads this file as text and cannot run it,
+# so the first tag is still the first execution.
+
 on:
   push:
     tags:
       - "v*"
+      - "[0-9]*"
+
+# Releases queue; they never cancel. A cancelled publish can leave a created
+# release with no asset attached, which is a worse outcome than a slow one —
+# and unlike a test run, a release is a record rather than a preview to be
+# replaced. One group for the whole workflow, not one per ref: two tags racing
+# to create releases is precisely what this prevents.
+#
+# `cancel-in-progress: false` ALONE IS NOT ENOUGH, which is easy to get wrong.
+# It protects the RUNNING job, but GitHub keeps at most ONE pending run per
+# group by default and a third arrival cancels the one already waiting — so
+# `git push origin --tags` carrying three new tags loses the middle release
+# with a status of *cancelled*, which emails nobody. `queue: max` raises that
+# pending limit to 100. It is a validation error alongside
+# `cancel-in-progress: true`, which is why the two are set together here and
+# have to stay that way.
+#
+# The group name is repo-scoped and case-insensitive, so it carries
+# `github.workflow`: another workflow naming its group `release` would
+# otherwise queue behind — or cancel — a publish in flight.
+concurrency:
+  group: ${{ github.workflow }}-release
+  cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: write
@@ -11,21 +60,142 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    # GitHub's default is 360 MINUTES. Nothing here should take more than a
+    # couple; a wedged `apt`, a hung network fetch or a stuck archive would
+    # otherwise sit burning a runner under `contents: write` until someone
+    # looked. Same reasoning as tests.yml, tighter budget because this job
+    # installs nothing.
+    timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # No `fetch-depth:` — build-skill.sh archives `HEAD:skills/moviola`,
+        # which needs exactly one commit. The previous `fetch-depth: 0` was
+        # there for a `git describe` this workflow does not do, and on a fork
+        # carrying upstream's whole history it was the slowest step in the job.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          fetch-depth: 0
+          # The job's `contents: write` token is written into `.git/config` by
+          # default and would still be sitting there while build-skill.sh runs
+          # below — a script read from the TAGGED tree, not from this file.
+          # It needs no network git: `git archive HEAD:...` and the dirty-tree
+          # checks are all local.
+          persist-credentials: false
 
-      - name: Build .skill artifact
+      - name: Check the tag against the version this tree ships
+        # The suite pins SKILL.md's frontmatter and both plugin.json files to
+        # each other, so a version mismatch cannot exist INSIDE the repository.
+        # The tag is the fourth version and the only one that lives outside it,
+        # which test_the_docs_are_checked.py states as an explicit NON-GOAL:
+        # "It does NOT check the version against a git tag or a published
+        # release." This step is the only place that can close it. Tagging
+        # v0.3.1 on a tree that says 0.3.0 must fail here, not publish.
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
+          # A glob cannot express this. `.` is literal in a shell pattern and
+          # each trailing `*` swallows the rest, so `v[0-9]*.[0-9]*.[0-9]*`
+          # also accepts `v1.2.3.4`, `v1.2.3-anything` and `v1/../2.3.4`.
+          # Every one of those dies at the version comparison below, so
+          # nothing wrong was ever going to publish — but the operator saw a
+          # version-mismatch error instead of "not vX.Y.Z", and the comment
+          # above claimed a strictness the code did not have.
+          if ! printf '%s' "$TAG" | grep -qE '^v[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::tag $TAG is not vX.Y.Z, so there is nothing to publish. Delete it and re-tag."
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          VERSION="${VERSION%%-*}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          python3 - "$VERSION" <<'CHECK'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          want = sys.argv[1]
+          wrong = []
+
+          skill = pathlib.Path("skills/moviola/SKILL.md").read_text(encoding="utf-8")
+          found = re.search(r'^version:\s*"?([^"\s]+)"?', skill, re.MULTILINE)
+          got = found.group(1) if found else None
+          if got != want:
+              wrong.append("skills/moviola/SKILL.md says " + str(got))
+
+          for name in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
+              got = json.loads(pathlib.Path(name).read_text(encoding="utf-8")).get("version")
+              if got != want:
+                  wrong.append(name + " says " + str(got))
+
+          if wrong:
+              print("::error::tag says " + want + " but " + "; ".join(wrong))
+              sys.exit(1)
+          print("tag " + want + " matches all three version sources")
+          CHECK
+
+      - name: Extract the release notes from CHANGELOG.md
+        # PRE-RELEASES LOOK UP THE BASE VERSION. `VERSION` has had everything
+        # from the first hyphen stripped, so `v0.3.0-rc1` reads `## [0.3.0]`
+        # and publishes the final version's notes verbatim. That is intended —
+        # an rc is a rehearsal of that section — but it means an rc cannot be
+        # cut before all three version files already say `0.3.0` and
+        # CHANGELOG.md already carries the finished section. A heading spelled
+        # `## [0.3.0-rc1]` would never be consulted.
+        #
+        # `generate_release_notes: true` used to build the body from commits
+        # since the last release. There is no previous release here, and this
+        # is a fork carrying bradautomates/claude-video's history, so the
+        # first run would have described upstream's commits and ignored the
+        # hand-written entry that exists to say what actually changed.
+        run: |
+          set -euo pipefail
+          python3 - "$VERSION" <<'NOTES'
+          import pathlib
+          import re
+          import sys
+
+          want = sys.argv[1]
+          lines = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+
+          heading = re.compile(r"^## \[" + re.escape(want) + r"\]")
+          start = next((i for i, line in enumerate(lines) if heading.match(line)), None)
+          if start is None:
+              print("::error::CHANGELOG.md has no section for " + want)
+              sys.exit(1)
+
+          body = []
+          for line in lines[start + 1:]:
+              if line.startswith("## ["):
+                  break
+              body.append(line)
+
+          text = "\n".join(body).strip()
+          if not text:
+              print("::error::the CHANGELOG.md section for " + want + " is empty")
+              sys.exit(1)
+
+          pathlib.Path("release-notes.md").write_text(text + "\n", encoding="utf-8")
+          print("release notes: " + str(len(text)) + " characters")
+          NOTES
+
+      - name: Build the .skill artifact
+        run: |
+          set -euo pipefail
           bash skills/moviola/scripts/build-skill.sh
           test -f dist/moviola.skill
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/moviola.skill
-          generate_release_notes: true
+          # Defaults to FALSE, which would create the release with no asset
+          # attached and still go green. The `test -f` above catches the same
+          # case one step earlier; this is the backstop for a `files:` pattern
+          # that quietly stops matching.
+          fail_on_unmatched_files: true
+          body_path: release-notes.md
+          # Derived, not hardcoded. `prerelease: false` meant a v0.3.0-rc1 tag
+          # published as a full release and took over /releases/latest — the
+          # exact URL README.md sends people to.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           draft: false
-          prerelease: false
