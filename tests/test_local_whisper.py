@@ -7,7 +7,9 @@ machine where faster-whisper or CUDA is absent.
 """
 from __future__ import annotations
 
+import gc
 import subprocess
+import weakref
 from pathlib import Path
 
 import pytest
@@ -52,6 +54,28 @@ class TestResolveRuntime:
         monkeypatch.setenv("MOVIOLA_WHISPER_COMPUTE", "int8")
         assert local_whisper.resolve_runtime() == ("cpu", "int8")
 
+    @pytest.mark.parametrize("value", ["cuda:0", "gpu", "mps", "CUDA:1", "metal"])
+    def test_unknown_devices_are_rejected_not_silently_demoted(self, value, monkeypatch):
+        # Each of these used to fall through every branch and land on "cpu" with
+        # nothing printed, so asking for a GPU got a CPU transcode several times
+        # slower and the user had no way to tell.
+        monkeypatch.setenv("MOVIOLA_WHISPER_DEVICE", value)
+        with pytest.raises(SystemExit, match="Unknown Whisper device"):
+            local_whisper.resolve_runtime()
+
+    def test_a_blank_device_still_means_auto(self, monkeypatch):
+        # Blank-but-present is what a secret sync or a half-filled .env produces;
+        # it must read as "unset", not as an unknown device.
+        monkeypatch.setenv("MOVIOLA_WHISPER_DEVICE", "   ")
+        monkeypatch.delenv("MOVIOLA_WHISPER_COMPUTE", raising=False)
+        device, _ = local_whisper.resolve_runtime()
+        assert device in ("cpu", "cuda")
+
+    def test_case_and_padding_are_tolerated(self, monkeypatch):
+        monkeypatch.setenv("MOVIOLA_WHISPER_DEVICE", "  CPU  ")
+        monkeypatch.delenv("MOVIOLA_WHISPER_COMPUTE", raising=False)
+        assert local_whisper.resolve_runtime() == ("cpu", local_whisper.CPU_COMPUTE)
+
     def test_falls_back_to_cpu_when_ctranslate2_missing(self, monkeypatch):
         import builtins
 
@@ -75,6 +99,24 @@ class TestPreloadCudaLibs:
         # Best-effort by contract: a machine with no nvidia wheels must get 0,
         # not an exception, because the CPU path depends on this not blowing up.
         assert local_whisper._preload_cuda_libs() >= 0
+
+    def test_survives_a_site_module_without_getsitepackages(self, monkeypatch):
+        # Some virtualenv-provided `site` modules have no getsitepackages(), and
+        # the AttributeError is not a SystemExit — it escaped transcribe_local()
+        # and crashed the run instead of falling back to CPU.
+        def boom():
+            raise AttributeError("module 'site' has no attribute 'getsitepackages'")
+
+        monkeypatch.setattr(local_whisper.site, "getsitepackages", boom)
+        assert local_whisper._preload_cuda_libs() >= 0
+
+    def test_survives_both_probes_failing(self, monkeypatch):
+        def boom():
+            raise AttributeError("nope")
+
+        monkeypatch.setattr(local_whisper.site, "getsitepackages", boom)
+        monkeypatch.setattr(local_whisper.site, "getusersitepackages", boom)
+        assert local_whisper._preload_cuda_libs() == 0
 
 
 class TestVadProblemDetection:
@@ -234,6 +276,46 @@ class TestFocusedExtraction:
         )
         clipped = whisper.extract_audio(str(source), tmp_path / "clip.mp3", 5.0, 10.0)
         assert 4.0 < whisper.audio_duration(clipped) < 6.5
+
+    def test_a_range_past_the_end_of_the_video_is_an_error_not_silence(self, tmp_path: Path):
+        """ffmpeg exits 0 and writes a valid, header-only mp3 for an out-of-range
+        seek — measured at 333 bytes — so a `st_size == 0` check passes it through
+        and Whisper transcribes silence into an empty transcript with no
+        explanation. The message has to name the range, since that is the input
+        the user got wrong."""
+        source = tmp_path / "tone.mp3"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+             "-ar", "16000", "-ac", "1", str(source)],
+            check=True,
+        )
+        with pytest.raises(SystemExit, match="no audio for the requested range"):
+            whisper.extract_audio(str(source), tmp_path / "clip.mp3", 999.0, 1009.0)
+
+    def test_the_out_of_range_message_names_the_range(self, tmp_path: Path):
+        source = tmp_path / "tone.mp3"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+             "-ar", "16000", "-ac", "1", str(source)],
+            check=True,
+        )
+        with pytest.raises(SystemExit, match=r"999\.0s.*1009\.0s"):
+            whisper.extract_audio(str(source), tmp_path / "clip.mp3", 999.0, 1009.0)
+
+    def test_an_in_range_clip_is_not_caught_by_the_floor(self, tmp_path: Path):
+        # The guard must not fire on a legitimately short clip. One second at
+        # 64 kbps mono is ~8 kB, four times the floor.
+        source = tmp_path / "tone.mp3"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+             "-ar", "16000", "-ac", "1", str(source)],
+            check=True,
+        )
+        clipped = whisper.extract_audio(str(source), tmp_path / "clip.mp3", 1.0, 2.0)
+        assert clipped.stat().st_size > whisper.MIN_AUDIO_BYTES
 
     def test_segments_are_shifted_back_onto_the_video_timeline(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
@@ -492,3 +574,55 @@ class TestDeviceFallbackLoop:
         monkeypatch.setattr(local_whisper, "_load_model", fake_load)
         with pytest.raises(SystemExit, match="cpu is broken"):
             local_whisper.transcribe_local(tmp_path / "a.mp3")
+
+    def test_a_failing_cuda_preload_still_falls_back_to_cpu(self, tmp_path, monkeypatch, capsys):
+        """_preload_cuda_libs() ran outside the retry's try, so anything it raised
+        escaped transcribe_local() as a non-SystemExit — past the caller's
+        `except SystemExit` — instead of being the trigger for the CPU retry."""
+        monkeypatch.setattr(local_whisper, "is_available", lambda: True)
+        monkeypatch.setattr(local_whisper, "resolve_runtime", lambda d, c: ("cuda", "int8_float16"))
+
+        def boom() -> int:
+            raise AttributeError("module 'site' has no attribute 'getsitepackages'")
+
+        monkeypatch.setattr(local_whisper, "_preload_cuda_libs", boom)
+        seen = []
+
+        def fake_load(model, device, compute_type):
+            seen.append(device)
+            return _FakeModel([_FakeSegment(0.0, 1.0, "cpu result")])
+
+        monkeypatch.setattr(local_whisper, "_load_model", fake_load)
+        out = local_whisper.transcribe_local(tmp_path / "a.mp3")
+        # The cuda attempt never reached _load_model — the preload killed it.
+        assert seen == ["cpu"]
+        assert out == [{"start": 0.0, "end": 1.0, "text": "cpu result"}]
+        assert "falling back to CPU" in capsys.readouterr().err
+
+    def test_the_failed_gpu_model_is_released_before_the_cpu_one_loads(self, tmp_path, monkeypatch):
+        """Peak memory, not tidiness. Binding the exception to a name that
+        outlives the except block keeps its traceback, the traceback keeps this
+        frame, and the frame keeps `loaded` — so the dead CUDA model stayed
+        resident while the CPU retry allocated a second copy of the same weights.
+        That doubles peak usage in exactly the OOM case the retry exists for."""
+        self._pin_cuda(monkeypatch)
+        gpu_ref: list = []
+
+        def fake_load(model, device, compute_type):
+            if device == "cuda":
+                doomed = _FakeModel(
+                    [_FakeSegment(0.0, 1.0, "partial")],
+                    raises_mid_drain=RuntimeError("CUDA failed with error out of memory"),
+                )
+                gpu_ref.append(weakref.ref(doomed))
+                return doomed
+            # By the time the CPU model is being built, nothing may still be
+            # holding the GPU one.
+            gc.collect()
+            assert gpu_ref[0]() is None, "the failed CUDA model was still resident"
+            return _FakeModel([_FakeSegment(0.0, 1.0, "cpu result")])
+
+        monkeypatch.setattr(local_whisper, "_load_model", fake_load)
+        assert local_whisper.transcribe_local(tmp_path / "a.mp3") == [
+            {"start": 0.0, "end": 1.0, "text": "cpu result"}
+        ]

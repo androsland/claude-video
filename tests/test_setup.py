@@ -136,12 +136,43 @@ def test_local_backend_alone_is_ready(tmp_path):
     assert js["whisper_backend"] == "local"
 
 
-def test_api_key_named_over_local_in_status(tmp_path):
-    """With both available, the reported backend matches resolve_backend()."""
+def test_local_named_over_an_api_key_in_status(tmp_path):
+    """With both available, the reported backend matches resolve_backend() —
+    which is local-first, so the status report has to say local too."""
     _write_env(tmp_path, "GROQ_API_KEY=sk-test-abc\n")
     js = json.loads(_run(["--json"], home=tmp_path, local_whisper=True).stdout)
-    assert js["whisper_backend"] == "groq"
+    assert js["whisper_backend"] == "local"
+    assert js["has_api_key"] is True
     assert js["has_local_whisper"] is True
+
+
+def test_status_honours_a_pin_to_an_api_backend(tmp_path):
+    """The pin used to be ignored entirely: `if not backend and has_local` never
+    looked at MOVIOLA_WHISPER, so a deliberate choice was overwritten by
+    whatever happened to be installed. SKILL.md contracts whisper_backend as
+    naming what would actually run."""
+    _write_env(tmp_path, "GROQ_API_KEY=sk-test-abc\nMOVIOLA_WHISPER=groq\n")
+    js = json.loads(_run(["--json"], home=tmp_path, local_whisper=True).stdout)
+    assert js["whisper_backend"] == "groq"
+
+
+def test_status_honours_a_pin_to_local(tmp_path):
+    _write_env(tmp_path, "GROQ_API_KEY=sk-test-abc\nMOVIOLA_WHISPER=local\n")
+    js = json.loads(_run(["--json"], home=tmp_path, local_whisper=True).stdout)
+    assert js["whisper_backend"] == "local"
+
+
+def test_a_pin_to_an_unusable_backend_reports_nothing_running(tmp_path):
+    """Pinned groq, no key, faster-whisper installed. Something IS installed, so
+    has_transcription stays true — but nothing would transcribe under this
+    config, and saying "ready"/"local" there is the same lie as naming the wrong
+    backend. can_proceed stays true: a frames-only run is still a usable run."""
+    _write_env(tmp_path, "MOVIOLA_WHISPER=groq\nSETUP_COMPLETE=true\n")
+    js = json.loads(_run(["--json"], home=tmp_path, local_whisper=True).stdout)
+    assert js["whisper_backend"] is None
+    assert js["status"] == "needs_key"
+    assert js["has_transcription"] is True
+    assert js["can_proceed"] is True
 
 
 def test_json_reports_whisper_setting(tmp_path):

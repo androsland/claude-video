@@ -39,6 +39,10 @@ GPU_COMPUTE = "int8_float16"
 GPU_COMPUTE_FALLBACK = "float16"
 CPU_COMPUTE = "int8"
 
+# The devices CTranslate2 actually has a backend for. Anything else is rejected
+# rather than quietly demoted — see resolve_runtime().
+DEVICES = frozenset({"auto", "cpu", "cuda"})
+
 
 def is_available() -> bool:
     """True if faster-whisper is importable (i.e. the user opted into local)."""
@@ -47,6 +51,14 @@ def is_available() -> bool:
     except Exception:
         return False
     return True
+
+
+def _first_set(*candidates: str | None) -> str:
+    """First candidate that is non-empty once stripped, lowercased. "" if none."""
+    for value in candidates:
+        if value and value.strip():
+            return value.strip().lower()
+    return ""
 
 
 def resolve_runtime(
@@ -60,8 +72,25 @@ def resolve_runtime(
     device and still fail at load time on missing cuDNN (common under WSL), which
     is why :func:`transcribe_local` also retries on CPU at runtime.
     """
-    want_device = (device or os.environ.get("MOVIOLA_WHISPER_DEVICE") or "auto").strip().lower()
-    want_compute = (compute_type or os.environ.get("MOVIOLA_WHISPER_COMPUTE") or "auto").strip().lower()
+    # Strip before the `or` chain, not after: a blank-but-present env var — what a
+    # half-filled .env or a secret sync produces — is truthy, so `x or default`
+    # would select the blank string and only the strip afterwards would reveal it,
+    # as an empty device name that matches nothing.
+    want_device = _first_set(device, os.environ.get("MOVIOLA_WHISPER_DEVICE"), "auto")
+    want_compute = _first_set(compute_type, os.environ.get("MOVIOLA_WHISPER_COMPUTE"), "auto")
+
+    # Anything unrecognised used to fall through every branch below and land on
+    # "cpu", so `MOVIOLA_WHISPER_DEVICE=cuda:0` — or `gpu`, or `mps` — asked for a
+    # GPU and silently got a CPU transcode several times slower, with nothing
+    # printed. CTranslate2 has no MPS backend and takes the device index
+    # separately, so none of those are typos we can honour; say so instead.
+    if want_device not in DEVICES:
+        raise SystemExit(
+            f"Unknown Whisper device {want_device!r}. "
+            f"Use one of: {', '.join(sorted(DEVICES))}. "
+            "(CTranslate2 has no Apple-Metal backend, and a device index like "
+            "'cuda:0' is not accepted here — set CUDA_VISIBLE_DEVICES to pick a card.)"
+        )
 
     resolved_device = "cpu"
     supported: set[str] = set()
@@ -107,11 +136,17 @@ def _preload_cuda_libs() -> int:
     CUDA major versions. It is best-effort: a system-wide CUDA install needs none
     of it, and every failure is ignored in favour of the CPU retry.
     """
-    bases = list(site.getsitepackages())
-    try:
-        bases.append(site.getusersitepackages())
-    except Exception:
-        pass
+    bases: list[str] = []
+    # Both are guarded, not just the second one: getsitepackages() is absent from
+    # some virtualenv-provided `site` modules, and an AttributeError raised here
+    # is not a SystemExit, so it would escape transcribe_local() entirely and
+    # crash the run instead of falling back to CPU.
+    for probe in (site.getsitepackages, site.getusersitepackages):
+        try:
+            found = probe()
+        except Exception:
+            continue
+        bases.extend([found] if isinstance(found, str) else found)
 
     libs = []
     for base in bases:
@@ -245,26 +280,42 @@ def transcribe_local(
     if resolved_device == "cuda":
         attempts.append(("cpu", CPU_COMPUTE))
 
-    last_error: Exception | None = None
+    last_error = ""
     for index, (attempt_device, attempt_compute) in enumerate(attempts):
-        if attempt_device == "cuda":
-            _preload_cuda_libs()
-        print(
-            f"[moviola] loading local whisper model '{model_name}' "
-            f"({attempt_device}/{attempt_compute})…",
-            file=sys.stderr,
-        )
+        loaded = None
         try:
+            # Inside the try, not before it: _preload_cuda_libs() walks
+            # site-packages and calls into the dynamic loader, and anything it
+            # raises has to be caught by the same retry that catches a failed
+            # load — otherwise it escapes as a non-SystemExit and skips the CPU
+            # fallback that exists precisely for a broken CUDA install.
+            if attempt_device == "cuda":
+                _preload_cuda_libs()
+            print(
+                f"[moviola] loading local whisper model '{model_name}' "
+                f"({attempt_device}/{attempt_compute})…",
+                file=sys.stderr,
+            )
             loaded = _load_model(model_name, attempt_device, attempt_compute)
             return _run(loaded, audio_path, language)
         except Exception as exc:
-            last_error = exc
+            # Keep the message, not the exception object. Binding `exc` to a name
+            # that outlives this block keeps its traceback alive, the traceback
+            # holds this frame, and this frame holds `loaded` — so the failed CUDA
+            # model would stay resident in VRAM while the CPU attempt loads a
+            # second copy of the same weights. That doubles peak memory in exactly
+            # the OOM case the retry exists to survive.
+            last_error = f"{type(exc).__name__}: {exc}"
             if index + 1 < len(attempts):
                 print(
                     f"[moviola] {attempt_device} backend failed "
-                    f"({type(exc).__name__}: {exc}) — falling back to CPU",
+                    f"({last_error}) — falling back to CPU",
                     file=sys.stderr,
                 )
+        finally:
+            # Same reason, for the non-exception path out of the loop and for the
+            # window between the failure and the next attempt's allocation.
+            loaded = None
 
     raise SystemExit(f"Local whisper failed ('{model_name}'): {last_error}")
 
