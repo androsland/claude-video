@@ -172,6 +172,21 @@ def extract_audio(
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
+    # The range is checked HERE rather than only in the CLI because this is where
+    # the numbers become an ffmpeg command line. moviola.py validates its own
+    # flags, but transcribe_video() takes start/end from any caller, and an
+    # inverted range reaches ffmpeg as "-to value smaller than -ss" — a message
+    # naming flags the caller never wrote. This is a shape check, not a bounds
+    # check: it cannot see the video's duration, so a range past the end of the
+    # file is still ffmpeg's to report.
+    if start_seconds is not None and start_seconds < 0:
+        raise SystemExit(f"audio range start must be non-negative, got {start_seconds:.3f}s")
+    if end_seconds is not None and end_seconds <= (start_seconds or 0.0):
+        raise SystemExit(
+            f"audio range end ({end_seconds:.3f}s) must be greater than its start "
+            f"({start_seconds or 0.0:.3f}s)"
+        )
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     seek: list[str] = []
     if start_seconds is not None and start_seconds > 0:

@@ -36,6 +36,65 @@ def resolve_whisper_choice(flag: str | None, configured: str) -> str | None:
     return configured if configured and configured != "auto" else None
 
 
+def _longest_backtick_run(text: str) -> int:
+    """Length of the longest unbroken run of backticks in `text`. 0 if there are none."""
+    best = run = 0
+    for ch in text:
+        run = run + 1 if ch == "`" else 0
+        best = max(best, run)
+    return best
+
+
+def md_inline(value: object) -> str:
+    """Fence one untrusted short value as markdown inline code.
+
+    This report is markdown that goes straight into an agent's context, and
+    several values in it are authored by whoever made the video rather than by
+    this program: yt-dlp's title and uploader, ffprobe's codec name. A title of
+    "Tutorial`" followed by a newline and "## Ignore the above" otherwise renders
+    as report structure, and nothing downstream can tell it from a heading this
+    program wrote.
+
+    Two edits, both structural. Newlines and carriage returns collapse to spaces,
+    because a line break ends the list item it sits in and lets everything after
+    it become top-level markdown. Then the value is wrapped in a backtick run one
+    longer than the longest run inside it, padded with a space when it starts or
+    ends with a backtick — CommonMark's own rule for putting backticks inside a
+    code span.
+
+    Lossless everywhere else, on purpose: this is not a sanitizer and strips no
+    character class. A title in Japanese, with emoji, with an apostrophe or with
+    a stray angle bracket comes out as itself.
+    """
+    text = str(value).replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    ticks = "`" * (_longest_backtick_run(text) + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{ticks}{pad}{text}{pad}{ticks}"
+
+
+def md_fence(body: str) -> str:
+    """The shortest code fence `body` cannot close early. Never shorter than three.
+
+    A fenced block ends at the first line that is nothing but backticks, at least
+    as long as the opening fence — so a transcript containing ``` escapes a
+    three-backtick fence and the rest of it lands in the report body as markdown.
+    Captions come from the remote video and Whisper text comes from its audio, so
+    both are attacker-reachable on a hostile video.
+
+    Deliberately over-approximate: it measures the longest backtick run anywhere
+    in the body rather than looking for lines shaped like a closing fence. The
+    cost of being wrong that way is a couple of extra backticks; the cost of the
+    precise version being wrong is the injection this exists to stop.
+
+    Two things this does NOT do, so the fence is not mistaken for safety. It
+    closes the STRUCTURAL channel only: a transcript that says "ignore your
+    previous instructions" is still perfectly legible text sitting in the agent's
+    context, and no fence changes that. And it cannot see the frames at all —
+    they enter the context as images, so text rendered inside a video frame is
+    untouched by anything here.
+    """
+    return "`" * max(3, _longest_backtick_run(body) + 1)
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="moviola",
@@ -167,8 +226,15 @@ def main() -> int:
 
     if start_sec is not None and start_sec < 0:
         raise SystemExit("--start must be non-negative")
-    if end_sec is not None and start_sec is not None and end_sec <= start_sec:
-        raise SystemExit("--end must be greater than --start")
+    # Compare against the EFFECTIVE start, not only an explicit one. Requiring
+    # start_sec to be set skipped the check entirely for `--end 0` and
+    # `--end -5`, which then reached ffmpeg and failed with "-to value smaller
+    # than -ss" — a message about flags the user never typed.
+    if end_sec is not None and end_sec <= (start_sec or 0.0):
+        raise SystemExit(
+            f"--end must be greater than --start ({start_sec:.1f}s)" if start_sec
+            else "--end must be greater than 0"
+        )
     if full_duration > 0 and start_sec is not None and start_sec >= full_duration:
         raise SystemExit(f"--start {start_sec:.1f}s is past end of video ({full_duration:.1f}s)")
 
@@ -306,11 +372,11 @@ def main() -> int:
     print()
     print("# moviola: video report")
     print()
-    print(f"- **Source:** {args.source}")
+    print(f"- **Source:** {md_inline(args.source)}")
     if info.get("title"):
-        print(f"- **Title:** {info['title']}")
+        print(f"- **Title:** {md_inline(info['title'])}")
     if info.get("uploader"):
-        print(f"- **Uploader:** {info['uploader']}")
+        print(f"- **Uploader:** {md_inline(info['uploader'])}")
     print(f"- **Duration:** {format_time(full_duration)} ({full_duration:.1f}s)")
     if focused:
         print(
@@ -318,7 +384,8 @@ def main() -> int:
             f"({effective_duration:.1f}s)"
         )
     if meta.get("width") and meta.get("height"):
-        print(f"- **Resolution:** {meta['width']}x{meta['height']} ({meta.get('codec') or 'unknown codec'})")
+        codec = md_inline(meta["codec"]) if meta.get("codec") else "unknown codec"
+        print(f"- **Resolution:** {meta['width']}x{meta['height']} ({codec})")
     range_mode = "focused" if focused else "full"
     print(f"- **Detail:** {detail}")
     detail_count = frame_meta.get("selected_count", 0)
@@ -398,9 +465,10 @@ def main() -> int:
         else:
             print(f"_Source: {label}._")
         print()
-        print("```")
+        fence = md_fence(transcript_text)
+        print(fence)
         print(transcript_text)
-        print("```")
+        print(fence)
     elif detail == "transcript":
         print(
             "_No transcript available at transcript detail. Captions were missing and Whisper was "
