@@ -809,8 +809,11 @@ def transcribe_video(
 ) -> tuple[list[dict], str]:
     """Run the full flow: extract audio → transcribe → parse segments.
 
-    `options` carries local-backend settings (model/device/compute/language) and
-    is ignored by the API backends. `start_seconds`/`end_seconds` restrict the
+    `options` carries local-backend settings — `model`, `device`, `compute`,
+    `language`, `offline` — and is ignored by the API backends. `offline` is
+    tri-state on purpose: None leaves the decision to `HF_HUB_OFFLINE`, False
+    says the user does not want offline mode, and collapsing the two silently
+    overrides the environment. `start_seconds`/`end_seconds` restrict the
     work to one range; returned segment times are shifted back onto the original
     video's timeline, so callers see absolute timestamps either way.
 

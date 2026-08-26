@@ -163,7 +163,103 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   4K, on a flag whose entire point is to stay small. It is a fallback that silently
   inverts the intent of the two selectors before it.
 
+## Documentation as a checked claim
+
+- **The README-to-parser direction is not checked, and cannot be.** (docs-are-checked
+  review, 2026-08-26) `test_the_docs_are_checked.py` proves every long flag
+  `build_parser()` defines appears in README. The reverse would false-fire, because
+  README also documents `setup.py`'s `--agent`, `--check`, `--copy` and `--list`, which
+  are correct entries for a different program. So a flag README documents that nothing
+  implements — a removed flag, or a typo — is invisible. The fix is a second, narrower
+  invariant that knows which README section belongs to which parser, and that means
+  giving those sections machine-readable boundaries first.
+
+- **`setup.py`'s own flags are pinned to nothing.** (docs-are-checked review,
+  2026-08-26) Same class as above, from the other end: the four flags above are
+  documented in README and defined in `setup.py`, and no test compares the two sets in
+  either direction.
+
+- **Agreement is not correctness.** (docs-are-checked review, 2026-08-26) The version
+  test proves `SKILL.md`, `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`
+  carry the same string. Nothing checks that string against a git tag, against the
+  CHANGELOG's newest heading, or that it was bumped at all when behaviour changed — so
+  three files agreeing on a stale number passes cleanly.
+
+- **SKILL.md's body is unchecked; only its frontmatter is.** (docs-are-checked review,
+  2026-08-26) The frontmatter's `version`, `author` and `name` are now pinned. The body
+  is several hundred lines of instructions to an agent — flag spellings, file paths,
+  the work-directory contract — and none of it is compared to the scripts it describes.
+  It is the single largest unpinned prose surface in the repo.
+
+- **The README benchmark table is unpinnable prose.** (docs-are-checked review,
+  2026-08-26) Frame counts, extraction times and token totals from one 49:08 video.
+  They are measurements, not claims about the code, so no invariant can hold them —
+  but they will age, and nothing will say so. If they are ever regenerated, date the
+  table rather than replacing the numbers in place.
+
+- **The hook's API-backend sentences carry the same claim shape as the local one.**
+  (docs-are-checked review, 2026-08-26) `ready — transcription via the $BACKEND API` is
+  said on the strength of a key being present in moviola's own config file. That is
+  weaker evidence than it sounds — the key may be revoked, out of credit, or wrong —
+  but it is also the whole prerequisite moviola needs in order to *try*, which is why
+  the local sentence was rewritten and these were left. Revisit only if a preflight
+  request is ever added; until then the honest fix would be a wording change with no
+  new evidence behind it.
+
+- **The released 0.2.0 changelog entry says 25 MB where the code says 24.** (docs-are-
+  checked review, 2026-08-26) The providers' documented cap is 25 MB and moviola splits
+  at 24 deliberately, which `test_consistency.py` already records. Rewriting a released
+  changelog entry is the wrong fix; the entry describes what shipped that day.
+
+- **The work directory is printed with bare backticks while SKILL.md tells the agent to
+  `rm -rf` it.** (docs-are-checked review, 2026-08-26) `skills/moviola/SKILL.md:193`
+  instructs the agent to remove the work directory when it is done. The path reaches
+  that instruction through the report as an un-fenced value, and unlike the title and
+  uploader it is a path this program constructed — but `--out-dir` is user-supplied, so
+  the value is not ours. Fencing it is cheap; deciding whether the `rm -rf` instruction
+  should exist at all is the larger question and belongs with it.
+
+- **The work directory is created with the default umask.** (docs-are-checked review,
+  2026-08-26) `~/.config/moviola/.env` is written 0600 and checked for it. The work
+  directory holds the extracted audio, the downloaded video and every frame, and is
+  created with whatever umask the shell had — world-readable on a default Linux setup,
+  in a shared `/tmp` by default.
+
 ## Completed
+
+### Documentation claims that no test could see
+
+(docs-are-checked review, 2026-08-26 — `fix/docs-are-checked`)
+
+Six claims the docs made about the code, each with a machine-checkable referent, each
+wrong, and nothing in the suite able to tell.
+
+- **The version was two different numbers.** `SKILL.md` said `0.2.0`; both plugin
+  manifests said `0.3.0`. `AGENTS.md:48` states keeping the three in sync as a release
+  invariant and nothing enforced it.
+- **The author was two different people.** The manifests had been updated for the fork
+  and the skill's own frontmatter — the one a user reads — still credited upstream.
+- **A star-history link still pointed at the upstream repository.** The three image URLs
+  beside it had been updated; the anchor's `href` encoded the slug as `%2F` and a grep
+  for the plain form missed it.
+- **`config.py` described a backend-resolution rule the consent work had replaced.** The
+  comment said `auto` was "local, else Groq, else OpenAI"; since the consent fix, an
+  unpinned run reads API keys from moviola's own config file only.
+- **`transcribe_video`'s docstring named four of the five option keys its caller
+  builds** — omitting `offline`, the one key whose third state is load-bearing.
+- **The SessionStart hook said "ready — transcription runs on this machine"** on the
+  strength of a `find_spec` probe. `find_spec` proves the package is on the path, not
+  that importing it works: a half-installed CTranslate2, a numpy ABI mismatch or a
+  missing libstdc++ all pass it and fail at the first transcription. The probe is the
+  right trade at every SessionStart; the sentence now says "faster-whisper is
+  installed". An earlier lead — change `setup._have_local_whisper` to `find_spec` too —
+  was investigated and rejected: that call site does a real import on purpose and keeps
+  `_IMPORT_ERROR` so the failure is reported verbatim.
+- **The CHANGELOG claimed a test file had 42 tests.** It has 84.
+
+12 new tests (539 → 551). Six mutations re-applied and all six now fail: version drift,
+author drift, the upstream link, the docstring dropping `offline`, the hook's old
+sentence, and a stale test count.
 
 ### Four unbounded or dishonest failure modes
 

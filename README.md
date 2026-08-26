@@ -265,11 +265,11 @@ MIT license.
 
 Built on `yt-dlp`, `ffmpeg`, and Claude's multimodal `Read` tool. Whisper transcription on-device via [faster-whisper](https://github.com/SYSTRAN/faster-whisper), or through [Groq](https://groq.com) / [OpenAI](https://openai.com).
 
-Built by Brad Bonanno — I make content about building with AI on [YouTube (@bradbonanno)](https://www.youtube.com/@bradbonanno), and build AI operating systems for businesses at [Solaris Automation](https://www.solarisautomation.io/). If `/moviola` saves you from scrubbing through a video, come say hi on the channel.
+Originally built as `claude-video` by Brad Bonanno, who makes content about building with AI on [YouTube (@bradbonanno)](https://www.youtube.com/@bradbonanno) and builds AI operating systems for businesses at [Solaris Automation](https://www.solarisautomation.io/). `/moviola` is a fork maintained by Andreas Demetriou: the on-device Whisper backend, the consent rules around API keys, and the report's fencing are this fork's work.
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=bradautomates%2Fclaude-video&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=androsland%2Fclaude-video&type=date&legend=top-left">
  <picture>
    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=androsland/claude-video&type=date&theme=dark&legend=top-left" />
    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=androsland/claude-video&type=date&legend=top-left" />

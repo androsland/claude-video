@@ -119,7 +119,13 @@ fi
 # environment key must not make this hook say "ready".
 #
 # has_local_whisper spawns python3, so it is called only on the branch that needs
-# it — this hook runs at every SessionStart.
+# it — this hook runs at every SessionStart. It uses find_spec rather than a real
+# import, which is why the local line says "installed" and not "ready": find_spec
+# proves the package is on the path, not that importing it works. A half-installed
+# CTranslate2 or a numpy ABI mismatch passes this probe and fails at the first
+# transcription. local_whisper.is_available() does the real import and reports the
+# error verbatim; paying 200-odd ms for that at every SessionStart is the trade
+# this hook declines, so the sentence is written to claim only what was checked.
 BACKEND=""
 case "$WHISPER_PIN" in
   local)
@@ -146,7 +152,7 @@ esac
 if [[ -z "$HAS_FFMPEG" || -z "$HAS_YTDLP" ]]; then
   echo "/moviola: needs ffmpeg + yt-dlp. Run \`python3 \$CLAUDE_PLUGIN_ROOT/skills/moviola/scripts/setup.py\` once to install and scaffold config."
 elif [[ "$BACKEND" == "local" ]]; then
-  echo "/moviola: ready — transcription runs on this machine via faster-whisper, no API key needed."
+  echo "/moviola: faster-whisper is installed — transcription runs on this machine, no API key needed."
 elif [[ -n "$BACKEND" ]]; then
   echo "/moviola: ready — transcription via the $BACKEND API."
 elif [[ "$WHISPER_PIN" != "auto" ]]; then
