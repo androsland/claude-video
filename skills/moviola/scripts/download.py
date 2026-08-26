@@ -23,16 +23,38 @@ VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".flv", ".wmv"}
 # The tail used to be `bv*+ba/b` — BEST video, no bound — so a 4K-only upload
 # fell through both bounded rungs and downloaded at 4K, on the branch whose
 # whole purpose is staying small. `wv*`/`w` ask for the worst rendition
-# instead, which is the smallest one the ladder offers.
+# instead, which is the smallest the ladder offers by yt-dlp's default sort.
 #
 # They carry no height bound of their own, and deliberately so: a bounded tail
 # matches NOTHING on a ladder whose smallest rendition is above the bound, and
 # a yt-dlp selector that matches nothing fails the download outright rather
-# than falling back. `wv*`/`w` match everything the old tail matched. Audio
-# stays `ba` wherever it is selected separately — the transcript is made from
-# it, and it is not the expensive half.
-VIDEO_FORMAT = "bv*[height<=720]+ba/b[height<=720]/wv*+ba/w"
-AUDIO_FORMAT = "ba/bestaudio"
+# than falling back. `wv*`/`w` match everything the old tail matched.
+#
+# The middle pair exists because `[height<=720]` DROPS a format whose height is
+# unknown rather than keeping it. HLS manifests with no RESOLUTION attribute
+# and the generic extractor produce exactly those, so without a tolerant rung
+# such a source skipped both bounds and hit the tail EVERY time — and with no
+# height to bound it, the tail has no floor: it took the smallest rendition on
+# offer, which is a downgrade rather than a saving. `[height<=?720]` is the
+# unknown-tolerant form and keeps those formats, so the ladder falls back to
+# them at their best before it ever reaches the worst-selectors.
+#
+# That tolerant `b[height<=?720]` rung is also what handles a source with no
+# video at all: audio formats have no height, so it keeps them, and yt-dlp's
+# incomplete-formats fallback then resolves it to the BEST audio. Without it a
+# bare `w` matched instead and took the worst — and on that path the audio IS
+# the transcript, so it is not a size trade, just a worse transcript.
+#
+# Audio stays `ba` wherever it is selected separately: the transcript is made
+# from it, and it is not the expensive half.
+VIDEO_FORMAT = (
+    "bv*[height<=720]+ba/b[height<=720]"
+    "/bv*[height<=?720]+ba/b[height<=?720]"
+    "/wv*+ba/w"
+)
+# `ba`, not `ba/bestaudio`: `bestaudio` is the long form of the same selector,
+# so the second rung could never fire on a ladder where the first did not.
+AUDIO_FORMAT = "ba"
 
 
 def is_url(source: str) -> bool:

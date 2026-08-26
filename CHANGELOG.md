@@ -107,6 +107,25 @@ All notable changes to `/moviola` are documented here.
   nothing else to fetch. A ladder that *does* offer 720p selects exactly what it always
   did, and best audio is kept wherever audio is a separate stream, since the transcript
   is made from it.
+- **…and no longer downgrades a source whose renditions carry no height.** Review of the
+  above caught that `[height<=720]` *drops* a format whose height is unknown rather than
+  keeping it, so an HLS manifest with no `RESOLUTION` attribute — or anything from the
+  generic extractor — skipped both bounded rungs and reached the unbounded tail on every
+  run, not only when it was too big. With no height there is no floor either, so the tail
+  took the smallest thing on offer: 6000 kbps down to 150 against yt-dlp's own selector,
+  which is not a usable visual input for a tool whose entire output is frames. The same
+  gap sent a video-less source (a podcast URL with no flags) from 256 kbps audio to 64,
+  and on that path the audio *is* the transcript. The ladder gained an unknown-tolerant
+  pair, `bv*[height<=?720]+ba/b[height<=?720]`, between the bounded rungs and the tail;
+  those sources now resolve at their best, exactly as they did before any of this. Two
+  test defects that hid the regressions were fixed with it: the harness pinned
+  `incomplete_formats=False` where yt-dlp computes it from the formats, and the size
+  proxy read pixel heights only, so it returned `0` for every pick on a heightless ladder
+  and the monotonicity assertion evaluated `0 <= 0`.
+- `AUDIO_FORMAT` is `ba` rather than `ba/bestaudio`. `bestaudio` is the long form of the
+  same selector, so the second rung could not fire on any ladder where the first did not;
+  its test now asserts the property (every rung asks for best audio) instead of the
+  literal string.
 - `tests/test_the_fallback_stays_small.py` — the selectors are now module-level
   `VIDEO_FORMAT` / `AUDIO_FORMAT` constants, and the test reads the ladder structurally
   (no unbounded best-video selector survives anywhere in it) as well as behaviourally,

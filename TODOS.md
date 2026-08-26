@@ -407,16 +407,51 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   unbounded-best-selector entry that `test_the_fallback_stays_small` closed and does not
   reopen it.
 
+- **A source whose renditions carry no height is rescued to its BEST, never bounded.**
+  (review of the bounded-failures review, 2026-08-26) `[height<=720]` drops a format
+  whose height is unknown, so the tolerant `[height<=?720]` pair was added to stop such
+  sources — HLS with no `RESOLUTION`, the generic extractor — falling to the floorless
+  tail and downgrading 6000 kbps to 150. Those rungs are `bv*`/`b`, so they take the
+  LARGEST unknown-height rendition: the download returns to exactly what it was before
+  any of this work, which is the point (unknown is not the same as small, and a bound
+  would exclude every one of them and hit the tail again). What is unfixed is that
+  moviola still cannot bound a rendition whose size the manifest never states. The lever
+  would be a `filesize`/`tbr` ceiling on the tolerant rungs, which trades a hard download
+  failure on sources that state neither for a bound on the ones that do. Non-goals: this
+  does not reopen the monotonic-not-capped entry above; and a MIXED ladder (one heightless
+  rendition beside bounded oversized ones) deliberately picks the heightless one, because
+  it is the only candidate that could be under the bound — `test_a_heightless_rendition_
+  is_preferred_over_a_bounded_oversized_one` pins that and it is a guess, not a guarantee.
+
 - **"Worst" is yt-dlp's definition, and moviola pins it only by passing no sort order.**
-  (bounded-failures review, 2026-08-26) `wv*`/`w` mean worst *by the active
-  `--format-sort`*, whose default leads on `res` — which is the only reason the fallback
-  shrinks the picture rather than, say, the bitrate. moviola passes no `--format-sort`,
-  and `test_no_format_sort_is_passed` is the whole of what keeps that true; a future flag
-  that added one would silently redefine what the fallback selects. Same caller-side
-  shape as the `stderr_line` and `finite_float` entries above, filed for the same reason.
-  Non-goal: the synthetic ladders the behavioural tests drive assume yt-dlp's worst-first
+  (bounded-failures review, 2026-08-26; corrected 2026-08-26 by the review of that
+  review) `wv*`/`w` mean worst *by the active `--format-sort`*. This entry previously
+  said that default "leads on `res`"; measured against yt-dlp 2026.06.09 it does not.
+  `FormatSorter.default` is `(hidden, aud_or_vid, hasvid, ie_pref, lang, quality, res,
+  …)` — `res` is seventh, `ie_pref` third and `quality` sixth both outrank it, and `size`
+  and `br` are twelfth and thirteenth. So "worst" is the *extractor's* preference order
+  before it is resolution, and on an extractor that assigns a per-rendition `quality` the
+  tail can pick something LARGER than the old selector did. moviola passes no
+  `--format-sort`, and `test_no_format_sort_is_passed` is the whole of what keeps that
+  true; a future flag adding one would silently redefine what the fallback selects. Same
+  caller-side shape as the `stderr_line` and `finite_float` entries above.
+  Non-goals: the synthetic ladders the behavioural tests drive assume yt-dlp's worst-first
   ordering convention, and nothing in a network-free suite drives a real extractor, so an
-  extractor emitting a differently-ordered format list would be invisible to them.
+  extractor emitting a differently-ordered format list would be invisible to them — and
+  so would an extractor-side `quality`, which `test_no_format_sort_is_passed` cannot see
+  because it only checks moviola's own argv.
+
+- **A muxed-only video ladder that DOES offer separate audio still loses the good audio.**
+  (review of the bounded-failures review, 2026-08-26) `wv*` matches a muxed format, and
+  yt-dlp's default `--no-audio-multistreams` then drops the `+ba` beside it. Executed
+  against yt-dlp 2026.06.09 on `[a64, a256, m1080/96k, m2160/192k]`: the ladder yields
+  m1080's embedded 96 kbps where the old tail's video-only `bv` could not reach the case
+  at all and fell through to `b` → m2160 at 192 kbps. Byte-wise it remains a saving — no
+  second audio stream is fetched and no merge pass runs — so the cost is transcript
+  quality alone, and the only lever is `--audio-multistreams`, which spends both to buy
+  it back. Non-goals: this is NOT the muxed entry below, which is about a ladder with no
+  separate audio to keep; and `test_best_audio_survives_the_shrink` runs only the
+  split-stream ladder, so the suite does not see this shape.
 
 - **The muxed fallback shrinks the transcript's source along with the picture.**
   (bounded-failures review, 2026-08-26) The last rung, `w`, selects a whole file, so on a
