@@ -249,6 +249,28 @@ def _install_hint_windows(missing: list[str]) -> str:
     return "\n  ".join(hints) if hints else "nothing to install"
 
 
+def _effective_backend(pin: str) -> str | None:
+    """The backend that would actually run, MOVIOLA_WHISPER included.
+
+    Goes through whisper.resolve_backend() rather than re-deriving the
+    precedence here. Re-deriving it is exactly how this drifted: the old code
+    read `if not backend and has_local: backend = "local"`, which ignored the pin
+    entirely, so `MOVIOLA_WHISPER=local` on a machine with a GROQ_API_KEY was
+    reported as "groq" — while SKILL.md contracts this field as naming what would
+    actually run.
+
+    A pin naming an unusable backend resolves to None, which is the honest
+    answer: nothing would transcribe. Imported lazily so a preflight on a machine
+    with a broken scripts/ directory still returns a snapshot instead of raising.
+    """
+    try:
+        import whisper
+    except Exception:
+        return None
+    backend, _ = whisper.resolve_backend(None if pin == "auto" else pin)
+    return backend
+
+
 def _status() -> dict:
     """Structured preflight snapshot.
 
@@ -260,20 +282,28 @@ def _status() -> dict:
     `can_proceed` is the operational gate: /moviola can run as long as the
     binaries are present AND transcription is available OR the user already
     finished setup (consciously opting out of Whisper). Someone who completed
-    setup without either backend is NOT nagged on every call.
+    setup without either backend is NOT nagged on every call. It deliberately
+    keys off availability rather than the pin: a pin that resolves to nothing
+    still leaves a usable frames-only run, so it is a reason to prompt, never a
+    reason to block.
     """
     missing = _check_binaries()
-    has_key, backend = _have_api_key()
+    has_key, _key_backend = _have_api_key()
     has_local = _have_local_whisper()
     has_transcription = has_key or has_local
     setup_complete = not is_first_run()
 
-    if not backend and has_local:
-        backend = "local"
+    cfg = get_config()
+    backend = _effective_backend(str(cfg["whisper"]))
 
-    if not missing and has_transcription:
+    # `has_transcription` answers "is a backend installed at all"; `backend`
+    # answers "would one actually run, given the pin". They differ exactly when
+    # MOVIOLA_WHISPER names something unusable — pinned groq with no key on a
+    # machine that has faster-whisper — and reporting "ready" there is the same
+    # lie as reporting the wrong backend name, so status keys off the pin too.
+    if not missing and backend:
         status = "ready"
-    elif missing and not has_transcription:
+    elif missing and not backend:
         status = "needs_install_and_key"
     elif missing:
         status = "needs_install"
@@ -281,8 +311,6 @@ def _status() -> dict:
         status = "needs_key"
 
     can_proceed = (not missing) and (has_transcription or setup_complete)
-
-    cfg = get_config()
     return {
         "status": status,
         "can_proceed": can_proceed,
