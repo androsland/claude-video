@@ -72,15 +72,41 @@ def plan_chunks(
     return plan
 
 
-def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, None]:
+API_CANDIDATES = (("GROQ_API_KEY", "groq"), ("OPENAI_API_KEY", "openai"))
+
+
+def _env_key(name: str) -> str | None:
+    """An API key read from the process environment, or None if unset or blank."""
+    value = os.environ.get(name)
+    return value.strip() if value else None
+
+
+def env_key_backend() -> str | None:
+    """The backend whose key sits in the process environment, if any.
+
+    Exists ONLY to explain why an unpinned run declined to upload. Never call it
+    to choose a backend: ignoring the environment is the whole point.
+    """
+    for name, backend in API_CANDIDATES:
+        if _env_key(name):
+            return backend
+    return None
+
+
+def load_api_key(
+    preferred: str | None = None, *, allow_env: bool = True
+) -> tuple[str, str] | tuple[None, None]:
     """Return (backend, api_key). Prefers Groq, falls back to OpenAI.
 
     If `preferred` is "groq" or "openai", only that backend's key is considered.
-    """
-    def _from_env(name: str) -> str | None:
-        value = os.environ.get(name)
-        return value.strip() if value else None
 
+    `allow_env=False` restricts the search to moviola's own config file and the
+    working directory's `.env`, ignoring the process environment. resolve_backend
+    passes it when nothing is pinned: a key exported into a shell was put there
+    for whatever the user was running at the time, and reading it as standing
+    permission to upload their audio mistakes an accident for consent. A key in
+    `~/.config/moviola/.env` is different in kind — setup asked before writing it.
+    """
     def _from_dotenv(path: Path, name: str) -> str | None:
         if not path.exists():
             return None
@@ -105,12 +131,12 @@ def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, 
         Path.cwd() / ".env",
     ]
 
-    candidates = (("GROQ_API_KEY", "groq"), ("OPENAI_API_KEY", "openai"))
+    candidates = API_CANDIDATES
     if preferred is not None:
         candidates = tuple(c for c in candidates if c[1] == preferred)
 
     for key_name, backend in candidates:
-        value = _from_env(key_name)
+        value = _env_key(key_name) if allow_env else None
         if not value:
             for candidate in dotenv_paths:
                 value = _from_dotenv(candidate, key_name)
@@ -135,17 +161,35 @@ def resolve_backend(preferred: str | None = None) -> tuple[str | None, str | Non
     """Return (backend, api_key). api_key is None for "local", which needs none.
 
     Precedence when nothing is pinned is deliberately local-first: if
-    faster-whisper is importable, the audio does not leave the machine. That
-    ordering is the point of this fork — a key that happens to be present in the
-    environment for some unrelated tool should not silently cause an upload. The
-    cost is real and is the reason the ordering is stated everywhere it is
+    faster-whisper is importable, the audio does not leave the machine. The cost
+    is real and is the reason the ordering is stated everywhere it is
     observable: a CPU transcode can take minutes where an API call takes
     seconds. Pin MOVIOLA_WHISPER=groq/openai (or pass --whisper) to trade the
     other way.
 
-    Returns (None, None) when no backend is usable — when `preferred` names an
-    API backend whose key is missing, or "local" without faster-whisper — so the
-    caller reports one hint rather than failing mid-transcode.
+    Local-first alone was not enough, and the gap is the reason for allow_env.
+    On a machine WITHOUT faster-whisper — the state every machine starts in —
+    an unpinned run used to fall through to whatever GROQ_API_KEY or
+    OPENAI_API_KEY it could see, an ambient one exported for a different tool
+    included, and upload the audio. So an unpinned lookup consults only
+    moviola's own config file and the working directory's `.env`. A pin, from
+    either source, is consent and restores the full lookup.
+
+    NON-GOALS, because an unstated limit reads as a claim of coverage:
+      - It cannot tell a key exported FOR moviola from one exported for another
+        tool; both are just os.environ. Someone who deliberately exports one now
+        has to pin MOVIOLA_WHISPER, and the no-backend hint tells them so.
+      - It treats the working directory's `.env` as deliberate, as upstream
+        does, though a project `.env` may belong to something else entirely.
+        Narrowing that is a separate decision from this one.
+      - It does not stop a pinned upload, and is not meant to. Pinning is the
+        consent, and MOVIOLA_WHISPER is itself readable from the environment so
+        CI can still pin without a config file.
+
+    Returns (None, None) when no backend is usable — `preferred` names an API
+    backend whose key is missing, "local" without faster-whisper, or nothing is
+    pinned and the only key found is an ambient environment one — so the caller
+    reports one hint rather than failing mid-transcode.
     """
     if preferred == LOCAL_BACKEND:
         return (LOCAL_BACKEND, None) if local_available() else (None, None)
@@ -154,7 +198,7 @@ def resolve_backend(preferred: str | None = None) -> tuple[str | None, str | Non
 
     if local_available():
         return LOCAL_BACKEND, None
-    return load_api_key()
+    return load_api_key(allow_env=False)
 
 def extract_audio(
     video_path: str,
@@ -325,6 +369,53 @@ def _build_multipart(fields: dict[str, str], file_path: Path) -> tuple[bytes, st
     return buf.getvalue(), boundary
 
 
+# extract_audio pins 64 kbps mono, so bytes convert to minutes without an
+# ffprobe spawn. An estimate on purpose — see _announce_upload.
+AUDIO_BYTES_PER_MINUTE = 64_000 / 8 * 60
+COST_WARN_MINUTES = 60
+
+API_HOSTS = {"groq": "api.groq.com", "openai": "api.openai.com"}
+
+
+def _announce_upload(backend: str, audio_bytes: int) -> None:
+    """Say what is about to be sent, and where, before the first paid request.
+
+    The frame path already warns before it spends: moviola.py prints a
+    token-burner notice above 250 frames and a coverage notice on videos over
+    ten minutes. The audio path had no equivalent. plan_chunks splits at the
+    24 MB upload cap with no ceiling on the number of chunks that produces, and
+    each chunk is one billed request, so a long video became an unannounced
+    sequence of them.
+
+    This deliberately does NOT cap anything. A cap would break the long-video
+    case it exists to protect, and picking a ceiling for someone else's budget
+    is not this script's call. What was missing is that the spend was invisible
+    until after it happened.
+
+    Minutes are ESTIMATED from the byte count at extract_audio's fixed bitrate
+    rather than probed: this runs before every upload and a subprocess for one
+    stderr line is not worth it. The number is an order of magnitude, not a
+    billing statement, and it says nothing about what either provider charges.
+    """
+    minutes = audio_bytes / AUDIO_BYTES_PER_MINUTE
+    requests = max(1, math.ceil(audio_bytes / MAX_UPLOAD_BYTES))
+    host = API_HOSTS.get(backend, backend)
+    print(
+        f"[moviola] audio: {audio_bytes / (1024 * 1024):.1f} MB (~{minutes:.0f} min) — "
+        f"uploading to {host} in {requests} request{'' if requests == 1 else 's'}…",
+        file=sys.stderr,
+    )
+    if minutes >= COST_WARN_MINUTES:
+        print(
+            f"[moviola] Warning: that is roughly {minutes / 60:.1f} hours of audio and "
+            f"the {backend} API bills per minute of it. Narrow the job with "
+            "`--start HH:MM:SS --end HH:MM:SS`, skip transcription with "
+            "`--no-whisper`, or `pip install \"faster-whisper>=1.0\"` to run it on "
+            "this machine for nothing.",
+            file=sys.stderr,
+        )
+
+
 MAX_ATTEMPTS = 4       # initial + 3 retries
 MAX_429_RETRIES = 2
 RETRY_BASE_DELAY = 2.0
@@ -448,23 +539,67 @@ def shift_segments(segments: list[dict], offset_seconds: float) -> list[dict]:
     ]
 
 
-def _segments_from_response(data: dict) -> list[dict]:
-    """Convert Whisper verbose_json into our {start, end, text} segment format."""
+def _as_seconds(value: object) -> float:
+    """Coerce a response timestamp to a rounded float; 0.0 when it is unusable.
+
+    A segment whose timestamp is garbled is still worth its text. Losing the
+    transcript over one bad float would be the wrong trade, and float(None)
+    raising TypeError inside a list comprehension is how that used to happen.
+
+    NaN and the infinities are the cases that do not announce themselves:
+    json.loads admits the non-standard `NaN`/`Infinity`/`-Infinity` tokens by
+    default, and float() and round() both accept them without complaint. They
+    survive this function only to blow up later at int(seg["start"]) in
+    format_transcript, which runs over the WHOLE concatenated transcript — so
+    one bad timestamp from one chunk would discard every segment, which is the
+    exact trade this is here to avoid. isfinite is the check that sees them.
+    """
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return round(seconds, 2) if math.isfinite(seconds) else 0.0
+
+
+def _segments_from_response(data: object) -> list[dict]:
+    """Convert Whisper verbose_json into our {start, end, text} segment format.
+
+    Deliberately defensive about shape, because `data` is whatever a 200
+    response body happened to parse to and nothing between here and the provider
+    guarantees the documented object: a proxy or gateway can answer 200 with a
+    JSON array or a bare string, and a schema change can put non-dicts inside
+    "segments". Each of those reached .get() or .strip() on the wrong type and
+    raised AttributeError or TypeError — neither of which any caller caught, so
+    a malformed payload took down the whole report, frames included, when the
+    frames were already extracted and cost nothing to keep.
+
+    It is NOT a schema validator and does not try to be: a well-formed object
+    carrying nonsense text passes straight through, which is correct — judging
+    transcript content is not this function's job.
+    """
+    if not isinstance(data, dict):
+        raise SystemExit(
+            f"Whisper returned a JSON {type(data).__name__}, expected an object"
+        )
+
     out: list[dict] = []
-    for seg in data.get("segments") or []:
-        text = (seg.get("text") or "").strip()
-        if not text:
+    raw = data.get("segments")
+    for seg in raw if isinstance(raw, list) else []:
+        if not isinstance(seg, dict):
+            continue
+        text = seg.get("text")
+        if not isinstance(text, str) or not text.strip():
             continue
         out.append({
-            "start": round(float(seg.get("start") or 0.0), 2),
-            "end": round(float(seg.get("end") or 0.0), 2),
-            "text": text,
+            "start": _as_seconds(seg.get("start")),
+            "end": _as_seconds(seg.get("end")),
+            "text": text.strip(),
         })
 
     if not out:
-        full = (data.get("text") or "").strip()
-        if full:
-            out.append({"start": 0.0, "end": 0.0, "text": full})
+        full = data.get("text")
+        if isinstance(full, str) and full.strip():
+            out.append({"start": 0.0, "end": 0.0, "text": full.strip()})
 
     return out
 
@@ -550,6 +685,7 @@ def transcribe_video(
 
     Returns (segments, backend_used). Raises SystemExit on any failure.
     """
+    pinned = backend is not None
     if backend is None:
         backend, api_key = resolve_backend()
     elif backend != LOCAL_BACKEND and api_key is None:
@@ -557,11 +693,21 @@ def transcribe_video(
 
     if not backend:
         setup_py = Path(__file__).resolve().parent / "setup.py"
+        ambient = None if pinned else env_key_backend()
+        if ambient:
+            raise SystemExit(
+                f"No Whisper backend available. {ambient.upper()}_API_KEY is set in this "
+                "environment, but an unpinned run does not upload audio on the strength "
+                "of an environment variable alone — it may have been exported for "
+                f"something else entirely. Set MOVIOLA_WHISPER={ambient} in "
+                f"~/.config/moviola/.env (or pass --whisper {ambient}) to opt in, or "
+                "`pip install \"faster-whisper>=1.0\"` to transcribe on this machine."
+            )
         raise SystemExit(
             "No Whisper backend available. Either install the local backend "
             "(`pip install \"faster-whisper>=1.0\"`) for on-device transcription, or set "
-            "GROQ_API_KEY / OPENAI_API_KEY in the environment or in "
-            f"~/.config/moviola/.env. Run `python3 {setup_py}` to configure."
+            "GROQ_API_KEY / OPENAI_API_KEY in ~/.config/moviola/.env. Run "
+            f"`python3 {setup_py}` to configure."
         )
 
     if backend != LOCAL_BACKEND and not api_key:
@@ -592,17 +738,15 @@ def transcribe_video(
         )
         segments = _transcribe_local(audio_path, options)
     elif audio_bytes <= MAX_UPLOAD_BYTES:
-        print(
-            f"[moviola] audio: {audio_bytes / 1024:.0f} kB — uploading to {backend} Whisper…",
-            file=sys.stderr,
-        )
+        _announce_upload(backend, audio_bytes)
         segments = transcribe_one(audio_path)
     else:
+        _announce_upload(backend, audio_bytes)
         duration = audio_duration(audio_path)
         plan = plan_chunks(duration, audio_bytes, MAX_UPLOAD_BYTES)
         print(
-            f"[moviola] audio: {audio_bytes / (1024 * 1024):.0f} MB exceeds "
-            f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB — splitting into {len(plan)} chunks…",
+            f"[moviola] splitting into {len(plan)} chunks to stay under the "
+            f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload cap…",
             file=sys.stderr,
         )
         chunks = split_audio(audio_path, audio_out.parent / "chunks", plan)

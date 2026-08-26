@@ -131,3 +131,40 @@ def test_every_setting_the_env_template_names_can_be_set_from_that_file(monkeypa
         "that file, so writing them there is a silent no-op:\n"
         + "\n".join(f"  {name}" for name in unread)
     )
+
+
+# The cost notice's two numbers live in whisper.py as constants and in prose that
+# no constant reaches. Same shape as the version pin above, same remedy.
+#
+# NOT covered, and the distinction is the whole reason this is anchored on exact
+# phrases rather than sweeping for "N MB": the providers' own cap is 25 MB and
+# ours is 24, deliberately, so `whisper.py:40` and SKILL.md's "the API's 25 MB
+# upload cap" are correct while naming a different number. Nothing here can tell
+# which cap a sentence means — it only reads the two phrasings that are ours.
+COST_PROSE = {60: "past an hour of audio"}
+OUR_CAP = re.compile(r"(\d+) MB (?:upload cap|split)")
+
+
+def test_the_cost_warning_threshold_matches_the_prose_in_skill_md():
+    import whisper
+
+    expected = COST_PROSE.get(whisper.COST_WARN_MINUTES)
+    assert expected is not None, (
+        f"COST_WARN_MINUTES is {whisper.COST_WARN_MINUTES}; SKILL.md's cost "
+        f"paragraph is written for one of {sorted(COST_PROSE)}. Update the prose "
+        "and add the new phrasing to COST_PROSE."
+    )
+    skill = (REPO / "skills" / "moviola" / "SKILL.md").read_text(encoding="utf-8")
+    assert expected in skill
+
+
+def test_our_own_upload_split_size_is_the_same_number_in_code_and_prose():
+    import whisper
+
+    expected = str(whisper.MAX_UPLOAD_BYTES // (1024 * 1024))
+    source = (REPO / "skills" / "moviola" / "scripts" / "whisper.py").read_text(
+        encoding="utf-8"
+    )
+    found = set(OUR_CAP.findall(source))
+    assert found, "no prose names our split size — the anchor phrases moved"
+    assert found == {expected}, f"prose says {sorted(found)} MB, code says {expected} MB"

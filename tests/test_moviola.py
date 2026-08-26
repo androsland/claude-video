@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import moviola  # noqa: E402  (conftest puts scripts/ on sys.path)
 
 MOVIOLA = Path(__file__).resolve().parent.parent / "skills" / "moviola" / "scripts" / "moviola.py"
@@ -207,3 +209,97 @@ class TestRangeValidation:
     def test_an_ordinary_range_is_unaffected(self, cut_clip: Path):
         out = _run(cut_clip, "--start", "1", "--end", "3")
         assert "**Focus range:**" in out
+
+
+def _build_audio_clip(path: Path) -> None:
+    """A short clip that actually carries an audio stream.
+
+    The shared fixtures are all `a=0`, so `meta["has_audio"]` is False for
+    every one of them and the whisper block is skipped entirely — which is
+    exactly why nothing in this suite had ever entered it.
+    """
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-t", "1.5", "-i", "color=c=blue:s=160x120:r=10",
+            "-f", "lavfi", "-t", "1.5", "-i", "sine=frequency=440:sample_rate=44100",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture(scope="module")
+def audio_clip(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    path = tmp_path_factory.mktemp("audio") / "tone.mp4"
+    _build_audio_clip(path)
+    return path
+
+
+class TestTheReportSurvivesABrokenTranscript:
+    """The transcript is optional. The report is not.
+
+    Frames are extracted and the report is assembled AFTER the whisper block,
+    so anything that escaped it took the whole run down — a raw traceback and
+    nothing on stdout, on a job whose expensive half had already succeeded.
+    Only SystemExit was caught, which covers every failure whisper.py raises
+    deliberately and none of the ones it does not.
+
+    NON-GOAL, pinned below: this does not make the transcript succeed, and it
+    does not retry. It converts a total loss into a partial result plus a named
+    reason on stderr.
+    """
+
+    def _report(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        clip: Path,
+        boom: object,
+    ) -> tuple[str, str]:
+        monkeypatch.setattr(moviola, "resolve_backend", lambda pref=None: ("groq", "k"))
+        monkeypatch.setattr(moviola, "transcribe_video", boom)
+        monkeypatch.setattr(sys, "argv", ["moviola.py", str(clip), "--detail", "efficient"])
+        assert moviola.main() == 0
+        captured = capsys.readouterr()
+        return captured.out, captured.err
+
+    def test_an_unexpected_exception_costs_the_transcript_not_the_report(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, audio_clip: Path
+    ) -> None:
+        def boom(*a: object, **k: object) -> None:
+            raise ValueError("some library changed its mind about a type")
+
+        out, err = self._report(monkeypatch, capsys, audio_clip, boom)
+        assert "# moviola: video report" in out
+        assert "ValueError" in err and "continuing without a transcript" in err
+
+    def test_a_deliberate_systemexit_still_takes_its_own_path(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, audio_clip: Path
+    ) -> None:
+        def boom(*a: object, **k: object) -> None:
+            raise SystemExit("no key for that backend")
+
+        out, err = self._report(monkeypatch, capsys, audio_clip, boom)
+        assert "# moviola: video report" in out
+        assert "no key for that backend" in err
+        # The broad catch must not swallow the specific message into a
+        # type-name-and-repr line; that would be a regression in what the user
+        # is told, on the path that fires most often.
+        assert "SystemExit" not in err
+
+    def test_ctrl_c_is_not_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch, audio_clip: Path
+    ) -> None:
+        def boom(*a: object, **k: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(moviola, "resolve_backend", lambda pref=None: ("groq", "k"))
+        monkeypatch.setattr(moviola, "transcribe_video", boom)
+        monkeypatch.setattr(sys, "argv", ["moviola.py", str(audio_clip), "--detail", "efficient"])
+        # A bare `except Exception` that had been written `except BaseException`
+        # would make Ctrl-C during a long local transcription do nothing.
+        with pytest.raises(KeyboardInterrupt):
+            moviola.main()

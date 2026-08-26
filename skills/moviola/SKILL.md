@@ -229,7 +229,7 @@ The script gets a timestamped transcript in one of two ways:
    - **`groq`** — `whisper-large-v3`. Cheaper and faster than OpenAI. Get a key at console.groq.com/keys.
    - **`openai`** — `whisper-1`. The compatible fallback. Get a key at platform.openai.com/api-keys.
 
-**Which one runs.** `--whisper <backend>` wins, then `MOVIOLA_WHISPER` in `~/.config/moviola/.env`, then `auto`. Under `auto` the order is local-first: `local` runs whenever faster-whisper is importable — even with a key set — and an API backend runs only when it is not. So on a machine where faster-whisper is installed, a key sitting around for some unrelated tool does not cause an upload; without it, `auto` still falls back to that key. The cost is real: a CPU transcode takes minutes where an API call takes seconds. Set `MOVIOLA_WHISPER=groq` or `openai` (or pass `--whisper`) to trade the other way. `--no-whisper` skips the fallback entirely.
+**Which one runs.** `--whisper <backend>` wins, then `MOVIOLA_WHISPER` in `~/.config/moviola/.env`, then `auto`. Under `auto` the order is local-first: `local` runs whenever faster-whisper is importable — even with a key set — and an API backend runs only when it is not — and then only from a key in `~/.config/moviola/.env` or the working directory's `.env`, never from one that merely happens to be exported in your shell, so an unrelated tool's key cannot cause an upload on any machine. A key you exported *for* moviola is indistinguishable from that and needs a pin too; the hint you get when nothing is usable says exactly this. The cost is real: a CPU transcode takes minutes where an API call takes seconds. Set `MOVIOLA_WHISPER=groq` or `openai` (or pass `--whisper`) to trade the other way. `--no-whisper` skips the fallback entirely.
 
 **Local backend settings** (all optional, in `~/.config/moviola/.env`):
 
@@ -241,6 +241,8 @@ The script gets a timestamped transcript in one of two ways:
 | `MOVIOLA_WHISPER_LANGUAGE` | an ISO code (`en`, `de`, …) | blank — auto-detect |
 
 **Speed.** Local transcription is compute, not a network round-trip, so it is the slow backend: expect roughly real-time or better on a GPU and several times slower than real-time on CPU with `large-v3`. If a long video on CPU is too slow, set `MOVIOLA_WHISPER_MODEL=small` or narrow the request with `--start`/`--end` — a focused run only transcribes the range you asked for.
+
+**Cost, on the API backends only.** Groq and OpenAI bill per minute of audio, and a long video is a lot of minutes. Before the first request moviola prints the audio size, the host it is about to upload to, and how many requests that will take; past an hour of audio it also says so plainly and names the three ways out (`--start`/`--end`, `--no-whisper`, or the local backend). It does **not** cap or refuse anything — picking a ceiling for someone else's budget is not this script's call, and the minutes are estimated from the encoded size rather than probed, so treat the number as an order of magnitude. The enforcement boundary for a tool running under your own key is the key itself: both Groq and OpenAI support a per-key spend limit, and that is the thing that actually stops a runaway. The local backend is free and prints nothing of the sort.
 
 ## Failure modes and handling
 
@@ -271,7 +273,9 @@ If you already watched a video this session and the user asks a follow-up, do **
 - Writes the downloaded video, frames, audio, and an intermediate transcript to a working directory under the system temp dir (or `--out-dir` if specified) so Claude can `Read` them
 - Reads / creates `~/.config/moviola/.env` (mode `0600`) to store the Whisper API key(s), backend settings, and a `SETUP_COMPLETE` marker. As a fallback, also reads `.env` in the current working directory
 
-Under the default `auto`, the backend that runs is `local` when faster-whisper is importable, and an API one only when it is not — so with the local backend installed, a key present in the environment for some other tool does not cause an upload. Without it, `auto` does fall back to that key. `MOVIOLA_WHISPER=groq` or `openai` (or `--whisper groq|openai`) opts into one deliberately; `--no-whisper` skips transcription entirely. The report's transcript header names the backend that actually ran.
+Under the default `auto`, the backend that runs is `local` when faster-whisper is importable, and an API one only when it is not — and an unpinned run looks for API keys only in `~/.config/moviola/.env` and the working directory's `.env`, never in the process environment. A `GROQ_API_KEY` exported into your shell for some other tool therefore cannot cause an upload, whether or not faster-whisper is installed. `MOVIOLA_WHISPER=groq` or `openai` (or `--whisper groq|openai`) opts in deliberately and restores the environment as a key source; `--no-whisper` skips transcription entirely.
+
+**Two limits worth stating, since an unstated one reads as a guarantee.** It cannot tell a key you exported *for* moviola from one exported for something else — both are just environment variables — so that user needs a pin as well, and the no-backend message names it. And it treats the working directory's `.env` as deliberate, the same as upstream, even though a project `.env` may belong to another tool entirely. The report's transcript header names the backend that actually ran.
 
 **What this skill does NOT do:**
 - Does not upload the video itself to any API — only the extracted audio ever goes out, and only to an API backend, and only when native captions are missing AND Whisper is not disabled with `--no-whisper`

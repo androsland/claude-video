@@ -156,3 +156,38 @@ class TestSilenceAndBinaries:
         # It is a SessionStart hook: a non-zero exit is noise in every session.
         for body in ("", "MOVIOLA_WHISPER=groq\n", "SETUP_COMPLETE=true\n"):
             assert _run(tmp_path, env_body=body).returncode == 0
+
+
+class TestAmbientEnvironmentKeyIsNotConsent:
+    """Unpinned, the hook must not call an ambient key "ready".
+
+    whisper.resolve_backend passes allow_env=False when nothing is pinned, so a
+    key that lives only in the process environment selects no backend. This hook
+    duplicates that precedence in bash, and a hook that says "ready — via the
+    groq API" while a real run declines to upload is the same class of lie the
+    pin bug above was.
+    """
+
+    AMBIENT = {"GROQ_API_KEY": "not-a-real-key"}
+
+    def test_unpinned_does_not_announce_an_ambient_key_as_ready(self, tmp_path):
+        out = _run(tmp_path, local_whisper=False, extra_env=self.AMBIENT)
+        assert "groq API" not in out.stdout
+
+    def test_unpinned_explains_the_refusal_and_names_the_pin(self, tmp_path):
+        out = _run(tmp_path, local_whisper=False, extra_env=self.AMBIENT)
+        assert "MOVIOLA_WHISPER=groq" in out.stdout
+        assert "not-a-real-key" not in out.stdout
+
+    def test_a_pin_makes_the_same_ambient_key_usable(self, tmp_path):
+        out = _run(
+            tmp_path,
+            env_body="MOVIOLA_WHISPER=groq\n",
+            local_whisper=False,
+            extra_env=self.AMBIENT,
+        )
+        assert "groq API" in out.stdout
+
+    def test_local_still_wins_over_an_ambient_key(self, tmp_path):
+        out = _run(tmp_path, local_whisper=True, extra_env=self.AMBIENT)
+        assert "on this machine" in out.stdout

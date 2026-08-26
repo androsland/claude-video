@@ -301,24 +301,35 @@ class TestBackendResolution:
         assert whisper.resolve_backend("local") == (None, None)
 
     def test_local_wins_over_an_api_key_when_unpinned(self, monkeypatch):
-        monkeypatch.setattr(whisper, "load_api_key", lambda pref=None: ("groq", "k"))
+        monkeypatch.setattr(whisper, "load_api_key", lambda pref=None, **kw: ("groq", "k"))
         monkeypatch.setattr(whisper, "local_available", lambda: True)
-        # A key present in the environment for some unrelated tool must not
-        # cause an upload. Local-first is the reason this fork exists.
+        # A key present for some unrelated tool must not cause an upload.
+        # Local-first is the reason this fork exists.
         assert whisper.resolve_backend() == ("local", None)
 
     def test_an_api_key_is_the_fallback_when_local_is_absent(self, monkeypatch):
-        monkeypatch.setattr(whisper, "load_api_key", lambda pref=None: ("groq", "k"))
+        seen = {}
+
+        def spy(pref=None, **kw):
+            seen.update(preferred=pref, **kw)
+            return ("groq", "k")
+
+        monkeypatch.setattr(whisper, "load_api_key", spy)
         monkeypatch.setattr(whisper, "local_available", lambda: False)
         assert whisper.resolve_backend() == ("groq", "k")
+        # ...but the fallback lookup must skip the process environment.
+        # Asserting the ARGUMENT and not just the result is the point: a stubbed
+        # load_api_key hands back a key either way, so the return value alone
+        # would pass against the very bug this guards.
+        assert seen == {"preferred": None, "allow_env": False}
 
     def test_nothing_available_returns_none(self, monkeypatch):
-        monkeypatch.setattr(whisper, "load_api_key", lambda pref=None: (None, None))
+        monkeypatch.setattr(whisper, "load_api_key", lambda pref=None, **kw: (None, None))
         monkeypatch.setattr(whisper, "local_available", lambda: False)
         assert whisper.resolve_backend() == (None, None)
 
     def test_explicit_api_backend_without_key_returns_none(self, monkeypatch):
-        monkeypatch.setattr(whisper, "load_api_key", lambda pref=None: (None, None))
+        monkeypatch.setattr(whisper, "load_api_key", lambda pref=None, **kw: (None, None))
         monkeypatch.setattr(whisper, "local_available", lambda: True)
         # Asking for groq and silently getting local would be a surprise.
         assert whisper.resolve_backend("groq") == (None, None)
@@ -429,7 +440,7 @@ class TestLocalDispatch:
         assert backend == "local"
 
     def test_api_backend_without_key_still_errors(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(whisper, "load_api_key", lambda pref=None: (None, None))
+        monkeypatch.setattr(whisper, "load_api_key", lambda pref=None, **kw: (None, None))
         with pytest.raises(SystemExit) as exc:
             whisper.transcribe_video("v.mp4", tmp_path / "a.mp3", backend="groq")
         assert "--whisper local" in str(exc.value)
