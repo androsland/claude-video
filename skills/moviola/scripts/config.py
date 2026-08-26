@@ -17,9 +17,11 @@ DEFAULT_DETAIL = "balanced"
 DETAILS = ("transcript", "efficient", "balanced", "token-burner")
 
 # Which speech-to-text backend to use when a video has no caption track.
-# "auto" resolves at runtime: local if faster-whisper is importable, else Groq,
-# else OpenAI. Naming one pins it and turns a missing prerequisite into an error
-# instead of a silent fallback.
+# "auto" resolves at runtime and is NOT simply "local, else Groq, else OpenAI":
+# an unpinned run reads API keys from moviola's own config file only, because an
+# ambient environment key is not consent to upload audio. Naming a backend here
+# is that consent, and turns a missing prerequisite into an error instead of a
+# silent fallback. whisper.resolve_backend() states the full rule and its limits.
 DEFAULT_WHISPER = "auto"
 
 WHISPER_BACKENDS = ("auto", "local", "groq", "openai")

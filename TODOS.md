@@ -30,6 +30,15 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 - **Nothing establishes that the upload notice is ever seen.** `tests/test_upload_is_announced.py` proves the sentence is written to stderr before the first request and in the right order, which is the half that was missing. Whether an agent harness surfaces stderr to the human, buffers it until after the run, or discards it entirely is invisible from inside this repo, and no test here can see it. A notice that is printed and swallowed is not consent. (consent-chain branch, 2026-08-26)
 
+- **The consent this program asks for is the operator's, not the recorded speakers'.**
+  (forgeward privacy review, 2026-08-26) Every consent surface here answers "may this
+  machine send YOUR audio to a third party". A video's audio carries other people's
+  voices, and in some jurisdictions a voiceprint is biometric data with its own basis
+  requirement — which the person running moviola cannot give on their behalf. Nothing
+  in code fixes this; it is a note for whoever decides how the tool is used and, if it
+  is ever used at scale, for counsel. Recorded so a green privacy review is not read as
+  a statement about the speakers.
+
 ## Report as an untrusted document
 
 - **stderr reaches the agent's context and nothing fences it.** (report-injection
@@ -163,7 +172,140 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   4K, on a flag whose entire point is to stay small. It is a fallback that silently
   inverts the intent of the two selectors before it.
 
+- **A pinned API backend never falls back to the other one.** (forgeward ai-output
+  review, 2026-08-26) When `--whisper groq` exhausts its retry ladder the run stops with
+  a named error and the documented remedy is for the user to re-run with
+  `--whisper openai`. That is deliberate — silently spending money at a provider the
+  user did not name is exactly the consent boundary the rest of this work draws — but it
+  means a provider outage costs a whole run rather than a slower one. If it is ever
+  changed, the failover has to announce the second provider before the first byte goes
+  out, the same way `_announce_upload` does today.
+
+## Documentation as a checked claim
+
+- **The README-to-parser direction is not checked, and cannot be.** (docs-are-checked
+  review, 2026-08-26) `test_the_docs_are_checked.py` proves every long flag
+  `build_parser()` defines appears in README. The reverse would false-fire, because
+  README also documents `setup.py`'s `--agent`, `--check`, `--copy` and `--list`, which
+  are correct entries for a different program. So a flag README documents that nothing
+  implements — a removed flag, or a typo — is invisible. The fix is a second, narrower
+  invariant that knows which README section belongs to which parser, and that means
+  giving those sections machine-readable boundaries first.
+
+- **`setup.py`'s own flags are pinned to nothing.** (docs-are-checked review,
+  2026-08-26) Same class as above, from the other end: the four flags above are
+  documented in README and defined in `setup.py`, and no test compares the two sets in
+  either direction.
+
+- **Agreement is not correctness.** (docs-are-checked review, 2026-08-26) The version
+  test proves `SKILL.md`, `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`
+  carry the same string. Nothing checks that string against a git tag, against the
+  CHANGELOG's newest heading, or that it was bumped at all when behaviour changed — so
+  three files agreeing on a stale number passes cleanly.
+
+- **SKILL.md's body is unchecked; only its frontmatter is.** (docs-are-checked review,
+  2026-08-26) The frontmatter's `version`, `author` and `name` are now pinned. The body
+  is several hundred lines of instructions to an agent — flag spellings, file paths,
+  the work-directory contract — and none of it is compared to the scripts it describes.
+  It is the single largest unpinned prose surface in the repo.
+
+- **The README benchmark table is unpinnable prose.** (docs-are-checked review,
+  2026-08-26) Frame counts, extraction times and token totals from one 49:08 video.
+  They are measurements, not claims about the code, so no invariant can hold them —
+  but they will age, and nothing will say so. If they are ever regenerated, date the
+  table rather than replacing the numbers in place.
+
+- **The hook's API-backend sentences carry the same claim shape as the local one.**
+  (docs-are-checked review, 2026-08-26) `ready — transcription via the $BACKEND API` is
+  said on the strength of a key being present in moviola's own config file. That is
+  weaker evidence than it sounds — the key may be revoked, out of credit, or wrong —
+  but it is also the whole prerequisite moviola needs in order to *try*, which is why
+  the local sentence was rewritten and these were left. Revisit only if a preflight
+  request is ever added; until then the honest fix would be a wording change with no
+  new evidence behind it.
+
+- **The released 0.2.0 changelog entry says 25 MB where the code says 24.** (docs-are-
+  checked review, 2026-08-26) The providers' documented cap is 25 MB and moviola splits
+  at 24 deliberately, which `test_consistency.py` already records. Rewriting a released
+  changelog entry is the wrong fix; the entry describes what shipped that day.
+
+- **The work directory is printed with bare backticks while SKILL.md tells the agent to
+  `rm -rf` it.** (docs-are-checked review, 2026-08-26) `skills/moviola/SKILL.md:193`
+  instructs the agent to remove the work directory when it is done. The path reaches
+  that instruction through the report as an un-fenced value, and unlike the title and
+  uploader it is a path this program constructed — but `--out-dir` is user-supplied, so
+  the value is not ours. Fencing it is cheap; deciding whether the `rm -rf` instruction
+  should exist at all is the larger question and belongs with it.
+
+- **A `--out-dir` work directory is created with the default umask.** (docs-are-checked
+  review, 2026-08-26; corrected after the forgeward privacy review, 2026-08-26)
+  `~/.config/moviola/.env` is written 0600 and checked for it. The work directory holds
+  the extracted audio, the downloaded video and every frame. **The default path is not
+  affected**: `moviola.py:259` uses `tempfile.mkdtemp`, which hardcodes 0700 regardless
+  of umask — verified directly under `umask 000` (`mkdtemp` → 0700, plain `mkdir` →
+  0777). Only the explicit `--out-dir` branch at `moviola.py:257` calls `Path.mkdir()`
+  and so inherits the shell's umask. This entry originally claimed the exposure for
+  every run; that was wrong, and it is recorded here rather than silently rewritten
+  because the overclaim is the sort of thing that sends someone to harden a path that
+  was already private.
+
+- **An invalid `MOVIOLA_WHISPER` is described two different ways.** (forgeward privacy
+  review, 2026-08-26) `config.py:85-87` normalizes an unrecognised value to `auto`
+  silently; `hooks/scripts/check-setup.sh:158` prints that the backend "is pinned but
+  that backend is not usable here" for the same input. Both then resolve identically, so
+  this is message drift and not a consent-boundary bug — but it is the third surface
+  that re-derives the same precedence in its own words, which is the drift `## Quiet
+  failures` already warns about. A typo'd backend name should say "not a backend name"
+  in both places.
+
+## Housekeeping
+
+- **This file has crossed the ~50KB archive threshold and the split is currently a
+  no-op.** (2026-08-26) Measured today: 52,384 bytes total, of which `## Completed` is
+  27,595 — 53%, which is a genuine mass and not a rounding error. But the archive rule
+  keeps the 5 most recent completions in place, and there are only **4** entries, all
+  written on 2026-08-26 from one body of work. So moving them to `TODOS-DONE.md` would
+  move nothing. The split starts doing real work at the sixth completion; until then the
+  file is over the threshold for a reason that archiving cannot fix. When it does run,
+  the entries here carry reversed decisions worth lifting into `AGENTS.md` as
+  constraints rather than leaving as narrative — the `find_spec` rejection and the
+  ambient-key rule are both in that class.
+
 ## Completed
+
+### Documentation claims that no test could see
+
+(docs-are-checked review, 2026-08-26 — `fix/docs-are-checked`)
+
+Six claims the docs made about the code, each with a machine-checkable referent, each
+wrong, and nothing in the suite able to tell.
+
+- **The version was two different numbers.** `SKILL.md` said `0.2.0`; both plugin
+  manifests said `0.3.0`. `AGENTS.md:48` states keeping the three in sync as a release
+  invariant and nothing enforced it.
+- **The author was two different people.** The manifests had been updated for the fork
+  and the skill's own frontmatter — the one a user reads — still credited upstream.
+- **A star-history link still pointed at the upstream repository.** The three image URLs
+  beside it had been updated; the anchor's `href` encoded the slug as `%2F` and a grep
+  for the plain form missed it.
+- **`config.py` described a backend-resolution rule the consent work had replaced.** The
+  comment said `auto` was "local, else Groq, else OpenAI"; since the consent fix, an
+  unpinned run reads API keys from moviola's own config file only.
+- **`transcribe_video`'s docstring named four of the five option keys its caller
+  builds** — omitting `offline`, the one key whose third state is load-bearing.
+- **The SessionStart hook said "ready — transcription runs on this machine"** on the
+  strength of a `find_spec` probe. `find_spec` proves the package is on the path, not
+  that importing it works: a half-installed CTranslate2, a numpy ABI mismatch or a
+  missing libstdc++ all pass it and fail at the first transcription. The probe is the
+  right trade at every SessionStart; the sentence now says "faster-whisper is
+  installed". An earlier lead — change `setup._have_local_whisper` to `find_spec` too —
+  was investigated and rejected: that call site does a real import on purpose and keeps
+  `_IMPORT_ERROR` so the failure is reported verbatim.
+- **The CHANGELOG claimed a test file had 42 tests.** It has 84.
+
+12 new tests (539 → 551). Six mutations re-applied and all six now fail: version drift,
+author drift, the upstream link, the docstring dropping `offline`, the hook's old
+sentence, and a stale test count.
 
 ### Four unbounded or dishonest failure modes
 
