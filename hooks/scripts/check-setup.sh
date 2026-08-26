@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# SessionStart hook for /watch — one-line status so users know what's wired up.
+# SessionStart hook for /moviola — one-line status so users know what's wired up.
 # Silent on ready state to avoid spam. Points at the installer when something
 # is missing.
 set -euo pipefail
 
-CONFIG_FILE="$HOME/.config/watch/.env"
+CONFIG_FILE="$HOME/.config/moviola/.env"
 
 # Warn if the secrets file has loose permissions.
 if [[ -f "$CONFIG_FILE" ]]; then
   perms=$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || echo "")
   if [[ -n "$perms" && "$perms" != "600" && "$perms" != "400" ]]; then
-    echo "/watch: WARNING — $CONFIG_FILE has permissions $perms (should be 600)."
+    echo "/moviola: WARNING — $CONFIG_FILE has permissions $perms (should be 600)."
     echo "  Fix: chmod 600 $CONFIG_FILE"
   fi
 fi
@@ -60,7 +60,7 @@ read_flag() {
 # importing faster-whisper pulls in CTranslate2 and its CUDA bindings. The
 # trade-off is that find_spec answers "the module is on the path", not "it
 # imports cleanly" — a broken install reads as present here. That is fine for
-# a one-line status hint; setup.py --check and watch.py both do a real import.
+# a one-line status hint; setup.py --check and moviola.py both do a real import.
 has_local_whisper() {
   command -v python3 >/dev/null 2>&1 || return 1
   python3 -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('faster_whisper') else 1)" 2>/dev/null
@@ -82,11 +82,11 @@ fi
 
 # First-run / partially-configured → one-line hint.
 if [[ -z "$HAS_FFMPEG" || -z "$HAS_YTDLP" ]]; then
-  echo "/watch: needs ffmpeg + yt-dlp. Run \`python3 \$CLAUDE_PLUGIN_ROOT/skills/watch/scripts/setup.py\` once to install and scaffold config."
+  echo "/moviola: needs ffmpeg + yt-dlp. Run \`python3 \$CLAUDE_PLUGIN_ROOT/skills/moviola/scripts/setup.py\` once to install and scaffold config."
 elif [[ -n "$HAS_GROQ" || -n "$HAS_OPENAI" ]]; then
-  echo "/watch: ready."
+  echo "/moviola: ready."
 elif has_local_whisper; then
-  echo "/watch: ready — transcription runs on this machine via faster-whisper, no API key needed."
+  echo "/moviola: ready — transcription runs on this machine via faster-whisper, no API key needed."
 else
-  echo "/watch: ready for videos with native captions. For the rest, either \`pip install \"faster-whisper>=1.0\"\` (runs locally, no key) or add GROQ_API_KEY / OPENAI_API_KEY to ~/.config/watch/.env."
+  echo "/moviola: ready for videos with native captions. For the rest, either \`pip install \"faster-whisper>=1.0\"\` (runs locally, no key) or add GROQ_API_KEY / OPENAI_API_KEY to ~/.config/moviola/.env."
 fi

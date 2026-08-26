@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-SETUP = Path(__file__).resolve().parent.parent / "skills" / "watch" / "scripts" / "setup.py"
+SETUP = Path(__file__).resolve().parent.parent / "skills" / "moviola" / "scripts" / "setup.py"
 
 
 def _run(args, *, home=None, extra_env=None, local_whisper=None):
@@ -19,12 +19,12 @@ def _run(args, *, home=None, extra_env=None, local_whisper=None):
     availability sets it explicitly.
     """
     env = dict(os.environ)
-    env.pop("WATCH_DETAIL", None)
+    env.pop("MOVIOLA_DETAIL", None)
     # Don't let a real key in the developer's shell env leak into the test.
     env.pop("GROQ_API_KEY", None)
     env.pop("OPENAI_API_KEY", None)
     env.pop("SETUP_COMPLETE", None)
-    env.pop("WATCH_WHISPER", None)
+    env.pop("MOVIOLA_WHISPER", None)
     if home is not None:
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)  # Windows
@@ -68,18 +68,18 @@ def _shim_dir(present: bool) -> Path:
 
 
 def _write_env(home: Path, body: str) -> None:
-    cfg = home / ".config" / "watch"
+    cfg = home / ".config" / "moviola"
     cfg.mkdir(parents=True, exist_ok=True)
     f = cfg / ".env"
     f.write_text(body, encoding="utf-8")
     f.chmod(0o600)
 
 
-def test_json_reports_watch_detail():
+def test_json_reports_moviola_detail():
     proc = _run(["--json"])
     assert proc.returncode == 0, proc.stderr
     data = json.loads(proc.stdout)
-    assert data["watch_detail"] == "balanced"
+    assert data["moviola_detail"] == "balanced"
 
 
 def test_keyless_completed_setup_proceeds_silently(tmp_path):
@@ -145,6 +145,6 @@ def test_api_key_named_over_local_in_status(tmp_path):
 
 
 def test_json_reports_whisper_setting(tmp_path):
-    _write_env(tmp_path, "WATCH_WHISPER=local\n")
+    _write_env(tmp_path, "MOVIOLA_WHISPER=local\n")
     js = json.loads(_run(["--json"], home=tmp_path, local_whisper=True).stdout)
     assert js["whisper_setting"] == "local"

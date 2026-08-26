@@ -1,21 +1,21 @@
 {
   "name": "claude-video",
   "metadata": {
-    "description": "Give Claude a video input. /watch downloads, extracts frames, transcribes, and hands it all to Claude."
+    "description": "Give Claude a video input. /moviola downloads, extracts frames, transcribes on-device, and hands it all to Claude."
   },
   "owner": {
-    "name": "Bradley Bonanno"
+    "name": "Andreas Demetriou"
   },
   "plugins": [
     {
-      "name": "watch",
-      "description": "Watch a video (URL or local path). Downloads with yt-dlp, extracts frames with ffmpeg, transcribes via captions or Whisper.",
+      "name": "moviola",
+      "description": "Watch a video (URL or local path). Downloads with yt-dlp, extracts frames with ffmpeg, transcribes via captions or Whisper — locally by default, no API key required.",
       "author": {
-        "name": "Bradley Bonanno"
+        "name": "Andreas Demetriou"
       },
       "source": "./",
       "category": "productivity",
-      "homepage": "https://github.com/bradautomates/claude-video"
+      "homepage": "https://github.com/androsland/claude-video"
     }
   ]
 }

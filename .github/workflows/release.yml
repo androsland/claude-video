@@ -19,13 +19,13 @@ jobs:
 
       - name: Build .skill artifact
         run: |
-          bash skills/watch/scripts/build-skill.sh
-          test -f dist/watch.skill
+          bash skills/moviola/scripts/build-skill.sh
+          test -f dist/moviola.skill
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/watch.skill
+          files: dist/moviola.skill
           generate_release_notes: true
           draft: false
           prerelease: false

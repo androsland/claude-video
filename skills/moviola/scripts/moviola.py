@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""/watch entry point: download video, extract frames, parse transcript.
+"""/moviola entry point: download video, extract frames, parse transcript.
 
 Prints a markdown report to stdout listing frame paths + transcript. Claude
 then Reads each frame path to see the video.
@@ -24,7 +24,7 @@ from whisper import LOCAL_BACKEND, resolve_backend, transcribe_video  # noqa: E4
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        prog="watch",
+        prog="moviola",
         description="Download a video, extract auto-scaled frames, and surface the transcript.",
     )
     ap.add_argument("source", help="Video URL or local file path")
@@ -59,8 +59,8 @@ def main() -> int:
         choices=["local", "groq", "openai"],
         default=None,
         help="Force a specific Whisper backend. 'local' runs faster-whisper on "
-             "this machine and needs no API key. Default: use an API key if one "
-             "is set, else fall back to local.",
+             "this machine and needs no API key. Default: local when "
+             "faster-whisper is importable, else an API key.",
     )
     ap.add_argument(
         "--no-dedup",
@@ -72,7 +72,7 @@ def main() -> int:
 
     config = get_config()
     detail = args.detail or str(config["detail"])
-    # --whisper wins over WATCH_WHISPER; "auto" means "let resolve_backend decide".
+    # --whisper wins over MOVIOLA_WHISPER; "auto" means "let resolve_backend decide".
     configured_whisper = str(config["whisper"])
     whisper_choice = args.whisper or (configured_whisper if configured_whisper != "auto" else None)
     whisper_options = {
@@ -94,9 +94,9 @@ def main() -> int:
     if args.out_dir:
         work = Path(args.out_dir).expanduser().resolve()
     else:
-        work = Path(tempfile.mkdtemp(prefix="watch-"))
+        work = Path(tempfile.mkdtemp(prefix="moviola-"))
     work.mkdir(parents=True, exist_ok=True)
-    print(f"[watch] working dir: {work}", file=sys.stderr)
+    print(f"[moviola] working dir: {work}", file=sys.stderr)
 
     url_source = is_url(args.source)
     dl: dict = {"subtitle_path": None, "info": {}, "downloaded": False}
@@ -106,7 +106,7 @@ def main() -> int:
     video_path: str | None = None
 
     if url_source:
-        print("[watch] checking metadata/captions via yt-dlp…", file=sys.stderr)
+        print("[moviola] checking metadata/captions via yt-dlp…", file=sys.stderr)
         dl = fetch_captions(args.source, work / "download")
         if dl.get("subtitle_path"):
             try:
@@ -114,7 +114,7 @@ def main() -> int:
                 transcript_text = format_transcript(transcript_segments)
                 transcript_source = "captions"
             except Exception as exc:
-                print(f"[watch] subtitle parse failed: {exc}", file=sys.stderr)
+                print(f"[moviola] subtitle parse failed: {exc}", file=sys.stderr)
                 transcript_segments = []
 
     # --timestamps needs the video for frame grabs, so it overrides the
@@ -125,8 +125,8 @@ def main() -> int:
     else:
         if url_source:
             print(
-                "[watch] downloading audio via yt-dlp…" if audio_only
-                else "[watch] downloading video via yt-dlp…",
+                "[moviola] downloading audio via yt-dlp…" if audio_only
+                else "[moviola] downloading video via yt-dlp…",
                 file=sys.stderr,
             )
             dl = download(
@@ -135,7 +135,7 @@ def main() -> int:
                 audio_only=audio_only,
             )
         else:
-            print("[watch] using local file…", file=sys.stderr)
+            print("[moviola] using local file…", file=sys.stderr)
             dl = download(args.source, work / "download")
         video_path = dl["video_path"]
 
@@ -198,7 +198,7 @@ def main() -> int:
         )
         if cue_meta.get("dropped_out_of_window"):
             print(
-                f"[watch] {cue_meta['dropped_out_of_window']} cue timestamp(s) outside the "
+                f"[moviola] {cue_meta['dropped_out_of_window']} cue timestamp(s) outside the "
                 "focus range — dropped",
                 file=sys.stderr,
             )
@@ -208,7 +208,7 @@ def main() -> int:
         cap_label = "unlimited" if detail_budget is None else str(detail_budget)
         engine_label = "keyframes" if detail == "efficient" else "scene-aware frames"
         print(
-            f"[watch] extracting {engine_label} over {scope} "
+            f"[moviola] extracting {engine_label} over {scope} "
             f"(target {target}, cap {cap_label})…",
             file=sys.stderr,
         )
@@ -245,7 +245,7 @@ def main() -> int:
             transcript_text = format_transcript(transcript_segments)
             transcript_source = "captions"
         except Exception as exc:
-            print(f"[watch] subtitle parse failed: {exc}", file=sys.stderr)
+            print(f"[moviola] subtitle parse failed: {exc}", file=sys.stderr)
 
     if not transcript_segments and not args.no_whisper and video_path and meta.get("has_audio"):
         backend, api_key = resolve_backend(whisper_choice)
@@ -270,7 +270,7 @@ def main() -> int:
                 transcript_text = format_transcript(transcript_segments)
                 transcript_source = f"whisper ({used_backend})"
             except SystemExit as exc:
-                print(f"[watch] whisper fallback failed: {exc}", file=sys.stderr)
+                print(f"[moviola] whisper fallback failed: {exc}", file=sys.stderr)
         else:
             setup_py = SCRIPT_DIR / "setup.py"
             if whisper_choice == LOCAL_BACKEND:
@@ -283,14 +283,14 @@ def main() -> int:
                 hint = ("no subtitles and no transcription backend — run "
                         "`pip install \"faster-whisper>=1.0\"` to transcribe on-device, or "
                         f"`python3 {setup_py}` to set an API key")
-            print(f"[watch] {hint}", file=sys.stderr)
+            print(f"[moviola] {hint}", file=sys.stderr)
     elif not transcript_segments and video_path and not meta.get("has_audio"):
-        print("[watch] no audio stream found — proceeding without transcription", file=sys.stderr)
+        print("[moviola] no audio stream found — proceeding without transcription", file=sys.stderr)
 
     info = dl.get("info") or {}
 
     print()
-    print("# watch: video report")
+    print("# moviola: video report")
     print()
     print(f"- **Source:** {args.source}")
     if info.get("title"):

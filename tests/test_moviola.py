@@ -1,4 +1,4 @@
-"""End-to-end routing of --detail through watch.py on a local clip."""
+"""End-to-end routing of --detail through moviola.py on a local clip."""
 from __future__ import annotations
 
 import os
@@ -6,16 +6,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-WATCH = Path(__file__).resolve().parent.parent / "skills" / "watch" / "scripts" / "watch.py"
+MOVIOLA = Path(__file__).resolve().parent.parent / "skills" / "moviola" / "scripts" / "moviola.py"
 
 
 def _run(clip: Path, *args: str, env_extra: dict | None = None) -> str:
     env = dict(os.environ)
-    env.pop("WATCH_DETAIL", None)
+    env.pop("MOVIOLA_DETAIL", None)
     if env_extra:
         env.update(env_extra)
     proc = subprocess.run(
-        [sys.executable, str(WATCH), str(clip), "--no-whisper", *args],
+        [sys.executable, str(MOVIOLA), str(clip), "--no-whisper", *args],
         capture_output=True, text=True, env=env,
     )
     assert proc.returncode == 0, proc.stderr
@@ -46,12 +46,12 @@ def test_transcript_skips_frames(cut_clip: Path):
 
 
 def test_flag_overrides_env(cut_clip: Path):
-    out = _run(cut_clip, "--detail", "efficient", env_extra={"WATCH_DETAIL": "balanced"})
+    out = _run(cut_clip, "--detail", "efficient", env_extra={"MOVIOLA_DETAIL": "balanced"})
     assert "(keyframe" in out
 
 
 def test_default_is_balanced(cut_clip: Path):
-    out = _run(cut_clip)  # no flag, WATCH_DETAIL cleared
+    out = _run(cut_clip)  # no flag, MOVIOLA_DETAIL cleared
     assert "**Detail:** balanced" in out
     assert "(scene" in out
 
