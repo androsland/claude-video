@@ -74,6 +74,48 @@ def plan_chunks(
 
 API_CANDIDATES = (("GROQ_API_KEY", "groq"), ("OPENAI_API_KEY", "openai"))
 
+# Any bit granting group or other access. moviola's one answer to "can somebody
+# else on this machine reach my key file" — every surface that asks calls
+# warn_if_key_file_is_exposed rather than re-deriving this, because the copies
+# had already drifted: setup.py tested `mode & 0o044` (READ only) and stayed
+# silent on a group-writable file, which is the worse case of the two — another
+# user replaces the key and the audio is uploaded to, and billed to, their
+# account. test_key_file_permissions pins all three surfaces to one table.
+KEY_FILE_EXPOSED_BITS = 0o077
+
+_PERM_WARNED: set[str] = set()
+
+
+def warn_if_key_file_is_exposed(path: Path) -> None:
+    """Warn to stderr, once per path per process, if others can reach `path`.
+
+    It warns and returns; it never refuses to read the file. The key is already
+    on disk either way, and stranding a run over a condition `chmod` fixes in
+    one command trades a real failure for a hypothetical one.
+
+    NON-GOALS: this reads the file's MODE BITS. It cannot see the directory's
+    mode, a POSIX ACL, or a filesystem that does not implement modes at all (a
+    Windows drive under WSL, FAT/exFAT, some network mounts) — on any of those
+    an exposed key reports clean and `chmod` is a no-op. It also says nothing
+    about a key that was already leaked by other means.
+    """
+    key = str(path)
+    if key in _PERM_WARNED:
+        return
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        return
+    if not mode & KEY_FILE_EXPOSED_BITS:
+        return
+    _PERM_WARNED.add(key)
+    sys.stderr.write(
+        f"[moviola] WARNING: {path} has permissions {mode:03o} — other users on "
+        f"this machine can reach your API key. Fix: chmod 600 {path}\n"
+    )
+    sys.stderr.flush()
+
+
 
 def _env_key(name: str) -> str | None:
     """An API key read from the process environment, or None if unset or blank."""
@@ -100,16 +142,23 @@ def load_api_key(
 
     If `preferred` is "groq" or "openai", only that backend's key is considered.
 
-    `allow_env=False` restricts the search to moviola's own config file and the
-    working directory's `.env`, ignoring the process environment. resolve_backend
-    passes it when nothing is pinned: a key exported into a shell was put there
-    for whatever the user was running at the time, and reading it as standing
-    permission to upload their audio mistakes an accident for consent. A key in
-    `~/.config/moviola/.env` is different in kind — setup asked before writing it.
+    Only `~/.config/moviola/.env` is searched on disk, whatever `allow_env` says.
+    That file is the one place a key means moviola may use it, because setup.py
+    asked before writing it.
+
+    `allow_env=False` additionally ignores the process environment.
+    resolve_backend passes it when nothing is pinned: a key exported into a shell
+    was put there for whatever the user was running at the time, and reading it
+    as standing permission to upload their audio mistakes an accident for
+    consent.
     """
     def _from_dotenv(path: Path, name: str) -> str | None:
         if not path.exists():
             return None
+        # The runtime is the surface that actually reads the key, and until the
+        # consent audit it was the only one of the three that never checked the
+        # file's mode. That was a hole rather than a division of labour.
+        warn_if_key_file_is_exposed(path)
         try:
             for line in path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -126,10 +175,18 @@ def load_api_key(
             return None
         return None
 
-    dotenv_paths = [
-        Path.home() / ".config" / "moviola" / ".env",
-        Path.cwd() / ".env",
-    ]
+    # moviola's own config file, and nothing else. A key in `$PWD/.env` belongs
+    # to whatever project that directory happens to be — for a Claude Code
+    # plugin, cwd is the user's checkout by construction, and that file may have
+    # been committed by someone they have never met. Reading it is the same
+    # mistake as reading an ambient environment variable: it takes a
+    # credential's presence for its owner's permission, and it silently decides
+    # whose account the audio is billed and disclosed to.
+    #
+    # It was invisible to both preflights, which read this path alone, so a key
+    # found here uploaded audio underneath a "no backend configured" notice.
+    # test_consent_oracles pins all three surfaces to a single answer.
+    dotenv_paths = [Path.home() / ".config" / "moviola" / ".env"]
 
     candidates = API_CANDIDATES
     if preferred is not None:
@@ -172,19 +229,28 @@ def resolve_backend(preferred: str | None = None) -> tuple[str | None, str | Non
     an unpinned run used to fall through to whatever GROQ_API_KEY or
     OPENAI_API_KEY it could see, an ambient one exported for a different tool
     included, and upload the audio. So an unpinned lookup consults only
-    moviola's own config file and the working directory's `.env`. A pin, from
-    either source, is consent and restores the full lookup.
+    moviola's own config file. A pin is consent and restores the environment as
+    a key source.
+
+    `$PWD/.env` is not a key source at all, pinned or not. Upstream reads it and
+    this fork deliberately does not: for a Claude Code plugin the working
+    directory is the user's checkout, so a `.env` committed to a repo they
+    cloned would pick the provider account their audio is billed and disclosed
+    to. It was also unreadable by both preflights, which made every such upload
+    an unannounced one.
 
     NON-GOALS, because an unstated limit reads as a claim of coverage:
       - It cannot tell a key exported FOR moviola from one exported for another
         tool; both are just os.environ. Someone who deliberately exports one now
         has to pin MOVIOLA_WHISPER, and the no-backend hint tells them so.
-      - It treats the working directory's `.env` as deliberate, as upstream
-        does, though a project `.env` may belong to something else entirely.
-        Narrowing that is a separate decision from this one.
+      - Dropping `$PWD/.env` removes a real workflow — a per-project key — and
+        offers nothing in its place beyond moving the key to the config file or
+        pinning. That is the intended trade, not an oversight.
       - It does not stop a pinned upload, and is not meant to. Pinning is the
         consent, and MOVIOLA_WHISPER is itself readable from the environment so
         CI can still pin without a config file.
+      - Consent is judged from where the key SITS, which cannot distinguish a
+        config file the user wrote from one an installer wrote for them.
 
     Returns (None, None) when no backend is usable — `preferred` names an API
     backend whose key is missing, "local" without faster-whisper, or nothing is
