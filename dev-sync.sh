@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# dev-sync.sh — copy this working tree into the installed /watch plugin cache so
+# dev-sync.sh — copy this working tree into the installed /moviola plugin cache so
 # local edits are picked up by Claude Code without publishing a release.
 #
 # The install path is resolved from ~/.claude/plugins/installed_plugins.json, so
 # it follows version bumps automatically. Override it by passing a path as $1 or
-# setting WATCH_INSTALL_PATH. Pass --dry-run to preview without writing.
+# setting MOVIOLA_INSTALL_PATH. Pass --dry-run to preview without writing.
 #
 # Usage:
 #   ./dev-sync.sh                 # sync into the resolved install path
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_KEY="watch@claude-video"
+PLUGIN_KEY="moviola@claude-video"
 INSTALLED_JSON="${HOME}/.claude/plugins/installed_plugins.json"
 
 DRY_RUN=()
@@ -30,7 +30,7 @@ done
 
 # Resolve the destination install path if not given explicitly.
 if [[ -z "$DEST" ]]; then
-  DEST="${WATCH_INSTALL_PATH:-}"
+  DEST="${MOVIOLA_INSTALL_PATH:-}"
 fi
 if [[ -z "$DEST" ]]; then
   if [[ ! -f "$INSTALLED_JSON" ]]; then

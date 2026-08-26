@@ -1,16 +1,16 @@
-# /watch
+# /moviola
 
 **Give Claude the ability to watch any video.**
 
 Claude Code (recommended — auto-updates via marketplace):
 ```
-/plugin marketplace add bradautomates/claude-video
-/plugin install watch@claude-video
+/plugin marketplace add androsland/claude-video
+/plugin install moviola@claude-video
 ```
 
 Codex, Cursor, Copilot, Gemini CLI, or any of 50+ [Agent Skills](https://agentskills.io) hosts:
 ```bash
-npx skills add bradautomates/claude-video -g
+npx skills add androsland/claude-video -g
 ```
 (`-g` installs globally for your user, available across all projects. Drop it to scope per-project.)
 
@@ -22,23 +22,23 @@ Zero config to start — `yt-dlp` and `ffmpeg` install on first run via `brew` o
 
 Claude can read a webpage, run a script, browse a repo. What it can't do, out of the box, is *watch a video*. You paste a YouTube link and it has to either guess from the title or pull a transcript that's missing 90% of what's on screen.
 
-With Claude Video `/watch` you can paste a URL or a local path, ask a question, and Claude fetches captions first, downloads only what it needs, extracts frames (scene-aware, or fast keyframes at `efficient` detail), pulls a timestamped transcript (free captions when available, Whisper as fallback — locally or via API), and `Read`s every frame as an image. By the time it answers, it has *seen* the video and *heard* the audio.
+With Claude Video `/moviola` you can paste a URL or a local path, ask a question, and Claude fetches captions first, downloads only what it needs, extracts frames (scene-aware, or fast keyframes at `efficient` detail), pulls a timestamped transcript (free captions when available, Whisper as fallback — locally or via API), and `Read`s every frame as an image. By the time it answers, it has *seen* the video and *heard* the audio.
 
 ```
-/watch https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
+/moviola https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
 ```
 
 ## What people actually use it for
 
-**Analyze someone else's content.** `/watch https://youtu.be/<viral-video> what hook did they open with?` Claude looks at the first frames, reads the opening transcript, breaks down the structure. Same for ad creative, competitor launches, podcast intros, anything where the *how* matters as much as the *what*.
+**Analyze someone else's content.** `/moviola https://youtu.be/<viral-video> what hook did they open with?` Claude looks at the first frames, reads the opening transcript, breaks down the structure. Same for ad creative, competitor launches, podcast intros, anything where the *how* matters as much as the *what*.
 
-**Diagnose a bug from a video.** Someone sends you a screen recording of something broken. `/watch bug-repro.mov what's going wrong?` Claude watches the recording, finds the frame where the issue appears, describes what's on screen, often catches the cause without you ever opening the file.
+**Diagnose a bug from a video.** Someone sends you a screen recording of something broken. `/moviola bug-repro.mov what's going wrong?` Claude watches the recording, finds the frame where the issue appears, describes what's on screen, often catches the cause without you ever opening the file.
 
-**Summarize a video.** `/watch https://youtu.be/<long-thing> summarize this` does the obvious thing — pulls the structure, the key moments, what was actually said and shown. Faster than watching at 2x.
+**Summarize a video.** `/moviola https://youtu.be/<long-thing> summarize this` does the obvious thing — pulls the structure, the key moments, what was actually said and shown. Faster than watching at 2x.
 
-**Cut the hype out of an update video.** `/watch https://youtu.be/<launch-video> what's actually new — skip the hype` Strip a "game-changer" feature drop down to the few things that matter, so you get the substance without ten minutes of intro and overselling.
+**Cut the hype out of an update video.** `/moviola https://youtu.be/<launch-video> what's actually new — skip the hype` Strip a "game-changer" feature drop down to the few things that matter, so you get the substance without ten minutes of intro and overselling.
 
-**Turn a playlist into notes.** `/watch https://youtu.be/<video> summarize this to a note` Run it across a series and file a per-video summary, so a channel or course becomes a searchable set of notes instead of hours you have to sit through.
+**Turn a playlist into notes.** `/moviola https://youtu.be/<video> summarize this to a note` Run it across a series and file a per-video summary, so a channel or course becomes a searchable set of notes instead of hours you have to sit through.
 
 ## How it works
 
@@ -99,26 +99,26 @@ End-to-end from a cold URL, `transcript` is the cheapest mode by far; the frame 
 
 | Surface | Install |
 |---------|---------|
-| **Claude Code** | `/plugin marketplace add bradautomates/claude-video` then `/plugin install watch@claude-video` |
-| **Codex, Cursor, Copilot, Gemini CLI, +50 more** | `npx skills add bradautomates/claude-video -g` |
-| **claude.ai** (web) | [Download `watch.skill`](https://github.com/bradautomates/claude-video/releases/latest) → Settings → Capabilities → Skills → `+` |
-| **Manual / dev** | `git clone` then symlink `skills/watch` into your host's skills dir (see below) |
+| **Claude Code** | `/plugin marketplace add androsland/claude-video` then `/plugin install moviola@claude-video` |
+| **Codex, Cursor, Copilot, Gemini CLI, +50 more** | `npx skills add androsland/claude-video -g` |
+| **claude.ai** (web) | [Download `moviola.skill`](https://github.com/androsland/claude-video/releases/latest) → Settings → Capabilities → Skills → `+` |
+| **Manual / dev** | `git clone` then symlink `skills/moviola` into your host's skills dir (see below) |
 
 ### Claude Code
 
 ```
-/plugin marketplace add bradautomates/claude-video
-/plugin install watch@claude-video
+/plugin marketplace add androsland/claude-video
+/plugin install moviola@claude-video
 ```
 
-Update later with `/plugin update watch@claude-video`.
+Update later with `/plugin update moviola@claude-video`.
 
 ### Codex, Cursor, Copilot, Gemini CLI, and 50+ other hosts
 
 The [Agent Skills](https://agentskills.io) CLI installs the skill into whatever agents it detects:
 
 ```bash
-npx skills add bradautomates/claude-video -g
+npx skills add androsland/claude-video -g
 ```
 
 `-g` installs globally for your user (`~/.codex/skills`, `~/.cursor/skills`, etc.); drop it to install into the current project instead. Useful flags:
@@ -127,13 +127,13 @@ npx skills add bradautomates/claude-video -g
 - `-l, --list` — list the skills in this repo without installing
 - `--copy` — copy files instead of symlinking (for filesystems without symlink support)
 
-The CLI discovers the skill from `skills/watch/SKILL.md` and copies the whole folder — `SKILL.md` plus its `scripts/` runtime — as a self-contained unit. `SKILL.md` resolves its own scripts relative to wherever it was installed, so it works the same on every host.
+The CLI discovers the skill from `skills/moviola/SKILL.md` and copies the whole folder — `SKILL.md` plus its `scripts/` runtime — as a self-contained unit. `SKILL.md` resolves its own scripts relative to wherever it was installed, so it works the same on every host.
 
-Update later with `npx skills update watch -g`.
+Update later with `npx skills update moviola -g`.
 
 ### claude.ai (web)
 
-1. [Download `watch.skill`](https://github.com/bradautomates/claude-video/releases/latest) from the latest release.
+1. [Download `moviola.skill`](https://github.com/androsland/claude-video/releases/latest) from the latest release.
 2. Go to Settings → Capabilities → Skills.
 3. Click `+` and drop the file in.
 
@@ -144,22 +144,22 @@ Enable "Code execution and file creation" under Capabilities first — the skill
 Clone the repo and symlink the self-contained skill folder into your host's skills directory — the symlink keeps the install in sync with your working tree as you edit:
 
 ```bash
-git clone https://github.com/bradautomates/claude-video.git
-ln -s "$(pwd)/claude-video/skills/watch" ~/.claude/skills/watch   # or ~/.codex/skills/watch
+git clone https://github.com/androsland/claude-video.git
+ln -s "$(pwd)/claude-video/skills/moviola" ~/.claude/skills/moviola   # or ~/.codex/skills/moviola
 ```
 
-For claude.ai, build the `.skill` bundle from source: `bash skills/watch/scripts/build-skill.sh` produces `dist/watch.skill`.
+For claude.ai, build the `.skill` bundle from source: `bash skills/moviola/scripts/build-skill.sh` produces `dist/moviola.skill`.
 
 ## First run
 
-On the first `/watch` call, the skill runs `scripts/setup.py --check`. If `ffmpeg` / `yt-dlp` aren't on your PATH, or no Whisper backend is available, it walks you through fixing it:
+On the first `/moviola` call, the skill runs `scripts/setup.py --check`. If `ffmpeg` / `yt-dlp` aren't on your PATH, or no Whisper backend is available, it walks you through fixing it:
 
 - **macOS** — auto-runs `brew install ffmpeg yt-dlp`.
 - **Linux** — prints the exact `apt` / `dnf` / `pipx` commands.
 - **Windows** — prints the `winget` / `pip` commands.
-- **Transcription** — offers `pip install "faster-whisper>=1.0"` (runs locally, no account) and scaffolds `~/.config/watch/.env` (mode `0600`) with placeholders for `GROQ_API_KEY` and `OPENAI_API_KEY`. Either one clears the check.
+- **Transcription** — offers `pip install "faster-whisper>=1.0"` (runs locally, no account) and scaffolds `~/.config/moviola/.env` (mode `0600`) with placeholders for `GROQ_API_KEY` and `OPENAI_API_KEY`. Either one clears the check.
 
-After setup, preflight is silent and `/watch` just works. The check is a sub-100ms lookup, so it doesn't slow you down on subsequent runs.
+After setup, preflight is silent and `/moviola` just works. The check is a sub-100ms lookup, so it doesn't slow you down on subsequent runs.
 
 ## Transcription backends
 
@@ -173,36 +173,36 @@ Captions cover the majority of public videos for free. The Whisper fallback only
 | Whisper via OpenAI | [OpenAI API key](https://platform.openai.com/api-keys) — `whisper-1` | Standard pricing |
 | Disable Whisper entirely | `--no-whisper` | Free, frames-only when no captions |
 
-**The local backend needs no account and never uploads your audio.** The only thing it sends over the network is a request for model weights from Hugging Face — a full download on first use (2.9 GB for the `large-v3` default, 464 MB with `WATCH_WHISPER_MODEL=small`, 75 MB with `tiny`, cached in `~/.cache/huggingface`), then a revision check on later loads, since faster-whisper resolves the model with `local_files_only=False` and falls back to the cache only when that check fails. Set `HF_HUB_OFFLINE=1` to suppress the check once the weights are cached. Your audio is never part of any of these requests. It uses the GPU when one is usable and falls back to CPU otherwise, so it is also the slow backend: roughly real-time or better on a GPU, several times slower than real-time on CPU with `large-v3`. Drop to `small` or `distil-large-v3` if that matters more than accuracy.
+**The local backend needs no account and never uploads your audio.** The only thing it sends over the network is a request for model weights from Hugging Face — a full download on first use (2.9 GB for the `large-v3` default, 464 MB with `MOVIOLA_WHISPER_MODEL=small`, 75 MB with `tiny`, cached in `~/.cache/huggingface`), then a revision check on later loads, since faster-whisper resolves the model with `local_files_only=False` and falls back to the cache only when that check fails. Set `HF_HUB_OFFLINE=1` to suppress the check once the weights are cached. Your audio is never part of any of these requests. It uses the GPU when one is usable and falls back to CPU otherwise, so it is also the slow backend: roughly real-time or better on a GPU, several times slower than real-time on CPU with `large-v3`. Drop to `small` or `distil-large-v3` if that matters more than accuracy.
 
-**Which backend runs:** `--whisper <backend>` wins, then `WATCH_WHISPER` in `~/.config/watch/.env`, then `auto` — which uses an API key if one is set and falls back to `local`. Installing faster-whisper therefore never changes what an existing key-holder gets; set `WATCH_WHISPER=local` to make on-device the default outright.
+**Which backend runs:** `--whisper <backend>` wins, then `MOVIOLA_WHISPER` in `~/.config/moviola/.env`, then `auto` — which uses an API key if one is set and falls back to `local`. Installing faster-whisper therefore never changes what an existing key-holder gets; set `MOVIOLA_WHISPER=local` to make on-device the default outright.
 
 ```bash
-# ~/.config/watch/.env
-WATCH_WHISPER=local            # auto | local | groq | openai
-WATCH_WHISPER_MODEL=large-v3   # tiny|base|small|medium|large-v3|distil-large-v3, an HF repo id, or a path
-WATCH_WHISPER_DEVICE=auto      # auto | cpu | cuda
-WATCH_WHISPER_COMPUTE=auto     # auto | int8 | int8_float16 | float16 | float32
-WATCH_WHISPER_LANGUAGE=        # blank = auto-detect
+# ~/.config/moviola/.env
+MOVIOLA_WHISPER=local            # auto | local | groq | openai
+MOVIOLA_WHISPER_MODEL=large-v3   # tiny|base|small|medium|large-v3|distil-large-v3, an HF repo id, or a path
+MOVIOLA_WHISPER_DEVICE=auto      # auto | cpu | cuda
+MOVIOLA_WHISPER_COMPUTE=auto     # auto | int8 | int8_float16 | float16 | float32
+MOVIOLA_WHISPER_LANGUAGE=        # blank = auto-detect
 ```
 
 ## Usage
 
 ```
-/watch https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
-/watch https://www.tiktok.com/@user/video/123 summarize this
-/watch ~/Movies/screen-recording.mp4 when does the UI break?
-/watch https://vimeo.com/123 what tools does she mention?
+/moviola https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
+/moviola https://www.tiktok.com/@user/video/123 summarize this
+/moviola ~/Movies/screen-recording.mp4 when does the UI break?
+/moviola https://vimeo.com/123 what tools does she mention?
 ```
 
 Focused on a specific section — denser frame budget, lower token cost:
 ```
-/watch https://youtu.be/abc --start 2:15 --end 2:45
-/watch video.mp4 --start 50 --end 60
-/watch "$URL" --start 1:12:00            # from 1h12m to end
+/moviola https://youtu.be/abc --start 2:15 --end 2:45
+/moviola video.mp4 --start 50 --end 60
+/moviola "$URL" --start 1:12:00            # from 1h12m to end
 ```
 
-Other knobs (passed to `scripts/watch.py`):
+Other knobs (passed to `scripts/moviola.py`):
 
 - `--detail transcript|efficient|balanced|token-burner` — fidelity/speed dial. `transcript` skips frames (transcript only); `efficient` uses fast keyframes (cap 50); `balanced` uses scene-aware frames (cap 100); `token-burner` is scene-aware and uncapped.
 - `--timestamps T1,T2,…` — grab a frame at each absolute timestamp (`SS`/`MM:SS`/`HH:MM:SS`). Claude reads the transcript first, then targets the moments the presenter flags ("look here", "as you can see"). Added on top of the detail frames (reserved against the cap); out-of-window cues are dropped in focus mode; with `--detail transcript` these become the only frames.
@@ -217,32 +217,32 @@ Other knobs (passed to `scripts/watch.py`):
 ## Limits
 
 - **Long-video accuracy depends on the detail mode.** On the capped modes (`efficient`, default `balanced`) coverage thins out past ~10 minutes — the frame cap spreads across the whole clip, so the script prints a "sparse scan" warning and you're better off re-running focused with `--start`/`--end`. `token-burner` lifts the cap and keeps *every* scene-change frame across the full video, so it stays complete on longer clips at the cost of more image tokens. The 10-minute mark is guidance for the capped modes, not a hard ceiling.
-- **Detail is one dial.** Defaults are balanced: scene-aware frames, 2 fps max, 100-frame cap. Use `--detail efficient` for a fast 50-frame keyframe pass, or `--detail token-burner` for uncapped scene candidates. Set `WATCH_DETAIL` in `~/.config/watch/.env` to change the default.
-- **The local Whisper backend trades speed for privacy.** With no usable GPU, `large-v3` on CPU can take several times the clip's own runtime, and the first run downloads 2.9 GB of weights. Set `WATCH_WHISPER_MODEL=small` (464 MB, much faster, less accurate) if that's the shape you're on — or use a Groq key, which returns in seconds. Either way this only applies to videos with no captions.
+- **Detail is one dial.** Defaults are balanced: scene-aware frames, 2 fps max, 100-frame cap. Use `--detail efficient` for a fast 50-frame keyframe pass, or `--detail token-burner` for uncapped scene candidates. Set `MOVIOLA_DETAIL` in `~/.config/moviola/.env` to change the default.
+- **The local Whisper backend trades speed for privacy.** With no usable GPU, `large-v3` on CPU can take several times the clip's own runtime, and the first run downloads 2.9 GB of weights. Set `MOVIOLA_WHISPER_MODEL=small` (464 MB, much faster, less accurate) if that's the shape you're on — or use a Groq key, which returns in seconds. Either way this only applies to videos with no captions.
 
 ## Structure
 
 ```
 .
-├── skills/watch/                 # self-contained skill — copied as a unit by every installer
+├── skills/moviola/                 # self-contained skill — copied as a unit by every installer
 │   ├── SKILL.md                  # skill contract — the source of truth across all surfaces
 │   └── scripts/
-│       ├── watch.py              # entry point — orchestrates download → frames → transcript
+│       ├── moviola.py              # entry point — orchestrates download → frames → transcript
 │       ├── download.py           # yt-dlp wrapper
 │       ├── frames.py             # ffmpeg frame extraction + auto-fps logic
 │       ├── transcribe.py         # VTT parsing + dedupe + Whisper orchestration
 │       ├── whisper.py            # backend selection + Groq / OpenAI clients (pure stdlib)
 │       ├── local_whisper.py      # on-device backend (optional: faster-whisper)
-│       ├── config.py             # shared config (~/.config/watch/.env)
+│       ├── config.py             # shared config (~/.config/moviola/.env)
 │       ├── setup.py              # preflight + installer
-│       └── build-skill.sh        # build dist/watch.skill for claude.ai upload (dev-only)
+│       └── build-skill.sh        # build dist/moviola.skill for claude.ai upload (dev-only)
 ├── hooks/                        # SessionStart status hook (Claude Code only)
 ├── .claude-plugin/               # plugin.json + marketplace.json (Claude Code)
 ├── .codex-plugin/                # plugin.json — Codex/agents manifest ("skills": "./skills/")
 ├── .agents/plugins/              # marketplace.json — Agent Skills marketplace listing
 ├── AGENTS.md → CLAUDE.md         # generic-agent entry point
 ├── tests/                        # pytest suite (ffmpeg-synthesized clips, no network)
-└── .github/workflows/            # release.yml — auto-builds watch.skill on tag push
+└── .github/workflows/            # release.yml — auto-builds moviola.skill on tag push
 ```
 
 ## Develop
@@ -252,10 +252,10 @@ Other knobs (passed to `scripts/watch.py`):
 python3 -m pytest -q
 
 # Build the claude.ai upload bundle:
-bash skills/watch/scripts/build-skill.sh      # → dist/watch.skill
+bash skills/moviola/scripts/build-skill.sh      # → dist/moviola.skill
 ```
 
-Releasing: tag `vX.Y.Z`, push the tag. The workflow builds `dist/watch.skill` and attaches it to the GitHub release. Keep the version in sync across `skills/watch/SKILL.md`, `.claude-plugin/plugin.json`, and `.codex-plugin/plugin.json`.
+Releasing: tag `vX.Y.Z`, push the tag. The workflow builds `dist/moviola.skill` and attaches it to the GitHub release. Keep the version in sync across `skills/moviola/SKILL.md`, `.claude-plugin/plugin.json`, and `.codex-plugin/plugin.json`.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
 
@@ -265,18 +265,18 @@ MIT license.
 
 Built on `yt-dlp`, `ffmpeg`, and Claude's multimodal `Read` tool. Whisper transcription on-device via [faster-whisper](https://github.com/SYSTRAN/faster-whisper), or through [Groq](https://groq.com) / [OpenAI](https://openai.com).
 
-Built by Brad Bonanno — I make content about building with AI on [YouTube (@bradbonanno)](https://www.youtube.com/@bradbonanno), and build AI operating systems for businesses at [Solaris Automation](https://www.solarisautomation.io/). If `/watch` saves you from scrubbing through a video, come say hi on the channel.
+Built by Brad Bonanno — I make content about building with AI on [YouTube (@bradbonanno)](https://www.youtube.com/@bradbonanno), and build AI operating systems for businesses at [Solaris Automation](https://www.solarisautomation.io/). If `/moviola` saves you from scrubbing through a video, come say hi on the channel.
 
 ## Star History
 
 <a href="https://www.star-history.com/?repos=bradautomates%2Fclaude-video&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=bradautomates/claude-video&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=bradautomates/claude-video&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=bradautomates/claude-video&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=androsland/claude-video&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=androsland/claude-video&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=androsland/claude-video&type=date&legend=top-left" />
  </picture>
 </a>
 
 ---
 
-[github.com/bradautomates/claude-video](https://github.com/bradautomates/claude-video) · [@bradbonanno](https://www.youtube.com/@bradbonanno) · [Solaris Automation](https://www.solarisautomation.io/) · [LICENSE](LICENSE)
+[github.com/androsland/claude-video](https://github.com/androsland/claude-video) · [@bradbonanno](https://www.youtube.com/@bradbonanno) · [Solaris Automation](https://www.solarisautomation.io/) · [LICENSE](LICENSE)

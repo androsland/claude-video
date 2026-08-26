@@ -1,46 +1,46 @@
 ---
-name: watch
+name: moviola
 version: "0.2.0"
 description: Watch a video (URL or local path). Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls the transcript from captions (or a Whisper fallback that runs locally or via API), and hands the result to Claude so it can answer questions about what's in the video.
 argument-hint: "<video-url-or-path> [question]"
 allowed-tools: Bash, Read, AskUserQuestion
-homepage: https://github.com/bradautomates/claude-video
-repository: https://github.com/bradautomates/claude-video
+homepage: https://github.com/androsland/claude-video
+repository: https://github.com/androsland/claude-video
 author: bradautomates
 license: MIT
 user-invocable: true
 ---
 
-# /watch
+# /moviola
 
 You don't have a video input; this skill gives you one. A Python script gets captions first, optionally downloads the video, extracts frames as JPEGs (scene-aware, or fast keyframes at `efficient` detail), gets a timestamped transcript (native captions first, then Whisper — on-device or via API — as fallback), and prints frame paths. You then `Read` each frame path to see the images and combine them with the transcript to answer the user.
 
 ## Resolve `SKILL_DIR` (do this before any command)
 
-Every `python3 ...` command below runs a bundled script under `SKILL_DIR/scripts/`. Set `SKILL_DIR` to the **absolute path of the directory containing THIS SKILL.md you just Read** — your harness told you that path in the Read result. The scripts are always a direct sibling of this file (`SKILL_DIR/scripts/watch.py`), in every install layout:
+Every `python3 ...` command below runs a bundled script under `SKILL_DIR/scripts/`. Set `SKILL_DIR` to the **absolute path of the directory containing THIS SKILL.md you just Read** — your harness told you that path in the Read result. The scripts are always a direct sibling of this file (`SKILL_DIR/scripts/moviola.py`), in every install layout:
 
 ```
-Read ~/.claude/plugins/cache/claude-video/watch/<ver>/skills/watch/SKILL.md → SKILL_DIR=…/skills/watch
-Read ~/.codex/skills/watch/SKILL.md                                          → SKILL_DIR=~/.codex/skills/watch
-Read ~/.agents/skills/watch/SKILL.md                                         → SKILL_DIR=~/.agents/skills/watch
+Read ~/.claude/plugins/cache/claude-video/moviola/<ver>/skills/moviola/SKILL.md → SKILL_DIR=…/skills/moviola
+Read ~/.codex/skills/moviola/SKILL.md                                          → SKILL_DIR=~/.codex/skills/moviola
+Read ~/.agents/skills/moviola/SKILL.md                                         → SKILL_DIR=~/.agents/skills/moviola
 ```
 
 Substitute that literal path for `${SKILL_DIR}` in every command. This works on every harness (Claude Code, Codex, Cursor, Gemini CLI, …) without relying on any harness-specific environment variable. Guard once at the start of a run:
 
 ```bash
 SKILL_DIR="<absolute path of the directory containing the SKILL.md you Read>"
-if [ ! -f "$SKILL_DIR/scripts/watch.py" ]; then
-  echo "ERROR: scripts/watch.py not found under SKILL_DIR=$SKILL_DIR" >&2
+if [ ! -f "$SKILL_DIR/scripts/moviola.py" ]; then
+  echo "ERROR: scripts/moviola.py not found under SKILL_DIR=$SKILL_DIR" >&2
   echo "Re-check the directory of the SKILL.md you Read and substitute it as SKILL_DIR." >&2
   exit 1
 fi
 ```
 
-## Step 0 — Setup preflight (runs every `/watch` invocation, silent on success)
+## Step 0 — Setup preflight (runs every `/moviola` invocation, silent on success)
 
 **Python interpreter:** every `python3 ...` command in this skill is for macOS/Linux. On **Windows**, substitute `python` — the `python3` command on Windows is the Microsoft Store stub and will not run the script.
 
-On the first `/watch` invocation in a session, use structured preflight so you can detect first-run setup:
+On the first `/moviola` invocation in a session, use structured preflight so you can detect first-run setup:
 
 ```bash
 python3 "${SKILL_DIR}/scripts/setup.py" --json
@@ -51,19 +51,19 @@ Branch on two fields:
 - **`can_proceed: true` and `first_run: false`** → setup is already done (the user may have deliberately skipped Whisper entirely — that's allowed). Proceed to Step 1 without comment.
 - **`first_run: true`** → genuine first-time setup. Do these in order:
   1. If `missing_binaries` is non-empty, run the installer first (it auto-installs on macOS / prints commands elsewhere — see below) and confirm the binaries land. **Do not skip this and jump to preferences.**
-  2. Run the installer once more if needed so it scaffolds `~/.config/watch/.env` (it only writes the template when the file is absent, so let it create the file *before* you write any values into it).
-  3. Encourage a Whisper backend — offer BOTH `pip install "faster-whisper>=1.0"` (no account, runs locally) and an API key — and ask the watch-preference questions below, then write the selected values into `~/.config/watch/.env` and set `SETUP_COMPLETE=true`.
+  2. Run the installer once more if needed so it scaffolds `~/.config/moviola/.env` (it only writes the template when the file is absent, so let it create the file *before* you write any values into it).
+  3. Encourage a Whisper backend — offer BOTH `pip install "faster-whisper>=1.0"` (no account, runs locally) and an API key — and ask the moviola-preference questions below, then write the selected values into `~/.config/moviola/.env` and set `SETUP_COMPLETE=true`.
 - **`can_proceed: false` and `first_run: false`** → setup was finished before but the environment regressed (e.g. `missing_binaries` after an OS change). Run the installer to remediate, then proceed. Don't re-ask preferences.
 
 A missing Whisper backend is *encouraged to fix, not required*: on a genuine first run `status` will read `needs_key` even when binaries are present — that's your cue to encourage one, not a blocker. `needs_key` is a legacy name; either a key or faster-whisper clears it (check `has_transcription`).
 
-On follow-up `/watch` calls in the same session, use the silent check:
+On follow-up `/moviola` calls in the same session, use the silent check:
 
 ```bash
 python3 "${SKILL_DIR}/scripts/setup.py" --check
 ```
 
-This is a <100ms lookup. Exit 0 means /watch can run — this **includes a user who finished setup with no Whisper backend at all** (that is allowed). On exit 0 the script emits **nothing** — proceed to Step 1 without comment. **Do NOT announce "setup is complete" to the user** — they don't need a status message on every turn. The only acceptable user-visible output from Step 0 is when remediation is required.
+This is a <100ms lookup. Exit 0 means /moviola can run — this **includes a user who finished setup with no Whisper backend at all** (that is allowed). On exit 0 the script emits **nothing** — proceed to Step 1 without comment. **Do NOT announce "setup is complete" to the user** — they don't need a status message on every turn. The only acceptable user-visible output from Step 0 is when remediation is required.
 
 On non-zero exit, follow the table:
 
@@ -81,11 +81,11 @@ The installer is idempotent — safe to re-run:
 python3 "${SKILL_DIR}/scripts/setup.py"
 ```
 
-On macOS with Homebrew, it auto-installs `ffmpeg` and `yt-dlp`. On Linux/Windows, it prints the exact install commands for the user to run. It scaffolds `~/.config/watch/.env` with commented placeholders and default watch settings at `0600` perms.
+On macOS with Homebrew, it auto-installs `ffmpeg` and `yt-dlp`. On Linux/Windows, it prints the exact install commands for the user to run. It scaffolds `~/.config/moviola/.env` with commented placeholders and default moviola settings at `0600` perms.
 
-**If no transcription backend is present after install** (`has_transcription: false`): use `AskUserQuestion` to offer the three options — run Whisper locally (`pip install "faster-whisper>=1.0"`; no account, no upload, slower, model downloaded on first use), a Groq key (fast and cheap), or an OpenAI key. For a key, write it into `~/.config/watch/.env` on the matching `GROQ_API_KEY=` / `OPENAI_API_KEY=` line. If they don't want Whisper at all, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
+**If no transcription backend is present after install** (`has_transcription: false`): use `AskUserQuestion` to offer the three options — run Whisper locally (`pip install "faster-whisper>=1.0"`; no account, no upload, slower, model downloaded on first use), a Groq key (fast and cheap), or an OpenAI key. For a key, write it into `~/.config/moviola/.env` on the matching `GROQ_API_KEY=` / `OPENAI_API_KEY=` line. If they don't want Whisper at all, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
 
-**First-run watch preference:** after the installer has scaffolded `~/.config/watch/.env`, use `AskUserQuestion` to ask one question:
+**First-run moviola preference:** after the installer has scaffolded `~/.config/moviola/.env`, use `AskUserQuestion` to ask one question:
 
 - Default detail (one dial). Present these as `AskUserQuestion` options in this exact order — lightest to heaviest — and keep `(recommended)` on `balanced` even though it is not first (do **not** reorder to put the recommended option first):
   - `transcript` — no frames at all, transcript only (skips video download when captions exist).
@@ -93,29 +93,29 @@ On macOS with Homebrew, it auto-installs `ffmpeg` and `yt-dlp`. On Linux/Windows
   - `balanced` (recommended) — scene-aware frames (cap 100, default).
   - `token-burner` — scene-aware, uncapped (maximum fidelity; high token cost).
 
-Write the answer directly into `~/.config/watch/.env` by setting the bare key on its own line — **no trailing inline comment** (a `# note` after the value can break parsing):
+Write the answer directly into `~/.config/moviola/.env` by setting the bare key on its own line — **no trailing inline comment** (a `# note` after the value can break parsing):
 
 ```bash
-WATCH_DETAIL=balanced
+MOVIOLA_DETAIL=balanced
 ```
 
 Use the user's selected value. If they skip the question, keep the recommended default. Once dependencies, the API-key choice, and this preference are handled, write or update `SETUP_COMPLETE=true` in the same file. Do not ask this preference question again when `SETUP_COMPLETE=true`.
 
-**Structured mode (optional):** `python3 "${SKILL_DIR}/scripts/setup.py" --json` emits `{status, can_proceed, first_run, setup_complete, missing_binaries, whisper_backend, has_api_key, has_local_whisper, has_transcription, config_file, watch_detail, whisper_setting, platform}` where `status` is one of `ready | needs_install | needs_key | needs_install_and_key`. `status` describes the *ideal* state (a backend is encouraged, so a first run with none reads `needs_key`); `can_proceed` is the operational gate (binaries present AND a backend is available OR setup was already completed). `whisper_backend` names what would actually run — `local` when faster-whisper is installed and no key is set. Branch on `can_proceed`/`first_run` to decide whether to run; use `status` and `has_transcription` to decide what to encourage.
+**Structured mode (optional):** `python3 "${SKILL_DIR}/scripts/setup.py" --json` emits `{status, can_proceed, first_run, setup_complete, missing_binaries, whisper_backend, has_api_key, has_local_whisper, has_transcription, config_file, moviola_detail, whisper_setting, platform}` where `status` is one of `ready | needs_install | needs_key | needs_install_and_key`. `status` describes the *ideal* state (a backend is encouraged, so a first run with none reads `needs_key`); `can_proceed` is the operational gate (binaries present AND a backend is available OR setup was already completed). `whisper_backend` names what would actually run — `local` when faster-whisper is installed and no key is set. Branch on `can_proceed`/`first_run` to decide whether to run; use `status` and `has_transcription` to decide what to encourage.
 
-Within a single session, you can skip Step 0 on follow-up `/watch` calls — once `--check` returned 0, nothing about the environment changes between turns.
+Within a single session, you can skip Step 0 on follow-up `/moviola` calls — once `--check` returned 0, nothing about the environment changes between turns.
 
 ## When to use
 
 - User pastes a video URL (YouTube, Vimeo, X, TikTok, Twitch clip, most yt-dlp-supported sites) and asks about it.
 - User points at a local video file (`.mp4`, `.mov`, `.mkv`, `.webm`, etc.) and asks about it.
-- User types `/watch <url-or-path> [question]`.
+- User types `/moviola <url-or-path> [question]`.
 
 ## Recommended limits
 
 - **Best accuracy: videos under 10 minutes.** Frame coverage scales inversely with duration.
 - **Universal rate cap: 2 fps.** The script never samples faster than 2 fps, even when a budget or `--fps` would imply more.
-- **The frame ceiling is set by the detail mode** (`WATCH_DETAIL` in `~/.config/watch/.env`, or `--detail`), not a single global cap:
+- **The frame ceiling is set by the detail mode** (`MOVIOLA_DETAIL` in `~/.config/moviola/.env`, or `--detail`), not a single global cap:
   - `transcript` → no frames
   - `efficient` → up to **50** (keyframes)
   - `balanced` (default) → up to **100** (scene-aware)
@@ -131,12 +131,12 @@ Within a single session, you can skip Step 0 on follow-up `/watch` calls — onc
 
 ## How to invoke
 
-**Step 1 — parse the user input.** Separate the video source (URL or path) from any question the user asked. Example: `/watch https://youtu.be/abc what language is this in?` → source = `https://youtu.be/abc`, question = `what language is this in?`.
+**Step 1 — parse the user input.** Separate the video source (URL or path) from any question the user asked. Example: `/moviola https://youtu.be/abc what language is this in?` → source = `https://youtu.be/abc`, question = `what language is this in?`.
 
-**Step 2 — run the watch script.** Pass the source verbatim. Do not shell-escape it yourself beyond normal quoting:
+**Step 2 — run the moviola script.** Pass the source verbatim. Do not shell-escape it yourself beyond normal quoting:
 
 ```bash
-python3 "${SKILL_DIR}/scripts/watch.py" "<source>"
+python3 "${SKILL_DIR}/scripts/moviola.py" "<source>"
 ```
 
 Optional flags:
@@ -171,13 +171,13 @@ Transcript is auto-filtered to the same range. Frame timestamps are absolute (re
 Examples:
 ```bash
 # Last 10 seconds of a 1 minute video
-python3 "${SKILL_DIR}/scripts/watch.py" video.mp4 --start 50 --end 60
+python3 "${SKILL_DIR}/scripts/moviola.py" video.mp4 --start 50 --end 60
 
 # Zoom into 2:15 → 2:45 at 2 fps (60 frames)
-python3 "${SKILL_DIR}/scripts/watch.py" "$URL" --start 2:15 --end 2:45 --fps 2
+python3 "${SKILL_DIR}/scripts/moviola.py" "$URL" --start 2:15 --end 2:45 --fps 2
 
 # From 1h12m to the end of the video
-python3 "${SKILL_DIR}/scripts/watch.py" "$URL" --start 1:12:00
+python3 "${SKILL_DIR}/scripts/moviola.py" "$URL" --start 1:12:00
 ```
 
 **Step 3 — Read every frame path the script lists.** The Read tool renders JPEGs directly as images for you. Read all frames in a single message (parallel tool calls) so you see them together. The frames are in chronological order with a `t=MM:SS` timestamp so you can align them to the transcript.
@@ -194,10 +194,10 @@ This holds for `transcript` detail too: even with no frames, produce a **summary
 
 ## Detail and frames
 
-Default behavior comes from `~/.config/watch/.env`:
+Default behavior comes from `~/.config/moviola/.env`:
 
-- `WATCH_DETAIL=transcript|efficient|balanced|token-burner` (default: `balanced`)
-- `WATCH_WHISPER=auto|local|groq|openai` (default: `auto`) plus the `WATCH_WHISPER_*` local settings in [Transcription](#transcription)
+- `MOVIOLA_DETAIL=transcript|efficient|balanced|token-burner` (default: `balanced`)
+- `MOVIOLA_WHISPER=auto|local|groq|openai` (default: `auto`) plus the `MOVIOLA_WHISPER_*` local settings in [Transcription](#transcription)
 
 At `transcript` detail, captions are enough to return a report without downloading video. If captions are missing, the script downloads audio only and tries Whisper (locally or via API, per the resolution order in [Transcription](#transcription)). If no transcript can be produced, it reports the limitation clearly; re-run with `--detail balanced` for frames.
 
@@ -229,27 +229,27 @@ The script gets a timestamped transcript in one of two ways:
    - **`groq`** — `whisper-large-v3`. Cheaper and faster than OpenAI. Get a key at console.groq.com/keys.
    - **`openai`** — `whisper-1`. The compatible fallback. Get a key at platform.openai.com/api-keys.
 
-**Which one runs.** `--whisper <backend>` wins, then `WATCH_WHISPER` in `~/.config/watch/.env`, then `auto`. Under `auto` an API key is used if one is set (Groq before OpenAI) and `local` is the fallback — so adding faster-whisper never silently changes what an existing key-holder gets. Set `WATCH_WHISPER=local` to make on-device the default even with a key present. `--no-whisper` skips the fallback entirely.
+**Which one runs.** `--whisper <backend>` wins, then `MOVIOLA_WHISPER` in `~/.config/moviola/.env`, then `auto`. Under `auto` an API key is used if one is set (Groq before OpenAI) and `local` is the fallback — so adding faster-whisper never silently changes what an existing key-holder gets. Set `MOVIOLA_WHISPER=local` to make on-device the default even with a key present. `--no-whisper` skips the fallback entirely.
 
-**Local backend settings** (all optional, in `~/.config/watch/.env`):
+**Local backend settings** (all optional, in `~/.config/moviola/.env`):
 
 | Setting | Values | Default |
 |---|---|---|
-| `WATCH_WHISPER_MODEL` | a size (`tiny`…`large-v3`, `distil-large-v3`), a Hugging Face repo id, or a local model path | `large-v3` |
-| `WATCH_WHISPER_DEVICE` | `auto` \| `cpu` \| `cuda` | `auto` |
-| `WATCH_WHISPER_COMPUTE` | `auto` \| `int8` \| `int8_float16` \| `float16` \| `float32` | `auto` (`int8_float16` on GPU, `int8` on CPU) |
-| `WATCH_WHISPER_LANGUAGE` | an ISO code (`en`, `de`, …) | blank — auto-detect |
+| `MOVIOLA_WHISPER_MODEL` | a size (`tiny`…`large-v3`, `distil-large-v3`), a Hugging Face repo id, or a local model path | `large-v3` |
+| `MOVIOLA_WHISPER_DEVICE` | `auto` \| `cpu` \| `cuda` | `auto` |
+| `MOVIOLA_WHISPER_COMPUTE` | `auto` \| `int8` \| `int8_float16` \| `float16` \| `float32` | `auto` (`int8_float16` on GPU, `int8` on CPU) |
+| `MOVIOLA_WHISPER_LANGUAGE` | an ISO code (`en`, `de`, …) | blank — auto-detect |
 
-**Speed.** Local transcription is compute, not a network round-trip, so it is the slow backend: expect roughly real-time or better on a GPU and several times slower than real-time on CPU with `large-v3`. If a long video on CPU is too slow, set `WATCH_WHISPER_MODEL=small` or narrow the request with `--start`/`--end` — a focused run only transcribes the range you asked for.
+**Speed.** Local transcription is compute, not a network round-trip, so it is the slow backend: expect roughly real-time or better on a GPU and several times slower than real-time on CPU with `large-v3`. If a long video on CPU is too slow, set `MOVIOLA_WHISPER_MODEL=small` or narrow the request with `--start`/`--end` — a focused run only transcribes the range you asked for.
 
 ## Failure modes and handling
 
-- **Setup preflight failed** → run `python3 "${SKILL_DIR}/scripts/setup.py"` (auto-installs ffmpeg/yt-dlp via brew on macOS, scaffolds the `.env`). For a transcription backend, offer both options: `pip install "faster-whisper>=1.0"` (no account) or an API key written to `~/.config/watch/.env`.
+- **Setup preflight failed** → run `python3 "${SKILL_DIR}/scripts/setup.py"` (auto-installs ffmpeg/yt-dlp via brew on macOS, scaffolds the `.env`). For a transcription backend, offer both options: `pip install "faster-whisper>=1.0"` (no account) or an API key written to `~/.config/moviola/.env`.
 - **No transcript available** → captions missing AND (no Whisper backend OR Whisper failed). Script prints a hint pointing to setup. Proceed frames-only and tell the user.
 - **Long video warning printed** → acknowledge it in your answer. Offer to re-run focused on a specific section via `--start`/`--end` rather than a sparse full-video scan.
 - **Download fails** → yt-dlp's error goes to stderr. If it's a login-required or region-locked video, tell the user plainly; do not keep retrying.
 - **Whisper request fails** → the error is printed to stderr (likely: invalid key or rate limit). Audio over the API's 25 MB upload cap is split into chunks and transcribed automatically, so length alone won't fail it; if some chunks fail the transcript is partial and the dropped chunks are noted on stderr. The report will say "none available" only if every chunk fails. You can retry with `--whisper openai` if Groq failed (or vice versa), or `--whisper local` to bypass the APIs entirely.
-- **Local Whisper is slow or falls back to CPU** → stderr names the device it settled on. A GPU that fails at load is retried on CPU automatically; that is a warning, not an error, and the transcript still arrives. For a faster result set `WATCH_WHISPER_MODEL=small` or use `--start`/`--end`.
+- **Local Whisper is slow or falls back to CPU** → stderr names the device it settled on. A GPU that fails at load is retried on CPU automatically; that is a warning, not an error, and the transcript still arrives. For a faster result set `MOVIOLA_WHISPER_MODEL=small` or use `--start`/`--end`.
 
 ## Token efficiency
 
@@ -269,9 +269,9 @@ If you already watched a video this session and the user asks a follow-up, do **
 - **When the `groq` backend runs:** sends the extracted audio clip to `api.groq.com/openai/v1/audio/transcriptions`
 - **When the `openai` backend runs:** sends the extracted audio clip to `api.openai.com/v1/audio/transcriptions`
 - Writes the downloaded video, frames, audio, and an intermediate transcript to a working directory under the system temp dir (or `--out-dir` if specified) so Claude can `Read` them
-- Reads / creates `~/.config/watch/.env` (mode `0600`) to store the Whisper API key(s), backend settings, and a `SETUP_COMPLETE` marker. As a fallback, also reads `.env` in the current working directory
+- Reads / creates `~/.config/moviola/.env` (mode `0600`) to store the Whisper API key(s), backend settings, and a `SETUP_COMPLETE` marker. As a fallback, also reads `.env` in the current working directory
 
-Under the default `auto`, the backend that runs is an API one if a key is configured, and `local` otherwise — so **whether audio leaves the machine depends on your configuration**. `WATCH_WHISPER=local` or `--whisper local` makes that unconditional; `--no-whisper` skips transcription entirely. The report's transcript header names the backend that actually ran.
+Under the default `auto`, the backend that runs is an API one if a key is configured, and `local` otherwise — so **whether audio leaves the machine depends on your configuration**. `MOVIOLA_WHISPER=local` or `--whisper local` makes that unconditional; `--no-whisper` skips transcription entirely. The report's transcript header names the backend that actually ran.
 
 **What this skill does NOT do:**
 - Does not upload the video itself to any API — only the extracted audio ever goes out, and only to an API backend, and only when native captions are missing AND Whisper is not disabled with `--no-whisper`
@@ -279,9 +279,9 @@ Under the default `auto`, the backend that runs is an API one if a key is config
 - Does not access any platform account (no login, no session cookies, no posting) — yt-dlp only ever requests public data
 - Does not share API keys between providers (Groq key only goes to `api.groq.com`, OpenAI key only goes to `api.openai.com`)
 - Does not log, cache, or write API keys to stdout, stderr, or output files
-- Does not persist anything outside the working directory, `~/.config/watch/.env`, and the Hugging Face model cache (`local` backend only) — clean up the working directory when you're done (Step 5)
-- Does not verify that a downloaded Whisper model is what it claims to be beyond what `huggingface_hub` checks — `WATCH_WHISPER_MODEL` accepts an arbitrary repo id, so pointing it at an untrusted repo is a trust decision you are making
+- Does not persist anything outside the working directory, `~/.config/moviola/.env`, and the Hugging Face model cache (`local` backend only) — clean up the working directory when you're done (Step 5)
+- Does not verify that a downloaded Whisper model is what it claims to be beyond what `huggingface_hub` checks — `MOVIOLA_WHISPER_MODEL` accepts an arbitrary repo id, so pointing it at an untrusted repo is a trust decision you are making
 
-**Bundled scripts:** `scripts/watch.py` (entry point), `scripts/download.py` (yt-dlp wrapper), `scripts/frames.py` (ffmpeg frame extraction), `scripts/transcribe.py` (caption selection + Whisper orchestration), `scripts/whisper.py` (backend selection + Groq / OpenAI clients), `scripts/local_whisper.py` (on-device faster-whisper backend), `scripts/setup.py` (preflight + installer)
+**Bundled scripts:** `scripts/moviola.py` (entry point), `scripts/download.py` (yt-dlp wrapper), `scripts/frames.py` (ffmpeg frame extraction), `scripts/transcribe.py` (caption selection + Whisper orchestration), `scripts/whisper.py` (backend selection + Groq / OpenAI clients), `scripts/local_whisper.py` (on-device faster-whisper backend), `scripts/setup.py` (preflight + installer)
 
 Review scripts before first use to verify behavior.

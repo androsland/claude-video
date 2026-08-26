@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Shared /watch configuration helpers."""
+"""Shared /moviola configuration helpers."""
 from __future__ import annotations
 
 import os
 from pathlib import Path
 
 
-CONFIG_DIR = Path.home() / ".config" / "watch"
+CONFIG_DIR = Path.home() / ".config" / "moviola"
 CONFIG_FILE = CONFIG_DIR / ".env"
 
 DEFAULT_DETAIL = "balanced"
@@ -42,7 +42,7 @@ def read_env_file(path: Path | None = None) -> dict[str, str]:
             value = value[1:-1]
         else:
             # Strip an inline comment (a '#' preceded by whitespace) from an
-            # unquoted value. Without this, `WATCH_DETAIL=balanced  # note`
+            # unquoted value. Without this, `MOVIOLA_DETAIL=balanced  # note`
             # parses as "balanced  # note", fails validation, and silently
             # falls back to the default. Keeps '#' inside quotes / API keys.
             for i, ch in enumerate(value):
@@ -66,11 +66,11 @@ def _setting(file_values: dict[str, str], name: str, default: str = "") -> str:
 def get_config() -> dict[str, object]:
     file_values = read_env_file()
 
-    detail = _setting(file_values, "WATCH_DETAIL", DEFAULT_DETAIL)
+    detail = _setting(file_values, "MOVIOLA_DETAIL", DEFAULT_DETAIL)
     if detail not in DETAILS:
         detail = DEFAULT_DETAIL
 
-    whisper = _setting(file_values, "WATCH_WHISPER", DEFAULT_WHISPER).lower()
+    whisper = _setting(file_values, "MOVIOLA_WHISPER", DEFAULT_WHISPER).lower()
     if whisper not in WHISPER_BACKENDS:
         whisper = DEFAULT_WHISPER
 
@@ -79,10 +79,10 @@ def get_config() -> dict[str, object]:
         "whisper": whisper,
         # Empty means "let the local backend pick its own default" — validating
         # these here would mean hardcoding a model list that goes stale.
-        "whisper_model": _setting(file_values, "WATCH_WHISPER_MODEL"),
-        "whisper_device": _setting(file_values, "WATCH_WHISPER_DEVICE"),
-        "whisper_compute": _setting(file_values, "WATCH_WHISPER_COMPUTE"),
-        "whisper_language": _setting(file_values, "WATCH_WHISPER_LANGUAGE"),
+        "whisper_model": _setting(file_values, "MOVIOLA_WHISPER_MODEL"),
+        "whisper_device": _setting(file_values, "MOVIOLA_WHISPER_DEVICE"),
+        "whisper_compute": _setting(file_values, "MOVIOLA_WHISPER_COMPUTE"),
+        "whisper_language": _setting(file_values, "MOVIOLA_WHISPER_LANGUAGE"),
         "config_file": str(CONFIG_FILE),
     }
 

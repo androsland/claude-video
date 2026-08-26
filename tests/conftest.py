@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-# Make the bundled scripts importable (mirrors watch.py's sys.path insert).
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "skills" / "watch" / "scripts"
+# Make the bundled scripts importable (mirrors moviola.py's sys.path insert).
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "skills" / "moviola" / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 # 14 visually distinct fills → 14 abrupt cuts → x264 emits a keyframe per cut.

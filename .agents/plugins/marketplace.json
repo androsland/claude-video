@@ -1,14 +1,14 @@
 {
   "name": "claude-video",
   "interface": {
-    "displayName": "watch"
+    "displayName": "moviola"
   },
   "plugins": [
     {
-      "name": "watch",
+      "name": "moviola",
       "source": {
         "source": "url",
-        "url": "https://github.com/bradautomates/claude-video.git"
+        "url": "https://github.com/androsland/claude-video.git"
       },
       "policy": {
         "installation": "AVAILABLE",

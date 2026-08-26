@@ -96,7 +96,7 @@ def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, 
         return None
 
     dotenv_paths = [
-        Path.home() / ".config" / "watch" / ".env",
+        Path.home() / ".config" / "moviola" / ".env",
         Path.cwd() / ".env",
     ]
 
@@ -134,7 +134,7 @@ def resolve_backend(preferred: str | None = None) -> tuple[str | None, str | Non
     gets — faster-whisper may be installed on their machine for unrelated
     reasons, and swapping a 5-second API call for a multi-minute CPU transcode
     without being asked is a regression, not a feature. Local is the fallback
-    that makes the no-key case work at all; pin WATCH_WHISPER=local (or pass
+    that makes the no-key case work at all; pin MOVIOLA_WHISPER=local (or pass
     --whisper local) to make it the primary.
 
     Returns (None, None) when no backend is usable — when `preferred` names an
@@ -262,7 +262,7 @@ def _build_multipart(fields: dict[str, str], file_path: Path) -> tuple[bytes, st
     Whisper's multipart upload is small and predictable — doing it by hand
     keeps us on pure stdlib instead of pulling requests/groq/openai SDKs.
     """
-    boundary = f"----WatchBoundary{uuid.uuid4().hex}"
+    boundary = f"----MoviolaBoundary{uuid.uuid4().hex}"
     eol = b"\r\n"
     buf = io.BytesIO()
 
@@ -305,7 +305,7 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
         # Groq sits behind Cloudflare — the default `Python-urllib/3.x` UA
         # trips WAF rule 1010 (403) before auth even runs. Any non-default
         # UA clears it; we identify honestly.
-        "User-Agent": "watch-skill/1.0 (+claude-code; python-urllib)",
+        "User-Agent": "moviola-skill/1.0 (+claude-code; python-urllib)",
     }
 
     context = ssl.create_default_context()
@@ -336,7 +336,7 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
 
             if attempt < MAX_ATTEMPTS - 1:
                 print(
-                    f"[watch] whisper HTTP {exc.code} — retrying in {delay:.1f}s "
+                    f"[moviola] whisper HTTP {exc.code} — retrying in {delay:.1f}s "
                     f"(attempt {attempt + 2}/{MAX_ATTEMPTS})",
                     file=sys.stderr,
                 )
@@ -347,7 +347,7 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
             if attempt < MAX_ATTEMPTS - 1:
                 delay = RETRY_BASE_DELAY * (attempt + 1)
                 print(
-                    f"[watch] whisper network error ({type(exc).__name__}: {exc}) — "
+                    f"[moviola] whisper network error ({type(exc).__name__}: {exc}) — "
                     f"retrying in {delay:.1f}s (attempt {attempt + 2}/{MAX_ATTEMPTS})",
                     file=sys.stderr,
                 )
@@ -443,13 +443,13 @@ def transcribe_chunks(
         except SystemExit as exc:
             failures += 1
             print(
-                f"[watch] chunk {index + 1}/{len(chunks)} failed — skipping ({exc})",
+                f"[moviola] chunk {index + 1}/{len(chunks)} failed — skipping ({exc})",
                 file=sys.stderr,
             )
             continue
         segments.extend(shift_segments(chunk_segments, offset))
         print(
-            f"[watch] chunk {index + 1}/{len(chunks)} → {len(chunk_segments)} segments",
+            f"[moviola] chunk {index + 1}/{len(chunks)} → {len(chunk_segments)} segments",
             file=sys.stderr,
         )
 
@@ -515,7 +515,7 @@ def transcribe_video(
             "No Whisper backend available. Either install the local backend "
             "(`pip install \"faster-whisper>=1.0\"`) for on-device transcription, or set "
             "GROQ_API_KEY / OPENAI_API_KEY in the environment or in "
-            f"~/.config/watch/.env. Run `python3 {setup_py}` to configure."
+            f"~/.config/moviola/.env. Run `python3 {setup_py}` to configure."
         )
 
     if backend != LOCAL_BACKEND and not api_key:
@@ -529,7 +529,7 @@ def transcribe_video(
     span = ""
     if start_seconds is not None or end_seconds is not None:
         span = f" [{offset:.0f}s–{end_seconds:.0f}s]" if end_seconds else f" [from {offset:.0f}s]"
-    print(f"[watch] extracting audio for Whisper ({backend}){span}…", file=sys.stderr)
+    print(f"[moviola] extracting audio for Whisper ({backend}){span}…", file=sys.stderr)
     audio_path = extract_audio(video_path, audio_out, start_seconds, end_seconds)
     audio_bytes = audio_path.stat().st_size
 
@@ -541,13 +541,13 @@ def transcribe_video(
         # upload cap, which does not apply on-device. faster-whisper streams
         # long audio in 30-second windows itself, so a 3-hour file is fine.
         print(
-            f"[watch] audio: {audio_bytes / 1024:.0f} kB — transcribing on-device…",
+            f"[moviola] audio: {audio_bytes / 1024:.0f} kB — transcribing on-device…",
             file=sys.stderr,
         )
         segments = _transcribe_local(audio_path, options)
     elif audio_bytes <= MAX_UPLOAD_BYTES:
         print(
-            f"[watch] audio: {audio_bytes / 1024:.0f} kB — uploading to {backend} Whisper…",
+            f"[moviola] audio: {audio_bytes / 1024:.0f} kB — uploading to {backend} Whisper…",
             file=sys.stderr,
         )
         segments = transcribe_one(audio_path)
@@ -555,7 +555,7 @@ def transcribe_video(
         duration = audio_duration(audio_path)
         plan = plan_chunks(duration, audio_bytes, MAX_UPLOAD_BYTES)
         print(
-            f"[watch] audio: {audio_bytes / (1024 * 1024):.0f} MB exceeds "
+            f"[moviola] audio: {audio_bytes / (1024 * 1024):.0f} MB exceeds "
             f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB — splitting into {len(plan)} chunks…",
             file=sys.stderr,
         )
@@ -570,7 +570,7 @@ def transcribe_video(
     if offset:
         segments = shift_segments(segments, offset)
 
-    print(f"[watch] transcribed {len(segments)} segments via {backend}", file=sys.stderr)
+    print(f"[moviola] transcribed {len(segments)} segments via {backend}", file=sys.stderr)
     return segments, backend
 
 

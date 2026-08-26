@@ -1,29 +1,29 @@
-"""WATCH_DETAIL resolution and frame_cap mapping."""
+"""MOVIOLA_DETAIL resolution and frame_cap mapping."""
 from __future__ import annotations
 
 import config
 
 
 def test_default_detail_is_balanced(monkeypatch, tmp_path):
-    monkeypatch.delenv("WATCH_DETAIL", raising=False)
+    monkeypatch.delenv("MOVIOLA_DETAIL", raising=False)
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
     assert config.get_config()["detail"] == "balanced"
 
 
 def test_env_overrides_detail(monkeypatch, tmp_path):
-    monkeypatch.setenv("WATCH_DETAIL", "efficient")
+    monkeypatch.setenv("MOVIOLA_DETAIL", "efficient")
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
     assert config.get_config()["detail"] == "efficient"
 
 
 def test_invalid_detail_falls_back_to_default(monkeypatch, tmp_path):
-    monkeypatch.setenv("WATCH_DETAIL", "bogus")
+    monkeypatch.setenv("MOVIOLA_DETAIL", "bogus")
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
     assert config.get_config()["detail"] == "balanced"
 
 
 def test_get_config_keys(monkeypatch, tmp_path):
-    monkeypatch.delenv("WATCH_DETAIL", raising=False)
+    monkeypatch.delenv("MOVIOLA_DETAIL", raising=False)
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
     cfg = config.get_config()
     assert set(cfg) == {
@@ -38,7 +38,7 @@ def test_get_config_keys(monkeypatch, tmp_path):
 
 
 def test_whisper_defaults_to_auto(monkeypatch, tmp_path):
-    for name in ("WATCH_WHISPER", "WATCH_WHISPER_MODEL", "WATCH_WHISPER_DEVICE"):
+    for name in ("MOVIOLA_WHISPER", "MOVIOLA_WHISPER_MODEL", "MOVIOLA_WHISPER_DEVICE"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
     cfg = config.get_config()
@@ -47,25 +47,25 @@ def test_whisper_defaults_to_auto(monkeypatch, tmp_path):
 
 
 def test_whisper_backend_from_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("WATCH_WHISPER", "LOCAL")
+    monkeypatch.setenv("MOVIOLA_WHISPER", "LOCAL")
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
     assert config.get_config()["whisper"] == "local"
 
 
 def test_whisper_backend_invalid_falls_back(monkeypatch, tmp_path):
-    monkeypatch.setenv("WATCH_WHISPER", "mlx")
+    monkeypatch.setenv("MOVIOLA_WHISPER", "mlx")
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
     assert config.get_config()["whisper"] == "auto"
 
 
 def test_whisper_settings_from_config_file(monkeypatch, tmp_path):
-    for name in ("WATCH_WHISPER", "WATCH_WHISPER_MODEL", "WATCH_WHISPER_DEVICE"):
+    for name in ("MOVIOLA_WHISPER", "MOVIOLA_WHISPER_MODEL", "MOVIOLA_WHISPER_DEVICE"):
         monkeypatch.delenv(name, raising=False)
     env = tmp_path / ".env"
     env.write_text(
-        "WATCH_WHISPER=local\n"
-        "WATCH_WHISPER_MODEL=small  # smaller download\n"
-        "WATCH_WHISPER_DEVICE=cpu\n",
+        "MOVIOLA_WHISPER=local\n"
+        "MOVIOLA_WHISPER_MODEL=small  # smaller download\n"
+        "MOVIOLA_WHISPER_DEVICE=cpu\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(config, "CONFIG_FILE", env)
@@ -77,9 +77,9 @@ def test_whisper_settings_from_config_file(monkeypatch, tmp_path):
 
 def test_blank_env_var_falls_through_to_file(monkeypatch, tmp_path):
     """A scaffolded-but-empty env var must not shadow a real config value."""
-    monkeypatch.setenv("WATCH_WHISPER", "")
+    monkeypatch.setenv("MOVIOLA_WHISPER", "")
     env = tmp_path / ".env"
-    env.write_text("WATCH_WHISPER=local\n", encoding="utf-8")
+    env.write_text("MOVIOLA_WHISPER=local\n", encoding="utf-8")
     monkeypatch.setattr(config, "CONFIG_FILE", env)
     assert config.get_config()["whisper"] == "local"
 

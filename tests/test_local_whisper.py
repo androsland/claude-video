@@ -36,20 +36,20 @@ class TestIsAvailable:
 
 class TestResolveRuntime:
     def test_explicit_cpu_never_picks_cuda(self, monkeypatch):
-        monkeypatch.delenv("WATCH_WHISPER_DEVICE", raising=False)
-        monkeypatch.delenv("WATCH_WHISPER_COMPUTE", raising=False)
+        monkeypatch.delenv("MOVIOLA_WHISPER_DEVICE", raising=False)
+        monkeypatch.delenv("MOVIOLA_WHISPER_COMPUTE", raising=False)
         device, compute = local_whisper.resolve_runtime(device="cpu")
         assert device == "cpu"
         assert compute == local_whisper.CPU_COMPUTE
 
     def test_explicit_compute_type_is_honoured(self, monkeypatch):
-        monkeypatch.delenv("WATCH_WHISPER_DEVICE", raising=False)
+        monkeypatch.delenv("MOVIOLA_WHISPER_DEVICE", raising=False)
         _, compute = local_whisper.resolve_runtime(device="cpu", compute_type="float32")
         assert compute == "float32"
 
     def test_env_vars_are_read(self, monkeypatch):
-        monkeypatch.setenv("WATCH_WHISPER_DEVICE", "cpu")
-        monkeypatch.setenv("WATCH_WHISPER_COMPUTE", "int8")
+        monkeypatch.setenv("MOVIOLA_WHISPER_DEVICE", "cpu")
+        monkeypatch.setenv("MOVIOLA_WHISPER_COMPUTE", "int8")
         assert local_whisper.resolve_runtime() == ("cpu", "int8")
 
     def test_falls_back_to_cpu_when_ctranslate2_missing(self, monkeypatch):
@@ -63,8 +63,8 @@ class TestResolveRuntime:
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
-        monkeypatch.delenv("WATCH_WHISPER_DEVICE", raising=False)
-        monkeypatch.delenv("WATCH_WHISPER_COMPUTE", raising=False)
+        monkeypatch.delenv("MOVIOLA_WHISPER_DEVICE", raising=False)
+        monkeypatch.delenv("MOVIOLA_WHISPER_COMPUTE", raising=False)
         device, compute = local_whisper.resolve_runtime()
         assert device == "cpu"
         assert compute == local_whisper.CPU_COMPUTE
@@ -363,9 +363,9 @@ class TestCollectSegmentShape:
         model = _FakeModel(segments, info=_FakeInfo(duration=180.0))
         local_whisper._collect(model, tmp_path / "a.mp3", None, vad=True)
         assert _progress_lines(capsys) == [
-            "[watch] local whisper: 33% (60s/180s)",
-            "[watch] local whisper: 66% (120s/180s)",
-            "[watch] local whisper: 100% (180s/180s)",
+            "[moviola] local whisper: 33% (60s/180s)",
+            "[moviola] local whisper: 66% (120s/180s)",
+            "[moviola] local whisper: 100% (180s/180s)",
         ]
 
     def test_progress_marks_advance_past_a_long_segment(self, tmp_path, capsys):
@@ -383,8 +383,8 @@ class TestCollectSegmentShape:
         )
         local_whisper._collect(model, tmp_path / "a.mp3", None, vad=True)
         assert _progress_lines(capsys) == [
-            "[watch] local whisper: 50% (300s/600s)",
-            "[watch] local whisper: 66% (400s/600s)",
+            "[moviola] local whisper: 50% (300s/600s)",
+            "[moviola] local whisper: 66% (400s/600s)",
         ]
 
     def test_announces_the_detected_language_when_none_was_pinned(self, tmp_path, capsys):

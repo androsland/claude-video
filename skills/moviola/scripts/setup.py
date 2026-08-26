@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Setup / preflight for /watch.
+"""Setup / preflight for /moviola.
 
 Modes:
   setup.py --check      Silent preflight. Exit 0 if ready, 2/3/4 on failure.
@@ -8,10 +8,10 @@ Modes:
 
 Design:
 - Silent on success: --check exits 0 with no output when everything's ready so
-  that /watch doesn't spam "setup is complete" on every turn.
+  that /moviola doesn't spam "setup is complete" on every turn.
 - Idempotent: re-running the installer is safe — it never clobbers existing
   keys and only appends missing ones.
-- SETUP_COMPLETE=true in ~/.config/watch/.env tells us the user has been
+- SETUP_COMPLETE=true in ~/.config/moviola/.env tells us the user has been
   through a successful installer run at least once.
 - Never sudo. On macOS, auto-install via brew. Elsewhere, print exact commands.
 - Never write an API key to disk automatically — only scaffold placeholders.
@@ -35,12 +35,12 @@ from config import get_config  # noqa: E402
 
 
 REQUIRED_BINARIES = ["ffmpeg", "ffprobe", "yt-dlp"]
-CONFIG_DIR = Path.home() / ".config" / "watch"
+CONFIG_DIR = Path.home() / ".config" / "moviola"
 CONFIG_FILE = CONFIG_DIR / ".env"
-ENV_TEMPLATE = """# /watch configuration
+ENV_TEMPLATE = """# /moviola configuration
 #
 # Whisper transcription fallback — used only when yt-dlp cannot get captions
-# (or when you point /watch at a local file with no subtitles).
+# (or when you point /moviola at a local file with no subtitles).
 #
 # There are three backends. You need exactly one of them:
 #
@@ -53,7 +53,7 @@ ENV_TEMPLATE = """# /watch configuration
 #   openai — the compatible fallback.
 #            Get a key: https://platform.openai.com/api-keys
 #
-# With none of them, /watch still works — videos without native captions just
+# With none of them, /moviola still works — videos without native captions just
 # come back frames-only.
 
 GROQ_API_KEY=
@@ -61,22 +61,22 @@ OPENAI_API_KEY=
 
 # Which backend to use. auto = an API key if one is set, else local.
 # Allowed values: auto | local | groq | openai
-# WATCH_WHISPER=auto
+# MOVIOLA_WHISPER=auto
 
 # Local backend tuning. All optional; blank means "let the backend decide".
 #   MODEL    a faster-whisper size (tiny|base|small|medium|large-v3|
 #            distil-large-v3), a Hugging Face repo id, or a local model path.
 #   DEVICE   auto | cpu | cuda      COMPUTE  auto | int8 | int8_float16 | float16
 #   LANGUAGE an ISO code (en, de, …). Blank auto-detects.
-# WATCH_WHISPER_MODEL=large-v3
-# WATCH_WHISPER_DEVICE=auto
-# WATCH_WHISPER_COMPUTE=auto
-# WATCH_WHISPER_LANGUAGE=
+# MOVIOLA_WHISPER_MODEL=large-v3
+# MOVIOLA_WHISPER_DEVICE=auto
+# MOVIOLA_WHISPER_COMPUTE=auto
+# MOVIOLA_WHISPER_LANGUAGE=
 
-# Default watch behavior (the /watch first-run wizard sets this for you).
+# Default moviola behavior (the /moviola first-run wizard sets this for you).
 # Allowed values: transcript | efficient | balanced | token-burner
 # Keep the value on its own line with no trailing comment.
-# WATCH_DETAIL=balanced
+# MOVIOLA_DETAIL=balanced
 """
 
 
@@ -102,7 +102,7 @@ def _check_file_permissions(path: Path) -> None:
         if mode & 0o044:
             _PERM_WARNED.add(key)
             sys.stderr.write(
-                f"[watch] WARNING: {path} is readable by other users. "
+                f"[moviola] WARNING: {path} is readable by other users. "
                 f"Run: chmod 600 {path}\n"
             )
             sys.stderr.flush()
@@ -147,7 +147,7 @@ def _have_local_whisper() -> bool:
 
     Note this reports installed, not working: whether CUDA is usable, or whether
     the model weights have been downloaded yet, is not knowable without loading
-    a model — too slow for a preflight that runs on every /watch call.
+    a model — too slow for a preflight that runs on every /moviola call.
     """
     try:
         import local_whisper
@@ -162,7 +162,7 @@ def is_first_run() -> bool:
 
 
 def _scaffold_env() -> bool:
-    """Create ~/.config/watch/.env with placeholders if missing."""
+    """Create ~/.config/moviola/.env with placeholders if missing."""
     if CONFIG_FILE.exists():
         return False
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -257,7 +257,7 @@ def _status() -> dict:
     agent's cue to suggest one. A key is only one of two ways to satisfy it:
     faster-whisper counts, and needs no account.
 
-    `can_proceed` is the operational gate: /watch can run as long as the
+    `can_proceed` is the operational gate: /moviola can run as long as the
     binaries are present AND transcription is available OR the user already
     finished setup (consciously opting out of Whisper). Someone who completed
     setup without either backend is NOT nagged on every call.
@@ -294,7 +294,7 @@ def _status() -> dict:
         "has_local_whisper": has_local,
         "has_transcription": has_transcription,
         "config_file": str(CONFIG_FILE),
-        "watch_detail": cfg["detail"],
+        "moviola_detail": cfg["detail"],
         "whisper_setting": cfg["whisper"],
         "platform": platform.system(),
     }
@@ -303,12 +303,12 @@ def _status() -> dict:
 def cmd_check() -> int:
     """Silent-on-success preflight.
 
-    Exit 0 with no output when /watch can run. A user who already finished setup
+    Exit 0 with no output when /moviola can run. A user who already finished setup
     (SETUP_COMPLETE=true) counts as ready even with no transcription backend —
     Whisper is encouraged, not required — so they are never nagged on follow-up
     calls.
 
-    On a state that blocks /watch, print one actionable line to stderr:
+    On a state that blocks /moviola, print one actionable line to stderr:
       2 → binaries missing
       3 → genuine first run with no transcription backend
       4 → both missing
@@ -327,7 +327,7 @@ def cmd_check() -> int:
         )
     installer = Path(__file__).resolve()
     sys.stderr.write(
-        f"[watch] setup incomplete ({'; '.join(parts)}). "
+        f"[moviola] setup incomplete ({'; '.join(parts)}). "
         f"Run: python3 {installer}\n"
     )
     sys.stderr.flush()
@@ -389,7 +389,7 @@ def cmd_install() -> int:
             print("[setup] first use downloads the model to the Hugging Face cache;")
             print("[setup] later runs re-check it there unless HF_HUB_OFFLINE=1 is set.")
         if installed_deps:
-            print("[setup] installed dependencies; /watch is fully set up.")
+            print("[setup] installed dependencies; /moviola is fully set up.")
         return 0
 
     print("")
@@ -403,7 +403,7 @@ def cmd_install() -> int:
     print("    GROQ_API_KEY=...    (cheaper and faster than OpenAI; console.groq.com/keys)")
     print("    OPENAI_API_KEY=...  (fallback; platform.openai.com/api-keys)")
     print("")
-    print("  With neither, /watch still works but videos without captions come back frames-only.")
+    print("  With neither, /moviola still works but videos without captions come back frames-only.")
     return 3
 
 

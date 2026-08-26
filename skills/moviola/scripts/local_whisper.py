@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 
-# Default model. Overridable via WATCH_WHISPER_MODEL — accepts a faster-whisper
+# Default model. Overridable via MOVIOLA_WHISPER_MODEL — accepts a faster-whisper
 # size alias ("tiny", "base", "small", "medium", "large-v3", "distil-large-v3"),
 # a Hugging Face repo id, or a path to a local CTranslate2 model directory.
 # large-v3 is a 2.9 GB one-time download and matches the API backends' quality;
@@ -60,8 +60,8 @@ def resolve_runtime(
     device and still fail at load time on missing cuDNN (common under WSL), which
     is why :func:`transcribe_local` also retries on CPU at runtime.
     """
-    want_device = (device or os.environ.get("WATCH_WHISPER_DEVICE") or "auto").strip().lower()
-    want_compute = (compute_type or os.environ.get("WATCH_WHISPER_COMPUTE") or "auto").strip().lower()
+    want_device = (device or os.environ.get("MOVIOLA_WHISPER_DEVICE") or "auto").strip().lower()
+    want_compute = (compute_type or os.environ.get("MOVIOLA_WHISPER_COMPUTE") or "auto").strip().lower()
 
     resolved_device = "cpu"
     supported: set[str] = set()
@@ -179,13 +179,13 @@ def _collect(loaded, audio_path: Path, language: str | None, vad: bool) -> list[
         # Report progress so a long clip doesn't look like a hang.
         if total and seg.end and seg.end >= next_mark:
             pct = min(100, int(100 * seg.end / total))
-            print(f"[watch] local whisper: {pct}% ({seg.end:.0f}s/{total:.0f}s)", file=sys.stderr)
+            print(f"[moviola] local whisper: {pct}% ({seg.end:.0f}s/{total:.0f}s)", file=sys.stderr)
             while next_mark <= seg.end:
                 next_mark += 60.0
 
     detected = getattr(info, "language", None)
     if detected and language is None:
-        print(f"[watch] local whisper detected language: {detected}", file=sys.stderr)
+        print(f"[moviola] local whisper detected language: {detected}", file=sys.stderr)
     return out
 
 
@@ -203,7 +203,7 @@ def _run(loaded, audio_path: Path, language: str | None) -> list[dict]:
         if not _looks_like_vad_problem(exc):
             raise
         print(
-            f"[watch] VAD filter unavailable ({type(exc).__name__}) — "
+            f"[moviola] VAD filter unavailable ({type(exc).__name__}) — "
             "transcribing without it",
             file=sys.stderr,
         )
@@ -229,7 +229,7 @@ def transcribe_local(
             "…or set GROQ_API_KEY / OPENAI_API_KEY to use an API backend instead."
         )
 
-    model_name = model or os.environ.get("WATCH_WHISPER_MODEL") or DEFAULT_MODEL
+    model_name = model or os.environ.get("MOVIOLA_WHISPER_MODEL") or DEFAULT_MODEL
     resolved_device, resolved_compute = resolve_runtime(device, compute_type)
 
     # A visible CUDA device is not a working one. CTranslate2 resolves cuBLAS and
@@ -250,7 +250,7 @@ def transcribe_local(
         if attempt_device == "cuda":
             _preload_cuda_libs()
         print(
-            f"[watch] loading local whisper model '{model_name}' "
+            f"[moviola] loading local whisper model '{model_name}' "
             f"({attempt_device}/{attempt_compute})…",
             file=sys.stderr,
         )
@@ -261,7 +261,7 @@ def transcribe_local(
             last_error = exc
             if index + 1 < len(attempts):
                 print(
-                    f"[watch] {attempt_device} backend failed "
+                    f"[moviola] {attempt_device} backend failed "
                     f"({type(exc).__name__}: {exc}) — falling back to CPU",
                     file=sys.stderr,
                 )
