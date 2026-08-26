@@ -11,7 +11,10 @@ CONFIG_FILE = CONFIG_DIR / ".env"
 
 DEFAULT_DETAIL = "balanced"
 
-DETAILS = {"transcript", "efficient", "balanced", "token-burner"}
+# Declaration order is the cost progression, and `--help` renders it verbatim,
+# so this is a tuple rather than a set. moviola.build_parser() reads it instead
+# of repeating it: adding a value here adds it to the flag.
+DETAILS = ("transcript", "efficient", "balanced", "token-burner")
 
 # Which speech-to-text backend to use when a video has no caption track.
 # "auto" resolves at runtime: local if faster-whisper is importable, else Groq,
@@ -19,7 +22,7 @@ DETAILS = {"transcript", "efficient", "balanced", "token-burner"}
 # instead of a silent fallback.
 DEFAULT_WHISPER = "auto"
 
-WHISPER_BACKENDS = {"auto", "local", "groq", "openai"}
+WHISPER_BACKENDS = ("auto", "local", "groq", "openai")
 
 
 def read_env_file(path: Path | None = None) -> dict[str, str]:

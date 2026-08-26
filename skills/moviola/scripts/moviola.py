@@ -15,7 +15,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from config import frame_cap, get_config  # noqa: E402
+from config import DETAILS, WHISPER_BACKENDS, frame_cap, get_config  # noqa: E402
 from download import download, fetch_captions, is_url  # noqa: E402
 from frames import MAX_FPS, auto_fps, auto_fps_focus, extract_at_timestamps, extract_keyframes, extract_scene_or_uniform, format_time, get_metadata, merge_frames, parse_time, parse_timestamps  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
@@ -172,7 +172,16 @@ def md_fence(body: str) -> str:
     """
     return "`" * max(3, _longest_backtick_run(body) + 1)
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI as a value, so what it accepts can be compared to the config.
+
+    The choices lists here used to be string literals duplicating
+    config.DETAILS and config.WHISPER_BACKENDS, with nothing comparing the two.
+    Adding a backend to the config left the flag rejecting it, and argparse's
+    error reads as "that backend does not exist" rather than "that flag is
+    stale". Building the parser separately from running it is what lets a test
+    hold the two sets up against each other.
+    """
     ap = argparse.ArgumentParser(
         prog="moviola",
         description="Download a video, extract auto-scaled frames, and surface the transcript.",
@@ -183,7 +192,7 @@ def main() -> int:
     ap.add_argument("--fps", type=float, default=None, help="Override auto-fps")
     ap.add_argument(
         "--detail",
-        choices=["transcript", "efficient", "balanced", "token-burner"],
+        choices=list(DETAILS),
         default=None,
         help="Fidelity/speed dial: transcript (no frames), efficient (fast keyframes, cap 50), "
              "balanced (scene, cap 100), token-burner (scene, uncapped).",
@@ -206,7 +215,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--whisper",
-        choices=["auto", "local", "groq", "openai"],
+        choices=list(WHISPER_BACKENDS),
         default=None,
         help="Force a specific Whisper backend. 'local' runs faster-whisper on "
              "this machine and needs no API key. 'auto' is the default and is "
@@ -219,7 +228,11 @@ def main() -> int:
         help="Disable near-duplicate frame removal. Keeps visually identical "
              "frames (static screen recordings, held slides) instead of collapsing them.",
     )
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     config = get_config()
     detail = args.detail or str(config["detail"])
