@@ -47,7 +47,8 @@ ENV_TEMPLATE = """# /moviola configuration
 #   local  — runs on this machine, no key and no upload. Install with
 #            `pip install "faster-whisper>=1.0"`. First use downloads the model
 #            (2.9 GB for large-v3, 464 MB for small) to the Hugging Face cache;
-#            later runs re-check it there unless you set HF_HUB_OFFLINE=1.
+#            later runs re-check it there unless you set
+#            MOVIOLA_WHISPER_OFFLINE=1 below.
 #   groq   — whisper-large-v3 at a fraction of OpenAI's price, and faster in
 #            practice. Get a key: https://console.groq.com/keys
 #   openai — the compatible fallback.
@@ -68,10 +69,16 @@ OPENAI_API_KEY=
 #            distil-large-v3), a Hugging Face repo id, or a local model path.
 #   DEVICE   auto | cpu | cuda      COMPUTE  auto | int8 | int8_float16 | float16
 #   LANGUAGE an ISO code (en, de, …). Blank auto-detects.
+#   OFFLINE  1 loads the model from the cache only, with no revision check
+#            against huggingface.co. Set it here, not the HF_HUB_OFFLINE
+#            that huggingface_hub reads: that one works only as a real
+#            environment variable, and this file is read by moviola, never
+#            exported into the process environment.
 # MOVIOLA_WHISPER_MODEL=large-v3
 # MOVIOLA_WHISPER_DEVICE=auto
 # MOVIOLA_WHISPER_COMPUTE=auto
 # MOVIOLA_WHISPER_LANGUAGE=
+# MOVIOLA_WHISPER_OFFLINE=1
 
 # Default moviola behavior (the /moviola first-run wizard sets this for you).
 # Allowed values: transcript | efficient | balanced | token-burner
@@ -415,7 +422,8 @@ def cmd_install() -> int:
         if has_local and not has_key:
             print("[setup] transcription runs on this machine — no API key needed.")
             print("[setup] first use downloads the model to the Hugging Face cache;")
-            print("[setup] later runs re-check it there unless HF_HUB_OFFLINE=1 is set.")
+            print("[setup] later runs re-check it there unless you set")
+            print(f"[setup] MOVIOLA_WHISPER_OFFLINE=1 in {CONFIG_FILE}.")
         if installed_deps:
             print("[setup] installed dependencies; /moviola is fully set up.")
         return 0

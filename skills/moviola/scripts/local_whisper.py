@@ -11,7 +11,8 @@ Why faster-whisper rather than openai-whisper: it is a CTranslate2 reimplementat
 so it runs several times faster at the same accuracy, has no torch dependency
 (~2.5 GB saved), and quantizes to int8 so ``large-v3`` fits on a 4 GB GPU or a
 laptop CPU. Model weights download on first use to the Hugging Face cache; later loads
-still make a revision check against huggingface.co unless HF_HUB_OFFLINE=1.
+still make a revision check against huggingface.co unless MOVIOLA_WHISPER_OFFLINE=1
+(or, as a real environment variable, HF_HUB_OFFLINE=1).
 
 Your audio never leaves the machine: no key, no upload, and nothing about the
 content of the video is ever sent anywhere. The one thing that does go out is
