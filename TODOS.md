@@ -353,8 +353,22 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 - **The parser and the config are proven to AGREE, not to be right.**
   (bounded-failures review, 2026-08-26) `build_parser()` reads `config.DETAILS` and
   `config.WHISPER_BACKENDS`, and the tests compare the two. A value that is wrong in the
-  config is now wrong in the flag as well, consistently, and invisibly from here. Nothing
-  checks that every name in `WHISPER_BACKENDS` has a working implementation behind it.
+  config is now wrong in the flag as well, consistently, and invisibly from here. The
+  `WHISPER_BACKENDS` half of this is closed — `test_every_backend_has_an_implementation`
+  now requires every offered name to reach a dispatch branch, a key lookup, a host entry
+  and an endpoint on that host — but `config.DETAILS` has no equivalent check, and
+  neither half says the sets are the ones moviola OUGHT to offer. A provider it should
+  support and does not is still invisible from every test in the suite.
+
+- **A backend can be routed to the right host by the wrong path or model.**
+  (bounded-failures review, 2026-08-26) `test_each_branch_posts_to_its_own_host` ties
+  the dispatch branch, the endpoint constant and `API_HOSTS` together, so a branch
+  copy-pasted from the other provider's fails. It compares hosts only:
+  `https://api.openai.com/v1/chat/completions` and a `model` id the provider retired
+  both satisfy it. Those are discoverable against the live API and nowhere else, which
+  is why this is filed rather than fixed — a network-free suite structurally cannot see
+  them. Non-goal: this is not an argument for a live-API test in the suite; it is a note
+  that green here is not a claim either endpoint still answers.
 
 - **`--detail transcript` still prints the whole transcript with no cap.**
   (bounded-failures review, 2026-08-26) A three-hour video's transcript goes to stdout in
@@ -636,8 +650,8 @@ riding along behind prose.
 
 - **This file is over the ~50KB archive threshold, and the split is deferred on a
   judgement, not on arithmetic.** (2026-08-26) Measured with
-  `awk '/^## Completed/{f=1} f' TODOS.md | wc -c`: 90,454 bytes total, of which
-  `## Completed` is 34,465 — 38%, a genuine mass and not a rounding error. (At the merge
+  `awk '/^## Completed/{f=1} f' TODOS.md | wc -c`: 93,804 bytes total, of which
+  `## Completed` is 36,750 — 39%, a genuine mass and not a rounding error. (At the merge
   base for the stderr branch it was 53,933 / 51.2%; both halves have grown since, the
   live sections faster than the completed one.)
   **The previous version of this entry said the split would "move nothing" because there
@@ -650,7 +664,7 @@ riding along behind prose.
   reason. (The count was 4 subsections when this was written and is 6 now; nothing
   re-measures it, which is why it is stated with its date.)
   The actual reason to defer: all 26 came from one investigation on one day, and 20,097
-  of the 34,465 bytes are still a single subsection. Archiving by bullet would cut that
+  of the 36,750 bytes are still a single subsection. Archiving by bullet would cut that
   investigation in half across two files and leave the surviving five as orphans of an
   argument that lives elsewhere. Cut at the next *distinct* body of work, when there is
   a seam to cut along. Until then the file stays over the threshold for a reason
@@ -665,6 +679,37 @@ riding along behind prose.
 ### A second pass over the bounded-failures review
 
 (bounded-failures review, 2026-08-26 — `fix/bounded-failures-ii`)
+
+**Every name a user may pin now has to reach an implementation.**
+`config.WHISPER_BACKENDS` is what argparse renders as `--whisper`'s choices and what
+`get_config` validates `MOVIOLA_WHISPER` against, and the suite already proved the
+parser and the config reader agree with it — which proves the three restate one literal,
+not that the literal is right. A name added to the tuple and nowhere else would be
+offered in `--help`, accepted by argparse, preserved by `get_config`, and then die at
+`Unknown whisper backend:` *after* the video was downloaded, the frames extracted and
+the audio encoded.
+
+The new test drives the whole of `transcribe_video` once per name, with the names taken
+from the tuple rather than written into the test, and reads the dispatch branches out of
+`_transcribe_file`'s AST rather than restating the same list a second time. `auto` is
+asserted to have NO implementation, because it is a sentinel `resolve_whisper_choice`
+converts to `None` and a dispatch branch for it would be the defect. Each API name is
+required to reach four things, not one: an `API_CANDIDATES` entry so its key can be
+found, a dispatch branch so the upload happens, an `API_HOSTS` entry so
+`_announce_upload` names a hostname rather than falling through `.get(backend, backend)`
+and printing the backend's own name, and an endpoint on that host.
+
+**It could not be written RED and says so in its own docstring.** All four names have
+implementations today, so every assertion passed on first run; its only evidence is the
+KILL, which is weaker than a normal RED->GREEN and is the strongest available for a
+finding whose subject is a missing check rather than a broken behaviour. Six mutations,
+six killed: a `deepgram` in the table and nowhere else (six tests), `openai` dropped
+from `API_HOSTS` (three), its dispatch branch removed (three), its branch copy-pasted
+from Groq's so the right name posts to the wrong provider (two), `openai` dropped from
+`API_CANDIDATES` (one), and the sentinel given a dispatch branch (two). The
+copy-paste mutation survived the first version of the test and the gap was written up
+as a NON-GOAL before it was closed; closing it took tying three separately-maintained
+tables together, and the NON-GOAL now records the narrower blind spot that remains.
 
 **`duration_seconds` no longer raises on a non-numeric field — and the finding's premise
 was wrong.** The entry said a container reporting `N/A` takes down the whole run. `N/A`
