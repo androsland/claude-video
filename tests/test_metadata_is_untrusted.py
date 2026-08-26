@@ -255,14 +255,31 @@ class TestYtDlpMetadata:
         assert moviola.metadata_from_info({"duration": 91.4})["duration_seconds"] == 91.4
         assert moviola.metadata_from_info({"duration": "91.4"})["duration_seconds"] == 91.4
 
-    def test_the_shape_matches_what_the_probe_returns(self):
+    def test_the_shape_matches_what_the_probe_returns(self, static_clip):
         # Both branches feed the same `meta` variable, so a key present in one
         # and absent from the other is a KeyError waiting for a code path.
+        #
+        # This asserted `set(stand_in) <= {six names}` and could not see the one
+        # divergence that exists. Subset is satisfied by a stand-in that DROPS a
+        # key, which is the direction the KeyError comes from, and the six names
+        # were a literal restating the probe rather than a reading of it — so
+        # both halves of the comparison were written by hand and neither was
+        # measured. Both sides are read from their producers now, and the
+        # difference is asserted exactly rather than bounded.
         stand_in = moviola.metadata_from_info({"duration": 1.0})
-        assert set(stand_in) <= {
-            "duration_seconds", "width", "height", "codec", "size_bytes", "has_audio",
+        probed = frames.get_metadata(str(static_clip))
+
+        assert set(stand_in) == {
+            "duration_seconds", "width", "height", "codec", "has_audio",
         }
-        assert "duration_seconds" in stand_in and "has_audio" in stand_in
+        # The divergence, stated as the fact it is: the probe answers with
+        # `size_bytes` and the stand-in has no key for it. Nothing reads it off
+        # `meta` outside `frames.py` today, so this is latent rather than live —
+        # and this line is what a future consumer trips over instead of the
+        # KeyError. If the stand-in ever gains the key, delete this assertion;
+        # do not widen it.
+        assert set(probed) - set(stand_in) == {"size_bytes"}
+        assert set(stand_in) - set(probed) == set()
 
 
 @pytest.fixture(scope="module")

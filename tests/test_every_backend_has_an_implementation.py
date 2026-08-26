@@ -73,7 +73,15 @@ NON-GOALS, so a green run is not read as more than it is:
     comparisons — a dispatch dict, or a registry, would read as zero branches
     and fail. That is a maintenance cost accepted on purpose: reading the
     literal list a second time would make the comparison a tautology, which is
-    the exact failure this file exists to correct.
+    the exact failure this file exists to correct. The call shape is read the
+    same structural way and has the same limit, which was undisclosed until a
+    review named it: `_dispatch_endpoints` matches an `ast.Name` whose id is
+    `_post_whisper`, so a call written as `whisper._post_whisper(...)`, through
+    an alias, or behind a wrapper is not seen. That failure is loud rather than
+    silent — a branch with no matching call reads as no route and trips
+    `no _post_whisper call found in the ... branch` — but the message names the
+    wrong cause, and this paragraph is where the next reader finds the right
+    one.
 
 Every value written below is inert filler. Nothing here reads a real credential.
 """
@@ -245,14 +253,17 @@ class TestEveryNameTranscribes:
         monkeypatch.setattr(
             whisper,
             "_post_whisper",
-            lambda endpoint, api_key, model, path: {
+            # Parameter names track the real signatures — `_post_whisper`
+            # and `_transcribe_local` both call theirs `audio_path`. A stub
+            # that renames it silently stops standing in for a keyword call.
+            lambda endpoint, api_key, model, audio_path: {
                 "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}]
             },
         )
         monkeypatch.setattr(
             whisper,
             "_transcribe_local",
-            lambda path, options: [{"start": 0.0, "end": 1.0, "text": "hello"}],
+            lambda audio_path, options: [{"start": 0.0, "end": 1.0, "text": "hello"}],
         )
         return tmp_path
 

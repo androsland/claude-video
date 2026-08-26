@@ -509,6 +509,48 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   negative would land on the same value and be indistinguishable from an absent key. Filed
   with the sentinel entry it depends on rather than fixed alongside it.
 
+- **`get_metadata` parses ffprobe's stdout with an unguarded `json.loads`.** (review of the
+  bounded-failures review, 2026-08-26) `frames.py:146` is
+  `json.loads(result.stdout or "{}")` and nothing catches `JSONDecodeError`. The `or "{}"`
+  handles empty output and nothing else, so a returncode of 0 with non-JSON on stdout takes
+  the run down with a traceback naming the json module. It is the same class as the
+  `finite_float` findings — a value this program did not write, parsed as though it had —
+  but one level up: the guards protect the FIELDS inside a document that was already assumed
+  to be a document. Reachability is low and is the reason this is filed rather than fixed:
+  the real ffprobe under `-v quiet -print_format json` either emits JSON or exits non-zero,
+  so it takes a shim or a wrapper on PATH answering to the name `ffprobe`. Non-goal: this is
+  not the `_read_info` half — `download.py:178` reads a file yt-dlp wrote and has the same
+  shape with its own reachability story.
+
+- **The reachability evidence reads `format` only, so a stream-level `N/A` is invisible to
+  it.** (review of the bounded-failures review, 2026-08-26) `test_the_json_writer_omits_the_key_instead`
+  is the test carrying the whole "the ValueError is not reachable" correction, and its
+  `_probe` helper runs `ffprobe -v quiet -print_format json -show_format` — no
+  `-show_streams`. Production asks for both and falls back to the video stream's duration
+  when the format has none, so the one path the evidence does not cover is exactly the
+  fallback the nested `finite_float` call exists to serve. The fix is to add `-show_streams`
+  to the helper and assert over both objects. Filed rather than done because widening it
+  changes what the correction claims, and the correction is load-bearing in three files.
+
+- **The yt-dlp producer has no end-to-end non-finite case.** (review of the
+  bounded-failures review, 2026-08-26) `TestYtDlpMetadata` drives `metadata_from_info` with
+  `"N/A"`, a missing block, a real float and a real numeric string; `"nan"` and `"inf"` are
+  tested against `finite_float` directly and never through this caller. The guard is shared,
+  so the coverage gap is narrow — and it is real: a mutation replacing this call site with a
+  bare `float(... or 0)` is caught only because the oversized-int case happens to go through
+  it. Three lines to close. Non-goal: this says nothing about the ffprobe producer, which has
+  its own non-finite cases through `_stub_ffprobe`.
+
+- **`FILLER` is redeclared in seven test modules.** (review of the bounded-failures review,
+  2026-08-26) Every one is the same
+  `FILLER = "placeholder-value-not-a-credential"`, and the convention it encodes — no test
+  reads a real credential — is enforced by nothing but repetition. `tests/conftest.py`
+  already exists and already holds shared fixtures, so a single definition there is the
+  obvious home. Deliberately not done in the same pass as a behaviour fix: it touches every
+  test file at once, which is the diff shape that hides a real change. Non-goal: moving it
+  does not enforce the convention either — a module that declares its own string still
+  passes; only a review catches that.
+
 ## Documentation as a checked claim
 
 - **The README-to-parser direction is not checked, and cannot be.** (docs-are-checked
