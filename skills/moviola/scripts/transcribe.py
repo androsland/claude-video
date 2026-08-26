@@ -11,14 +11,20 @@ import sys
 from pathlib import Path
 
 
-TS_RE = re.compile(
-    r"(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s+-->\s+(\d{2}):(\d{2}):(\d{2})[.,](\d{3})"
-)
+# WebVTT's hours component is OPTIONAL, and when present it is "one or more"
+# digits, not two: `01:30.000` and `100:00:00.000` are both spec-legal. The old
+# pattern demanded exactly two, so a file of either shape parsed to zero
+# segments — and zero segments is what "this video has no captions" looks like
+# at every call site, so moviola uploaded the audio and paid for a transcript
+# that was already on disk. `_CUE_TS` is written once and used for both ends.
+_CUE_TS = r"(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{3})"
+TS_RE = re.compile(rf"{_CUE_TS}\s+-->\s+{_CUE_TS}")
 TAG_RE = re.compile(r"<[^>]+>")
 
 
-def _to_seconds(h: str, m: str, s: str, ms: str) -> float:
-    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+def _to_seconds(h: str | None, m: str, s: str, ms: str) -> float:
+    """Seconds from a cue timestamp. `h` is None when the file omits hours."""
+    return int(h or 0) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
 
 
 def parse_vtt(path: str) -> list[dict]:
@@ -48,6 +54,16 @@ def parse_vtt(path: str) -> list[dict]:
         if cue_text:
             segments.append({"start": round(start, 2), "end": round(end, 2), "text": cue_text})
         i += 1
+
+    if not segments:
+        # A subtitle file that yields nothing is indistinguishable from no
+        # subtitle file at all by the time this returns, and the two lead to
+        # very different bills. Say it here, where the filename is still known.
+        print(
+            f"[moviola] no usable cues in {Path(path).name} — treating this video "
+            "as having no captions",
+            file=sys.stderr,
+        )
 
     return _dedupe(segments)
 

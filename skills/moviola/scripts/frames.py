@@ -38,6 +38,39 @@ DEDUP_THUMB = 16
 DEDUP_THRESHOLD = 2.0
 SHOWINFO_TS_RE = re.compile(r"pts_time:([0-9.]+)")
 
+# The trailing run of digits in a frame filename, which is the frame number
+# ffmpeg's `%04d` wrote.
+_FRAME_NUM_RE = re.compile(r"(\d+)")
+
+
+def frames_in_order(out_dir: Path, pattern: str = "frame_*.jpg") -> list[Path]:
+    """The frames in `out_dir`, in the order ffmpeg wrote them.
+
+    `%04d` sets a MINIMUM width, not a maximum: past frame 9999 ffmpeg simply
+    writes more digits. Lexicographically `frame_10000.jpg` then lands between
+    `frame_1000.jpg` and `frame_1001.jpg` (`.` is 0x2E, `0` is 0x30), and since
+    every caller here pairs frames with timestamps BY POSITION, from that point
+    on each image carries somebody else's timestamp — silently, in a report that
+    looks exactly as correct as any other. Uncapped scene detection on a long
+    video reaches four figures easily.
+
+    NON-GOALS. This fixes the ORDER; it says nothing about whether ffmpeg's own
+    showinfo timestamps are right, nor about the case where showinfo reports
+    fewer timestamps than there are frames — that path still substitutes the
+    range start and is recorded in TODOS.md. It sorts on the LAST digit run in
+    the name, so a directory mixing two naming schemes is not something it can
+    see. Names carrying no digits at all sort last, in name order, rather than
+    raising: a stray file must not take down a run whose frames are all fine.
+    """
+    def key(path: Path) -> tuple[int, int, str]:
+        digits = _FRAME_NUM_RE.findall(path.stem)
+        if not digits:
+            return (1, 0, path.name)
+        return (0, int(digits[-1]), path.name)
+
+    return sorted(out_dir.glob(pattern), key=key)
+
+
 
 def _scale_filter(resolution: int) -> str:
     return (
@@ -202,7 +235,7 @@ def extract(
         raise SystemExit(f"ffmpeg frame extraction failed: {result.stderr.strip()}")
 
     offset = start_seconds or 0.0
-    frames = sorted(out_dir.glob("frame_*.jpg"))
+    frames = frames_in_order(out_dir)
     return [
         {
             "index": i,
@@ -267,7 +300,7 @@ def extract_scene_candidates(
 
     offset = start_seconds or 0.0
     timestamps = [round(offset + float(match.group(1)), 2) for match in SHOWINFO_TS_RE.finditer(result.stderr)]
-    frames = sorted(out_dir.glob("frame_*.jpg"))
+    frames = frames_in_order(out_dir)
     out: list[dict] = []
     for i, path in enumerate(frames):
         ts = timestamps[i] if i < len(timestamps) else offset
@@ -622,7 +655,7 @@ def extract_keyframes(
 
     offset = start_seconds or 0.0
     timestamps = [round(offset + float(m.group(1)), 2) for m in SHOWINFO_TS_RE.finditer(result.stderr)]
-    files = sorted(out_dir.glob("frame_*.jpg"))
+    files = frames_in_order(out_dir)
     candidates: list[dict] = []
     for i, path in enumerate(files):
         ts = timestamps[i] if i < len(timestamps) else offset
