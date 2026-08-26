@@ -67,6 +67,19 @@ class TestShiftSegments:
         whisper.shift_segments(segs, 10.0)
         assert segs[0]["start"] == 0.0
 
+    def test_zero_offset_returns_a_copy_not_the_caller_s_list(self):
+        """The docstring promises a copy on every branch; offset 0 aliased.
+
+        A caller that trusts the docstring and mutates the result would have been
+        mutating its own input, on the one branch nothing exercised.
+        """
+        segs = [{"start": 1.0, "end": 2.0, "text": "x"}]
+        out = whisper.shift_segments(segs, 0.0)
+        assert out == segs
+        assert out is not segs
+        out[0]["text"] = "changed"
+        assert segs[0]["text"] == "x"
+
 
 def _make_mp3(path: Path, seconds: float) -> None:
     """Synthesize a mono 16k 64k mp3 of a sine tone — mirrors extract_audio's format."""

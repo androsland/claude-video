@@ -415,9 +415,14 @@ def shift_segments(segments: list[dict], offset_seconds: float) -> list[dict]:
 
     Each chunk is transcribed in isolation, so Whisper returns 0-based timestamps
     per chunk; shifting by the chunk's offset stitches them into source time.
+
+    A copy even at offset 0, where it used to hand back the caller's own list.
+    Docstrings that promise a copy and return an alias on one branch are how a
+    caller ends up mutating a list it was told it owned, and the branch that does
+    it is the one nobody tests.
     """
     if offset_seconds == 0:
-        return segments
+        return [dict(seg) for seg in segments]
     return [
         {
             "start": round(seg["start"] + offset_seconds, 2),
@@ -506,6 +511,9 @@ def _transcribe_local(audio_path: Path, options: dict | None = None) -> list[dic
         device=opts.get("device") or None,
         compute_type=opts.get("compute") or None,
         language=opts.get("language") or None,
+        # `or None` would collapse an explicit False into None, and None here
+        # means "ask the environment" — the opposite of what the user configured.
+        offline_mode=opts.get("offline"),
     )
 
 

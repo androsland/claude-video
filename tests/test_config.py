@@ -33,6 +33,7 @@ def test_get_config_keys(monkeypatch, tmp_path):
         "whisper_device",
         "whisper_compute",
         "whisper_language",
+        "whisper_offline",
         "config_file",
     }
 

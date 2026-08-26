@@ -63,6 +63,13 @@ def _setting(file_values: dict[str, str], name: str, default: str = "") -> str:
     return (os.environ.get(name) or file_values.get(name) or default).strip()
 
 
+def _truthy(value: str) -> bool | None:
+    """"" -> None (unset), "0"/"false"/"no"/"off" -> False, anything else -> True."""
+    if not value:
+        return None
+    return value.lower() not in ("0", "false", "no", "off")
+
+
 def get_config() -> dict[str, object]:
     file_values = read_env_file()
 
@@ -83,6 +90,10 @@ def get_config() -> dict[str, object]:
         "whisper_device": _setting(file_values, "MOVIOLA_WHISPER_DEVICE"),
         "whisper_compute": _setting(file_values, "MOVIOLA_WHISPER_COMPUTE"),
         "whisper_language": _setting(file_values, "MOVIOLA_WHISPER_LANGUAGE"),
+        # Tri-state on purpose: "" means "not configured here, let the backend
+        # read HF_HUB_OFFLINE from the environment", which is not the same as an
+        # explicit "0". Only the local backend reads it.
+        "whisper_offline": _truthy(_setting(file_values, "MOVIOLA_WHISPER_OFFLINE")),
         "config_file": str(CONFIG_FILE),
     }
 

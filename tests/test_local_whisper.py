@@ -118,6 +118,149 @@ class TestPreloadCudaLibs:
         monkeypatch.setattr(local_whisper.site, "getusersitepackages", boom)
         assert local_whisper._preload_cuda_libs() == 0
 
+    def test_alt_builds_are_skipped(self, tmp_path, monkeypatch):
+        """libnvrtc.alt.so.12 is a second build of libnvrtc.so.12.
+
+        Loading both RTLD_GLOBAL puts two definitions of the same symbols into
+        one namespace and lets glob order pick the winner. The .alt build is
+        also 113 MB, so skipping it is free in both directions.
+        """
+        lib = tmp_path / "nvidia" / "cuda_nvrtc" / "lib"
+        lib.mkdir(parents=True)
+        for name in ("libnvrtc.so.12", "libnvrtc.alt.so.12",
+                     "libnvrtc-builtins.alt.so.12.9"):
+            (lib / name).write_bytes(b"")
+
+        seen = []
+        monkeypatch.setattr(local_whisper.site, "getsitepackages", lambda: [str(tmp_path)])
+        monkeypatch.setattr(local_whisper.site, "getusersitepackages", lambda: [])
+
+        def fake_cdll(path, mode=0):
+            seen.append(Path(path).name)
+            return object()
+
+        monkeypatch.setattr(local_whisper.ctypes, "CDLL", fake_cdll)
+        local_whisper._preload_cuda_libs()
+        assert seen == ["libnvrtc.so.12"]
+
+
+class TestCpuThreads:
+    def test_a_pin_wins_over_everything(self, monkeypatch):
+        monkeypatch.setenv("MOVIOLA_WHISPER_CPU_THREADS", "3")
+        monkeypatch.setenv("OMP_NUM_THREADS", "9")
+        assert local_whisper.cpu_threads() == 3
+
+    def test_a_non_numeric_pin_is_an_error_not_a_silent_default(self, monkeypatch):
+        # Falling back to the default here would be the same class of bug as the
+        # device string that used to demote to CPU without saying so.
+        monkeypatch.setenv("MOVIOLA_WHISPER_CPU_THREADS", "lots")
+        with pytest.raises(SystemExit) as exc:
+            local_whisper.cpu_threads()
+        assert "MOVIOLA_WHISPER_CPU_THREADS" in str(exc.value)
+
+    def test_a_preset_omp_num_threads_is_left_alone(self, monkeypatch):
+        # CTranslate2 honours OMP_NUM_THREADS only while cpu_threads is 0, so
+        # returning a number here would silently override a deliberate setting.
+        monkeypatch.delenv("MOVIOLA_WHISPER_CPU_THREADS", raising=False)
+        monkeypatch.setenv("OMP_NUM_THREADS", "2")
+        assert local_whisper.cpu_threads() == 0
+
+    def test_falls_back_to_the_library_default_when_cores_are_unreadable(self, monkeypatch):
+        monkeypatch.delenv("MOVIOLA_WHISPER_CPU_THREADS", raising=False)
+        monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+        monkeypatch.setattr(local_whisper, "_physical_cores", lambda: 0)
+        assert local_whisper.cpu_threads() == 0
+
+    def test_physical_cores_never_exceed_the_affinity_mask(self, monkeypatch):
+        # A taskset-pinned process reads every core in /proc/cpuinfo and may use
+        # two of them. Reporting the file's answer would oversubscribe by 6x.
+        monkeypatch.setattr(local_whisper.os, "sched_getaffinity", lambda pid: {0, 1})
+        assert local_whisper._physical_cores() <= 2
+
+    def test_physical_cores_are_not_logical_cores(self):
+        # The measured point of the whole exercise: on an SMT machine the right
+        # answer is below os.cpu_count(), and on a non-SMT one it equals it.
+        cores = local_whisper._physical_cores()
+        assert 0 < cores <= (local_whisper.os.cpu_count() or 1)
+
+
+class TestOfflineMode:
+    @pytest.mark.parametrize("name", ["MOVIOLA_WHISPER_OFFLINE", "HF_HUB_OFFLINE"])
+    def test_either_switch_turns_it_on(self, monkeypatch, name):
+        monkeypatch.delenv("MOVIOLA_WHISPER_OFFLINE", raising=False)
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        monkeypatch.setenv(name, "1")
+        assert local_whisper.offline() is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", "  ", ""])
+    def test_off_values_and_blanks_stay_off(self, monkeypatch, value):
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        monkeypatch.setenv("MOVIOLA_WHISPER_OFFLINE", value)
+        assert local_whisper.offline() is False
+
+
+class TestCpuComputeLadder:
+    def test_int8_is_used_when_supported(self, monkeypatch):
+        monkeypatch.setattr(local_whisper, "_best_cpu_compute", lambda: "int8")
+        assert local_whisper.resolve_runtime("cpu") == ("cpu", "int8")
+
+    def test_falls_through_to_a_supported_type(self, monkeypatch):
+        # The CPU branch used to return int8 unconditionally while the CUDA
+        # branch probed — and nothing retries after a CPU load fails, so an
+        # int8-less CPU had no second chance.
+        import sys as _sys
+        import types
+
+        fake = types.ModuleType("ctranslate2")
+        fake.get_supported_compute_types = lambda device: {"float32"}
+        monkeypatch.setitem(_sys.modules, "ctranslate2", fake)
+        assert local_whisper._best_cpu_compute() == "float32"
+
+    def test_keeps_int8_when_the_probe_cannot_run(self, monkeypatch):
+        import sys as _sys
+
+        monkeypatch.setitem(_sys.modules, "ctranslate2", None)
+        assert local_whisper._best_cpu_compute() == "int8"
+
+
+class TestImportErrorReporting:
+    def test_the_real_import_failure_reaches_the_user(self, monkeypatch, tmp_path):
+        """"Not installed" is only one reason is_available() says no.
+
+        A broken CTranslate2 or a numpy ABI mismatch lands here too, and telling
+        that user to pip install faster-whisper sends them to reinstall a package
+        that is already there.
+        """
+        monkeypatch.setattr(local_whisper, "is_available", lambda: False)
+        monkeypatch.setattr(
+            local_whisper, "import_error",
+            lambda: "ImportError: numpy.core.multiarray failed to import",
+        )
+        with pytest.raises(SystemExit) as exc:
+            local_whisper.transcribe_local(tmp_path / "a.mp3")
+        assert "numpy.core.multiarray failed to import" in str(exc.value)
+
+    def test_a_real_import_failure_is_captured_verbatim(self, monkeypatch):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def boom(name, *args, **kwargs):
+            if name == "faster_whisper":
+                raise OSError("libstdc++.so.6: version GLIBCXX_3.4.32 not found")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", boom)
+        assert local_whisper.is_available() is False
+        assert "GLIBCXX_3.4.32" in local_whisper.import_error()
+
+    def test_a_successful_import_clears_the_last_error(self, monkeypatch):
+        # Otherwise a stale message from an earlier probe would be reported
+        # alongside a backend that is working fine.
+        local_whisper._IMPORT_ERROR = "ImportError: stale"
+        if local_whisper.is_available():
+            assert local_whisper.import_error() == ""
+
 
 class TestVadProblemDetection:
     @pytest.mark.parametrize("message", [
@@ -209,18 +352,46 @@ class TestLocalDispatch:
         )
         monkeypatch.setattr(local_whisper, "is_available", lambda: True)
 
-        def fake_transcribe(path, model=None, device=None, compute_type=None, language=None):
-            captured.update(model=model, device=device, compute_type=compute_type, language=language)
+        def fake_transcribe(path, model=None, device=None, compute_type=None,
+                            language=None, offline_mode=None):
+            captured.update(model=model, device=device, compute_type=compute_type,
+                            language=language, offline_mode=offline_mode)
             return [{"start": 0.0, "end": 1.0, "text": "hi"}]
 
         monkeypatch.setattr(local_whisper, "transcribe_local", fake_transcribe)
         whisper.transcribe_video(
             "v.mp4", tmp_path / "a.mp3", backend="local",
-            options={"model": "small", "device": "cpu", "compute": "int8", "language": "de"},
+            options={"model": "small", "device": "cpu", "compute": "int8",
+                     "language": "de", "offline": True},
         )
         assert captured == {
-            "model": "small", "device": "cpu", "compute_type": "int8", "language": "de",
+            "model": "small", "device": "cpu", "compute_type": "int8",
+            "language": "de", "offline_mode": True,
         }
+
+    def test_an_explicit_offline_false_is_not_collapsed_to_none(self, monkeypatch, tmp_path):
+        """`or None` here would turn "the user said no" into "ask the environment".
+
+        With HF_HUB_OFFLINE=1 set for some other tool, that difference is the
+        difference between honouring MOVIOLA_WHISPER_OFFLINE=0 and ignoring it.
+        """
+        captured = {}
+
+        monkeypatch.setattr(
+            whisper, "extract_audio",
+            lambda v, out, start=None, end=None: (out.write_bytes(b"x"), out)[1],
+        )
+        monkeypatch.setattr(local_whisper, "is_available", lambda: True)
+
+        def fake_transcribe(path, offline_mode=None, **kw):
+            captured["offline_mode"] = offline_mode
+            return [{"start": 0.0, "end": 1.0, "text": "hi"}]
+
+        monkeypatch.setattr(local_whisper, "transcribe_local", fake_transcribe)
+        whisper.transcribe_video(
+            "v.mp4", tmp_path / "a.mp3", backend="local", options={"offline": False},
+        )
+        assert captured["offline_mode"] is False
 
     def test_blank_options_become_none(self, monkeypatch, tmp_path):
         """Unset config values are "" — they must not reach faster-whisper as ""."""
@@ -232,7 +403,8 @@ class TestLocalDispatch:
         )
         monkeypatch.setattr(local_whisper, "is_available", lambda: True)
 
-        def fake_transcribe(path, model=None, device=None, compute_type=None, language=None):
+        def fake_transcribe(path, model=None, device=None, compute_type=None,
+                            language=None, offline_mode=None):
             captured.update(model=model, device=device, language=language)
             return [{"start": 0.0, "end": 1.0, "text": "hi"}]
 
@@ -505,6 +677,78 @@ class TestRunVadFallback:
             local_whisper._run(object(), tmp_path / "a.mp3", None)
 
 
+class TestLoadModelArguments:
+    """What actually reaches WhisperModel. Both defaults here were wrong.
+
+    cpu_threads defaulted to 0, which CTranslate2 reads as "decide for me" and
+    then decides 4 whatever the machine has. local_files_only defaulted to False,
+    so every load called snapshot_download() and contacted huggingface.co for a
+    revision check on weights cached months ago.
+    """
+
+    def _capture(self, monkeypatch, tmp_path, **env):
+        seen = {}
+
+        class _Fake:
+            def transcribe(self, path, language=None, vad_filter=True):
+                return iter([_FakeSegment(0.0, 1.0, "hi")]), _FakeInfo(1.0, "en")
+
+        def fake_load(model, device, compute_type, threads, local_only):
+            seen.update(model=model, device=device, compute_type=compute_type,
+                        threads=threads, local_only=local_only)
+            return _Fake()
+
+        for key in ("MOVIOLA_WHISPER_OFFLINE", "HF_HUB_OFFLINE",
+                    "MOVIOLA_WHISPER_CPU_THREADS", "OMP_NUM_THREADS"):
+            monkeypatch.delenv(key, raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setattr(local_whisper, "is_available", lambda: True)
+        monkeypatch.setattr(local_whisper, "resolve_runtime", lambda d, c: ("cpu", "int8"))
+        monkeypatch.setattr(local_whisper, "_load_model", fake_load)
+        return seen
+
+    def test_cpu_threads_reach_the_model(self, monkeypatch, tmp_path):
+        seen = self._capture(monkeypatch, tmp_path, MOVIOLA_WHISPER_CPU_THREADS="7")
+        local_whisper.transcribe_local(tmp_path / "a.mp3")
+        assert seen["threads"] == 7
+
+    def test_a_gpu_attempt_leaves_the_thread_count_alone(self, monkeypatch, tmp_path):
+        # cpu_threads is a CPU-inference setting; passing it on a CUDA load would
+        # be meaningless at best and is not what was measured.
+        seen = self._capture(monkeypatch, tmp_path, MOVIOLA_WHISPER_CPU_THREADS="7")
+        monkeypatch.setattr(local_whisper, "resolve_runtime",
+                            lambda d, c: ("cuda", "int8_float16"))
+        monkeypatch.setattr(local_whisper, "_preload_cuda_libs", lambda: 0)
+        local_whisper.transcribe_local(tmp_path / "a.mp3")
+        assert seen["device"] == "cuda"
+        assert seen["threads"] == 0
+
+    def test_offline_defaults_to_off(self, monkeypatch, tmp_path):
+        seen = self._capture(monkeypatch, tmp_path)
+        local_whisper.transcribe_local(tmp_path / "a.mp3")
+        assert seen["local_only"] is False
+
+    def test_the_env_switch_turns_offline_on(self, monkeypatch, tmp_path):
+        seen = self._capture(monkeypatch, tmp_path, MOVIOLA_WHISPER_OFFLINE="1")
+        local_whisper.transcribe_local(tmp_path / "a.mp3")
+        assert seen["local_only"] is True
+
+    def test_an_explicit_argument_beats_the_environment(self, monkeypatch, tmp_path):
+        # config.py resolves ~/.config/moviola/.env, which is not the process
+        # environment — the argument is how a file setting gets a say at all.
+        seen = self._capture(monkeypatch, tmp_path, MOVIOLA_WHISPER_OFFLINE="1")
+        local_whisper.transcribe_local(tmp_path / "a.mp3", offline_mode=False)
+        assert seen["local_only"] is False
+
+    def test_offline_is_announced_on_stderr(self, monkeypatch, tmp_path, capsys):
+        # A cache-only load fails differently from a networked one; the user has
+        # to be able to tell which mode produced the failure.
+        self._capture(monkeypatch, tmp_path, MOVIOLA_WHISPER_OFFLINE="1")
+        local_whisper.transcribe_local(tmp_path / "a.mp3")
+        assert "offline" in capsys.readouterr().err
+
+
 class TestDeviceFallbackLoop:
     """transcribe_local()'s cuda->cpu retry. The failure it exists for happens
     while the generator drains, not at load, so both shapes are exercised."""
@@ -518,7 +762,7 @@ class TestDeviceFallbackLoop:
         self._pin_cuda(monkeypatch)
         seen = []
 
-        def fake_load(model, device, compute_type):
+        def fake_load(model, device, compute_type, threads=0, local_only=False):
             seen.append((device, compute_type))
             if device == "cuda":
                 raise RuntimeError("CUDA failed with error out of memory")
@@ -539,7 +783,7 @@ class TestDeviceFallbackLoop:
         CPU retry's."""
         self._pin_cuda(monkeypatch)
 
-        def fake_load(model, device, compute_type):
+        def fake_load(model, device, compute_type, threads=0, local_only=False):
             if device == "cuda":
                 return _FakeModel(
                     [_FakeSegment(0.0, 1.0, "partial gpu output")],
@@ -556,7 +800,7 @@ class TestDeviceFallbackLoop:
         monkeypatch.setattr(local_whisper, "resolve_runtime", lambda d, c: ("cpu", "int8"))
         seen = []
 
-        def fake_load(model, device, compute_type):
+        def fake_load(model, device, compute_type, threads=0, local_only=False):
             seen.append(device)
             raise RuntimeError("nope")
 
@@ -568,7 +812,7 @@ class TestDeviceFallbackLoop:
     def test_both_attempts_failing_raises_systemexit_naming_the_last_error(self, tmp_path, monkeypatch):
         self._pin_cuda(monkeypatch)
 
-        def fake_load(model, device, compute_type):
+        def fake_load(model, device, compute_type, threads=0, local_only=False):
             raise RuntimeError(f"{device} is broken")
 
         monkeypatch.setattr(local_whisper, "_load_model", fake_load)
@@ -588,7 +832,7 @@ class TestDeviceFallbackLoop:
         monkeypatch.setattr(local_whisper, "_preload_cuda_libs", boom)
         seen = []
 
-        def fake_load(model, device, compute_type):
+        def fake_load(model, device, compute_type, threads=0, local_only=False):
             seen.append(device)
             return _FakeModel([_FakeSegment(0.0, 1.0, "cpu result")])
 
@@ -608,7 +852,7 @@ class TestDeviceFallbackLoop:
         self._pin_cuda(monkeypatch)
         gpu_ref: list = []
 
-        def fake_load(model, device, compute_type):
+        def fake_load(model, device, compute_type, threads=0, local_only=False):
             if device == "cuda":
                 doomed = _FakeModel(
                     [_FakeSegment(0.0, 1.0, "partial")],

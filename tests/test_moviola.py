@@ -6,7 +6,34 @@ import subprocess
 import sys
 from pathlib import Path
 
+import moviola  # noqa: E402  (conftest puts scripts/ on sys.path)
+
 MOVIOLA = Path(__file__).resolve().parent.parent / "skills" / "moviola" / "scripts" / "moviola.py"
+
+
+class TestWhisperPinResolution:
+    """--whisper vs MOVIOLA_WHISPER. `auto` is the case that had no expression."""
+
+    def test_nothing_pinned_is_no_pin(self):
+        assert moviola.resolve_whisper_choice(None, "auto") is None
+
+    def test_the_config_pin_is_used_when_no_flag(self):
+        assert moviola.resolve_whisper_choice(None, "groq") == "groq"
+
+    def test_the_flag_wins_over_the_config(self):
+        assert moviola.resolve_whisper_choice("local", "groq") == "local"
+
+    def test_auto_on_the_flag_undoes_the_config_pin(self):
+        # The gap this closes: --whisper could override MOVIOLA_WHISPER in every
+        # direction except back to the default, because argparse rejected `auto`.
+        assert moviola.resolve_whisper_choice("auto", "groq") is None
+
+    def test_a_blank_config_value_is_not_a_pin(self):
+        assert moviola.resolve_whisper_choice(None, "") is None
+
+    def test_argparse_accepts_auto(self, cut_clip: Path):
+        # Guards the choices list itself, which is where the rejection lived.
+        _run(cut_clip, "--whisper", "auto", "--detail", "transcript")
 
 
 def _run(clip: Path, *args: str, env_extra: dict | None = None) -> str:
