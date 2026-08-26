@@ -4,13 +4,13 @@
 
 Claude Code (recommended — auto-updates via marketplace):
 ```
-/plugin marketplace add androsland/claude-video
-/plugin install moviola@claude-video
+/plugin marketplace add androsland/moviola
+/plugin install moviola@moviola
 ```
 
 Codex, Cursor, Copilot, Gemini CLI, or any of 50+ [Agent Skills](https://agentskills.io) hosts:
 ```bash
-npx skills add androsland/claude-video -g
+npx skills add androsland/moviola -g
 ```
 (`-g` installs globally for your user, available across all projects. Drop it to scope per-project.)
 
@@ -99,26 +99,26 @@ End-to-end from a cold URL, `transcript` is the cheapest mode by far; the frame 
 
 | Surface | Install |
 |---------|---------|
-| **Claude Code** | `/plugin marketplace add androsland/claude-video` then `/plugin install moviola@claude-video` |
-| **Codex, Cursor, Copilot, Gemini CLI, +50 more** | `npx skills add androsland/claude-video -g` |
-| **claude.ai** (web) | [Download `moviola.skill`](https://github.com/androsland/claude-video/releases/latest) → Settings → Capabilities → Skills → `+` |
+| **Claude Code** | `/plugin marketplace add androsland/moviola` then `/plugin install moviola@moviola` |
+| **Codex, Cursor, Copilot, Gemini CLI, +50 more** | `npx skills add androsland/moviola -g` |
+| **claude.ai** (web) | [Download `moviola.skill`](https://github.com/androsland/moviola/releases/latest) → Settings → Capabilities → Skills → `+` |
 | **Manual / dev** | `git clone` then symlink `skills/moviola` into your host's skills dir (see below) |
 
 ### Claude Code
 
 ```
-/plugin marketplace add androsland/claude-video
-/plugin install moviola@claude-video
+/plugin marketplace add androsland/moviola
+/plugin install moviola@moviola
 ```
 
-Update later with `/plugin update moviola@claude-video`.
+Update later with `/plugin update moviola@moviola`.
 
 ### Codex, Cursor, Copilot, Gemini CLI, and 50+ other hosts
 
 The [Agent Skills](https://agentskills.io) CLI installs the skill into whatever agents it detects:
 
 ```bash
-npx skills add androsland/claude-video -g
+npx skills add androsland/moviola -g
 ```
 
 `-g` installs globally for your user (`~/.codex/skills`, `~/.cursor/skills`, etc.); drop it to install into the current project instead. Useful flags:
@@ -133,7 +133,7 @@ Update later with `npx skills update moviola -g`.
 
 ### claude.ai (web)
 
-1. [Download `moviola.skill`](https://github.com/androsland/claude-video/releases/latest) from the latest release.
+1. [Download `moviola.skill`](https://github.com/androsland/moviola/releases/latest) from the latest release.
 2. Go to Settings → Capabilities → Skills.
 3. Click `+` and drop the file in.
 
@@ -144,8 +144,8 @@ Enable "Code execution and file creation" under Capabilities first — the skill
 Clone the repo and symlink the self-contained skill folder into your host's skills directory — the symlink keeps the install in sync with your working tree as you edit:
 
 ```bash
-git clone https://github.com/androsland/claude-video.git
-ln -s "$(pwd)/claude-video/skills/moviola" ~/.claude/skills/moviola   # or ~/.codex/skills/moviola
+git clone https://github.com/androsland/moviola.git
+ln -s "$(pwd)/moviola/skills/moviola" ~/.claude/skills/moviola   # or ~/.codex/skills/moviola
 ```
 
 For claude.ai, build the `.skill` bundle from source: `bash skills/moviola/scripts/build-skill.sh` produces `dist/moviola.skill`.
@@ -269,14 +269,14 @@ Originally built as `claude-video` by Brad Bonanno, who makes content about buil
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=androsland%2Fclaude-video&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=androsland%2Fmoviola&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=androsland/claude-video&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=androsland/claude-video&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=androsland/claude-video&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=androsland/moviola&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=androsland/moviola&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=androsland/moviola&type=date&legend=top-left" />
  </picture>
 </a>
 
 ---
 
-[github.com/androsland/claude-video](https://github.com/androsland/claude-video) · [@bradbonanno](https://www.youtube.com/@bradbonanno) · [Solaris Automation](https://www.solarisautomation.io/) · [LICENSE](LICENSE)
+[github.com/androsland/moviola](https://github.com/androsland/moviola) · [@bradbonanno](https://www.youtube.com/@bradbonanno) · [Solaris Automation](https://www.solarisautomation.io/) · [LICENSE](LICENSE)
