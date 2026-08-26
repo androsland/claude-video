@@ -1,0 +1,84 @@
+name: Tests
+
+# Day-one config. Cheap to get right now, awkward to retrofit.
+#
+#   * `push` on the default branch and nothing else. A push to a topic branch
+#     with no open PR triggers nothing at all; the PR is what asks for a run.
+#   * `pull_request` on its default events (opened, synchronize, reopened).
+#   * One concurrency group per ref, cancelling superseded runs everywhere
+#     except the default branch — where each commit's result is a record worth
+#     keeping rather than a preview to be replaced.
+#   * ONE job. GitHub rounds billing per job, so a second job has to buy
+#     parallelism somebody actually feels. This suite is ~20s; it does not.
+#
+# This repository is public, so Actions minutes are free and none of the above
+# is about the meter. It is about the run being legible and the config being
+# right before it matters.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    name: pytest
+    runs-on: ubuntu-latest
+    # The job is ~20s. GitHub's default is 360 MINUTES, which is what a
+    # hung apt mirror or a wedged ffmpeg would actually consume before
+    # anyone noticed; cancel-in-progress does not help, the group is
+    # per-ref. 10 leaves room for a slow runner without leaving room for
+    # a stuck one.
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        # 3.10 because it is the only version this suite has been observed to
+        # pass on — 726 tests green on 3.10.12, the interpreter the project is
+        # developed against. Nothing in the repository declares a supported
+        # range, so a higher pin here would be CI testing a version nobody has
+        # run and nobody has claimed. The floor and a version matrix are filed
+        # in TODOS.md; this is the honest single value until they are decided.
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install ffmpeg
+        # conftest.py synthesizes every fixture clip by shelling out to ffmpeg,
+        # and the frame tests call ffprobe. Without these the fixtures raise —
+        # they do not skip — so this failing is loud.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      - name: Install test dependencies
+        # yt-dlp is a DEV dependency, not a runtime one: moviola shells out to
+        # the binary and never imports the package. It is here because
+        # tests/test_the_fallback_stays_small.py drives yt-dlp's own
+        # build_format_selector to prove the format ladder is monotonic, and
+        # guards that import. Without it those 24 tests skip and the run is
+        # still green — which is the whole failure this workflow exists to
+        # stop. tests/test_ci_runs_the_whole_suite.py enforces the coupling.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest yt-dlp
+          python -m pip list
+
+      - name: Run the suite
+        # -rs prints the reason for every skip. Disclosure, not enforcement:
+        # the enforcement is test_ci_runs_the_whole_suite.py, which fails the
+        # suite when the workflow stops installing something the suite guards
+        # an import on. This flag is what makes an unexpected skip visible to
+        # a human reading the log.
+        run: python -m pytest -q -rs

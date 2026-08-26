@@ -243,7 +243,7 @@ Other knobs (passed to `scripts/moviola.py`):
 ├── .agents/plugins/              # marketplace.json — Agent Skills marketplace listing
 ├── AGENTS.md → CLAUDE.md         # generic-agent entry point
 ├── tests/                        # pytest suite (ffmpeg-synthesized clips, no network)
-└── .github/workflows/            # release.yml — auto-builds moviola.skill on tag push
+└── .github/workflows/            # tests.yml (suite on every PR) + release.yml (builds moviola.skill on tag push)
 ```
 
 ## Develop

@@ -6,7 +6,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 - **No manifest means dependency CVE scanning has nothing to read.** `faster-whisper` is introduced only as a string in `setup.py`'s output and a lazy `import` — there is no `requirements.txt`, `pyproject.toml` or lockfile in the repo, which is correct for a project whose runtime is otherwise pure stdlib, but it means a manifest-driven scanner (`trivy fs`, `osv-scanner`) has no artifact to point at and will report clean without having checked anything. The dependency chain to check by hand is `faster-whisper` -> `ctranslate2`, `onnxruntime`, `huggingface-hub`, `tokenizers`, `av`. Do not read a clean scan of this repo as a clean bill for that chain. (supply-chain review, 2026-08-26)
 
-- **No test loads a real Whisper model.** `tests/test_local_whisper.py` now drives `_collect()`, `_run()`'s VAD fallback and `transcribe_local()`'s cuda-to-cpu retry against stub objects shaped like faster-whisper's `Segment`/`TranscriptionInfo`, so the segment contract and the fallback loop are covered; seven mutations were each confirmed to fail the suite (segment rounding, the dropped CPU retry, kept-empty-text, the progress catch-up loop, the language-pin guard, the progress line's own format, and moving the drain outside the retry's `try` — that last one fails only the fail-mid-drain test, which is what proves the two fallback tests exercise different paths). What remains uncovered is the real library boundary: if faster-whisper renames an attribute or changes `WhisperModel(...)`/`transcribe(...)`'s signature, the stubs keep matching the old shape and the suite stays green. Closing that needs a real model load, which means a multi-hundred-MB download in a suite that is otherwise network-free. Verified by hand instead: `large-v3` int8_float16 on a GTX 1650 Ti transcribed a 38.6 s clip in 22 s including model load. If a CI runner ever gets a model cache, add a `tiny`-model smoke test behind an opt-in marker. **Corrected 2026-08-26:** this entry originally said "CI stays green" and "If CI ever gets a model cache" as though a CI ran the suite. None does — `release.yml` on tag push is the whole of `.github/workflows/`, and it has never executed once in this repository (no workflow run of any kind exists), so the only thing that has ever run these 564 tests is somebody's terminal. The wording is fixed above and the gap is its own entry under `## Documentation as a checked claim`. (ai-output review, 2026-08-26)
+- **No test loads a real Whisper model.** `tests/test_local_whisper.py` now drives `_collect()`, `_run()`'s VAD fallback and `transcribe_local()`'s cuda-to-cpu retry against stub objects shaped like faster-whisper's `Segment`/`TranscriptionInfo`, so the segment contract and the fallback loop are covered; seven mutations were each confirmed to fail the suite (segment rounding, the dropped CPU retry, kept-empty-text, the progress catch-up loop, the language-pin guard, the progress line's own format, and moving the drain outside the retry's `try` — that last one fails only the fail-mid-drain test, which is what proves the two fallback tests exercise different paths). What remains uncovered is the real library boundary: if faster-whisper renames an attribute or changes `WhisperModel(...)`/`transcribe(...)`'s signature, the stubs keep matching the old shape and the suite stays green. Closing that needs a real model load, which means a multi-hundred-MB download in a suite that is otherwise network-free. Verified by hand instead: `large-v3` int8_float16 on a GTX 1650 Ti transcribed a 38.6 s clip in 22 s including model load. If a CI runner ever gets a model cache, add a `tiny`-model smoke test behind an opt-in marker. **Corrected 2026-08-26:** this entry originally said "CI stays green" and "If CI ever gets a model cache" as though a CI ran the suite. None did — `release.yml` on tag push was the whole of `.github/workflows/`, and it had never executed once in this repository (no workflow run of any kind existed), so the only thing that had ever run these tests was somebody's terminal. **Superseded 2026-08-26 by `ci/run-the-suite`:** `.github/workflows/tests.yml` now runs the suite on every pull request and on pushes to `main`. Two things that does NOT mean — it has still never *run* (no workflow run exists in this repository yet, and one will not until this merges), and the runner has no model cache, so the `tiny`-model smoke test below is still unbuilt and still opt-in when it is. The wording is fixed above and the gap is its own entry under `## Documentation as a checked claim`. (ai-output review, 2026-08-26)
 
 - **`MOVIOLA_WHISPER_MODEL` accepts an arbitrary Hugging Face repo id or path with no validation beyond what `huggingface_hub` does.** That is deliberate — it is how anyone uses a fine-tune or a local conversion — but it means a typo'd or hostile repo id is fetched and loaded on the user's behalf. Documented as a non-goal in SKILL.md's security section rather than fixed. (local-whisper branch, 2026-08-26)
 
@@ -678,14 +678,134 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `README.md:136` still points at a 404. Nothing in the suite can tell the difference;
   see the new NON-GOALS bullet in `test_the_docs_are_checked.py` saying so directly.
 
-- **Nothing runs the 564-test suite in CI.** (release staging, 2026-08-26)
-  `.github/workflows/release.yml` is the *only* workflow in the repo and it triggers on
-  `push: tags: v*`. So the tag that publishes `moviola.skill` to the world is gated by
-  nothing except whatever the person cutting it ran locally. The suite is stdlib +
-  pytest and needs `ffmpeg` for the frame tests, so a runner is cheap and the repo is
-  public, which makes the minutes free. The fix is one workflow with day-one config:
-  `push` on `main` only, a `concurrency` group keyed on the ref with
-  `cancel-in-progress` off the default branch, and one job.
+- **CI installs `yt-dlp` unpinned, so the behavioural ladder tests float.**
+  (ci/run-the-suite, 2026-08-26) `.github/workflows/tests.yml` runs
+  `pip install pytest yt-dlp` with no version, and the 24 tests in
+  `test_the_fallback_stays_small.py` drive yt-dlp's own `build_format_selector`.
+  So a yt-dlp release that changes selector semantics turns the suite red with
+  no change to this repository, and the failure will look like a moviola
+  regression. Pinning trades that for a version that silently rots — and a
+  wrong pin is worse here than none, because these tests exist to describe what
+  the *real* yt-dlp does. The shape, if it bites: pin in the workflow and add a
+  scheduled job that runs unpinned, so drift is reported separately from
+  breakage. Filed rather than fixed because nothing has drifted yet and the fix
+  is a second job, which the day-one config deliberately does not have.
+
+- **Nothing declares which Python versions moviola supports, and CI now pins one.**
+  (ci/run-the-suite, 2026-08-26) There is no `python_requires`, no
+  `pyproject.toml`, and no statement in `AGENTS.md`, `README.md` or `SKILL.md`.
+  The workflow pins `3.10` — measured, not chosen: it is the only interpreter
+  this suite has been observed to pass on (726 tests on 3.10.12, the only
+  version installed on the development machine). The type hints are 3.9+ and
+  every module opens `from __future__ import annotations`, so the real floor is
+  probably 3.9, but *probably* is the point — nobody has run it there. Two
+  decisions are owed and neither is the loop's: what the supported range is,
+  and whether one job with one version is the right coverage for a tool that
+  installs into whatever Python a user's agent host happens to have. A matrix
+  is the obvious answer and it is N jobs, which the day-one config rules out
+  without a reason; this is that reason when somebody decides it is.
+
+- **The dependency set is now declared in a workflow, which no scanner reads.**
+  (ci/run-the-suite, 2026-08-26) This is the same finding as the manifest entry
+  under `## Local Whisper backend`, in a second location. `pip install pytest
+  yt-dlp` inside a `run:` step keeps the repository's deliberate no-manifest
+  posture — correct for a pure-stdlib runtime — but it means `trivy fs` and
+  `osv-scanner` still have nothing to point at, and now there is a real
+  dependency list they are not reading. Deliberately not fixed here: adding a
+  `requirements-dev.txt` would reverse a posture the repo took on purpose, and
+  `test_ci_runs_the_whole_suite.py` reads the workflow text, so the move would
+  also break that check until it is taught to follow the reference. (That last
+  clause is now enforced rather than asserted: with comments stripped, moving
+  the install to `-r requirements-dev.txt` fails the load-bearing test, and a
+  mutation proves it. Before the fix the step's comment kept the match alive and
+  the move would have passed silently — the NON-GOAL claimed a safety the file
+  did not have.)
+
+- **Unpinned CI dependencies fail in BOTH directions, and only one was filed.**
+  (security review of ci/run-the-suite, 2026-08-26) The entry above frames
+  `pip install pytest yt-dlp` with no version as a drift risk — a yt-dlp release
+  changing selector semantics turns the suite red with no change here, a false
+  RED. The opposite direction is unfiled and worse: a compromised or typosquatted
+  release installs into a job that then runs the repository's own test code, and
+  the failure mode is a false GREEN. The two want different remedies — the false
+  RED wants a scheduled unpinned job reporting drift separately, the false GREEN
+  wants a hash-pinned install — so filing only the first frames the whole problem
+  as a nuisance rather than as a supply-chain surface. Neither is urgent on a
+  public repo with `contents: read` and no secrets in this workflow; both should
+  be decided together when either is.
+
+- **The behavioural ladder tests depend on yt-dlp INTERNAL API.** (testing review
+  of ci/run-the-suite, 2026-08-26) `test_the_fallback_stays_small.py` drives
+  `yt_dlp.build_format_selector` and hand-builds the `ctx` dict it consumes.
+  Neither is public API, neither carries a stability guarantee, and yt-dlp
+  releases roughly weekly. This sharpens the drift entry above rather than
+  duplicating it: the exposure is not "a new yt-dlp might change selector
+  semantics", it is "a new yt-dlp may rename or reshape a private function these
+  24 tests call directly", which is both likelier and harder to read as a real
+  regression when it happens.
+
+- **CI's ffmpeg is a major version this suite has never run against.** (testing
+  review of ci/run-the-suite, 2026-08-26) Every measurement in this repository
+  was taken on ffmpeg 4.4.2 (Ubuntu 22.04). `ubuntu-latest` has not been 22.04
+  since 2025, so the runner installs a different major, and six tests in
+  `test_frames.py` depend on x264 GOP placement and scene-detection thresholds —
+  behaviour that is tuned, not specified. This is a risk and not a predicted
+  failure: the workflow has never executed, so nobody knows either way. The
+  cheap answer if it bites is pinning `runs-on` to a specific image rather than
+  loosening the assertions; the assertions are the product.
+
+- **`softprops/action-gh-release@v2` in `release.yml` is a mutable tag under
+  `contents: write`.** (security review of ci/run-the-suite, 2026-08-26) Semgrep
+  `p/github-actions` flags mutable tags on all four actions used in this
+  repository; three are first-party `actions/*` running under `contents: read`
+  with no secrets, which is why they were adjudicated NO CHANGE. The fourth is
+  third-party and runs with a write token at publish time, which is the one
+  worth a SHA pin. Out of scope for `ci/run-the-suite` — it is a different
+  workflow and CLAUDE.md keeps executable-behaviour changes in their own PR.
+
+- **`test_ci_runs_the_whole_suite.py` reads the workflow as text, not as YAML.**
+  (ci/run-the-suite, 2026-08-26; narrowed by review 2026-08-26) Two of the
+  permissive cases are now closed — a name in a `#` comment and a name in a
+  `name:` label are stripped before matching, because as shipped they made the
+  load-bearing assertion satisfiable by a workflow that installed nothing. What
+  remains permissive: a step behind a false `if:`, a job that never runs, and a
+  name in a command that is not an install (`echo yt-dlp`). What remains loud: a
+  quoted `"on":` yields an empty block and is asserted against; a `#` inside a
+  quoted shell string truncates the line, which can hide an install and can
+  never invent one. One correction to the original entry — flow style
+  (`on: {pull_request: null}`) and the list form do NOT defeat the block reader;
+  they happen to read correctly by substring match. That was a claim in the
+  file's own NON-GOALS and it was false; it now says so. Fixing the rest means a
+  YAML parser, which is a dependency added to check a rule about dependencies;
+  the joke is why it stays filed.
+
+- **Nothing sees a skip that is not a guarded import, and the suite already has
+  eight.** (review of ci/run-the-suite, 2026-08-26) `optional_imports()` finds
+  `try/except ImportError`, `importlib.import_module` and `pytest.importorskip`.
+  It structurally cannot see a bare `pytest.skip()` taken on an environment
+  condition — and with `git` shimmed to exit 128 the full run is **718 passed, 8
+  skipped, exit 0**: seven from `repo_files.py:99` (git cannot list the
+  checkout) and one from `test_the_docs_are_checked.py:367` (git archive). A
+  third site, `test_key_file_permissions.py:114`, fires only on a filesystem
+  that does not honour POSIX modes and did not fire here. That is the same
+  green-but-hollow failure the CI checker is named for, at a smaller blast
+  radius. Not fixed because the fix is not obviously a test: these skips are
+  *correct* on a machine without git, and what is wanted is a report of what got
+  skipped, not a rule that forbids skipping. `-rs` in the workflow discloses it
+  to a human; nothing enforces it.
+
+- **The vacuity guard catches a scanner that stopped entirely, not one that
+  stopped partially.** (review of ci/run-the-suite, 2026-08-26)
+  `test_the_scan_finds_something_to_check` pins that `yt_dlp` is still found —
+  and `yt_dlp` is the only real guarded import in the repository, so the guard
+  has a sample size of one. A future optional dependency written in a shape the
+  scanner misses is silently uncovered and nothing goes red. Four shapes that
+  DID slip through are now driven against synthetic input (nested in the try
+  body, `except Exception`, bare `except`, dynamic `import_module`), but that
+  list is a record of what was caught, not a proof of completeness. One known
+  remaining blind spot, deliberately unfixed: a module-level
+  `pytestmark = pytest.mark.skipif(find_spec("x") is None)`, which skips a whole
+  file and looks nothing like an import guard.
 
 - **`AGENTS.md` documents a `.venv` that no longer exists in this checkout.**
   (release staging, 2026-08-26) Its Commands block gives
@@ -819,6 +939,69 @@ riding along behind prose.
   extraction step, so a pass that archives without lifting them is a silent regression.
 
 ## Completed
+
+### CI runs the suite
+
+(ci/run-the-suite, 2026-08-26)
+
+**`.github/workflows/tests.yml` runs the whole suite on every pull request and on
+pushes to `main`.** Until it, `release.yml` on `push: tags: v*` was the only
+workflow in the repository, so the tag that publishes `moviola.skill` to the
+world was gated by nothing except whatever the person cutting it had run in
+their terminal. Day-one config, per CLAUDE.md: `push` on the default branch and
+nothing else, `pull_request` on its default events, a concurrency group keyed on
+the ref cancelling superseded runs everywhere except `main`, and ONE job.
+
+**The half worth reading is `tests/test_ci_runs_the_whole_suite.py`, which pins
+that CI runs the WHOLE suite.** `pytest` exits 0 on a skip, so a runner missing
+an optional dependency produces a green run that covered less than it appears
+to. Measured on this branch: blocking `yt_dlp` takes **24 of the 34 tests** in
+`test_the_fallback_stays_small.py` — the entire behavioural half of the
+format-ladder work — out of the run behind an exit code of 0. The test walks
+every file under `tests/` for guarded imports (`try:`/`except ImportError`,
+`importlib.import_module`, and `pytest.importorskip`), and requires each module
+it finds to be named in the workflow or listed in `CI_NEED_NOT_INSTALL` with a
+reason.
+
+*(Corrected 2026-08-26. This paragraph first shipped as "712 passed / 0 skipped"
+against "688 passed / 24 skipped". Both totals were stale on the branch that
+carried them — it was 726 — because this file's own new tests are the
+difference. A delta is quoted now instead: a total goes stale the moment anyone
+adds a test, which is exactly what happened here.)*
+
+The rule was written against three instances rather than the one that prompted
+it: `yt_dlp` today, `markdown-it-py` already filed under `## Report as an
+untrusted document`, and `faster_whisper` as the counter-example it must NOT
+fire on — a real model load is a multi-hundred-MB download in a suite that is
+deliberately network-free, which is what `CI_NEED_NOT_INSTALL` exists for. The
+exemption path is empty today, so a test drives it against a synthetic module
+rather than leaving the first real use to be the first execution.
+
+**One recorded mutation kill was wrong, and the review caught it.** This entry
+first read "eight mutations, eight killed", including "`yt-dlp` dropped from the
+install line → kills exactly the one load-bearing test". That mutation killed
+NOTHING. `installed_by()` searched the raw workflow text, and the install step's
+own comment says `yt-dlp` three times and its label says it once — so deleting
+the install left the check green over a workflow that installed nothing. Four
+independent review passes found it; one reproduced it by running the mutation
+and measuring `10 passed, 24 skipped` on `test_the_fallback_stays_small.py`
+against a green gate. The recorded mutation must have removed the whole step
+rather than the one line the entry claims.
+
+Fixed on the same branch by matching against what the workflow *does* instead of
+what it *says*: comments are stripped following YAML's actual rule (a `#` at
+line start or after whitespace, so `git+https://…#egg=yt_dlp` survives) and
+`name:` display labels are dropped. **18 mutations, 18 killed** after the fix,
+`__pycache__` cleared and each file restored from a post-fix snapshot with
+sha256 compared — never `git checkout --`, which would revert the fix along with
+the mutation. Two of the eighteen were survivors first: the exemption
+reason-required guard was vacuous over two empty dicts (the rule now lives in a
+helper driven against synthetic input), and nothing pinned the job timeout.
+
+`python-version` is `3.10`, which is measured rather than chosen — see the open
+entry under `## Documentation as a checked claim`; nothing in the repository
+declares a supported range and 3.10.12 is the only interpreter this suite has
+been observed to pass on. 750 tests green after the review pass.
 
 ### A second pass over the bounded-failures review
 
