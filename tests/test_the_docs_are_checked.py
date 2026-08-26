@@ -16,10 +16,16 @@ values repeated across files, this one pins prose against the code it describes.
 
 NON-GOALS, so a green run is not read as more than it is:
 
-  * The version test proves the three manifests AGREE on a string. It does not
-    prove the string is the right version, that it was bumped for this change, or
-    that it matches any tag. Agreement is the invariant AGENTS.md states; being
-    correct is a release decision no test can make.
+  * The version test proves the three manifests AGREE on a string, and the
+    CHANGELOG test proves that string is the one the newest entry is filed under.
+    Neither proves it is the RIGHT version, that it was bumped for this change,
+    or that it matches any tag — a tag lives outside a network-free suite, so
+    `v0.3.0` can be absent, misplaced or never pushed with everything here green.
+    Agreement plus a matching entry is as far as this file reaches; being correct
+    is a release decision no test can make.
+  * `_tracked_text_files` asks git, so every file-sweeping test here audits what
+    the repository SHIPS. Local scratch is invisible to them by design — and so
+    is a real problem introduced in an untracked file that is about to be added.
   * The flag test runs in ONE direction: every long flag `build_parser` defines
     must appear in README. The reverse would false-fire on correct docs — README
     also documents `setup.py`'s `--agent`, `--check`, `--copy` and `--list`,
@@ -70,8 +76,42 @@ TEXT_SUFFIXES = {".py", ".md", ".json", ".sh", ".txt", ".yml", ".yaml"}
 
 
 def _tracked_text_files() -> list[Path]:
+    """The repo's own text files, as git sees them.
+
+    Asks git rather than walking the working tree, because the name is the whole
+    point: every caller audits these files as CLAIMS THE REPOSITORY MAKES, and an
+    untracked file makes no claim to anyone but the person who wrote it. The
+    walk scanned local scratch — `SESSION.md` from the write-session plugin,
+    `LOOP.md`, an editor backup, a downloaded sample — and reported findings
+    against files that ship with nobody. It failed exactly that way here: a
+    merge-commit line in `SESSION.md` quoting a branch name of the form
+    `<owner>/chore/<slug>` parsed as a reference to a repository called
+    `chore`, and the self-reference audit went red in a working tree while a
+    clean checkout of the same commit stayed green.
+
+    Note the shape of that false positive, because tracking does not remove it:
+    the audit reads `<owner>/<word>` as a repo slug, and a branch name written
+    in prose has the same shape. A tracked file quoting one — a CHANGELOG line,
+    a runbook — would still trip it. Consulting git fixes the file SET, not the
+    pattern.
+
+    Falls back to the walk when git cannot answer — a source export, a vendored
+    copy, a checkout with no `.git`. In that situation there is no untracked/
+    tracked distinction to honour anyway, and a suite that refuses to run is
+    worse than one that scans a little too much.
+    """
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(REPO), "ls-files", "-z"],
+            capture_output=True,
+            check=True,
+        ).stdout.decode("utf-8")
+        candidates = [REPO / rel for rel in listed.split("\0") if rel]
+    except (OSError, subprocess.CalledProcessError):
+        candidates = list(REPO.rglob("*"))
+
     out = []
-    for path in REPO.rglob("*"):
+    for path in candidates:
         if not path.is_file() or path.suffix not in TEXT_SUFFIXES:
             continue
         if SKIP_DIRS & set(path.relative_to(REPO).parts):
@@ -97,6 +137,22 @@ def _frontmatter(path: Path) -> dict[str, str]:
         key, _, value = line.partition(":")
         fields[key.strip()] = value.strip().strip('"').strip("'")
     return fields
+
+
+_CHANGELOG_HEADING = re.compile(r"^## \[(\d+\.\d+\.\d+)\]", re.MULTILINE)
+
+
+def _newest_changelog_version() -> str:
+    """The version in the topmost `## [x.y.z]` heading of the CHANGELOG.
+
+    Topmost rather than highest: the file is newest-first by convention, and
+    sorting the numbers instead would quietly accept an entry filed in the wrong
+    place. If the convention is ever broken, this should fail rather than paper
+    over it.
+    """
+    match = _CHANGELOG_HEADING.search(CHANGELOG.read_text(encoding="utf-8"))
+    assert match, "CHANGELOG.md has no `## [x.y.z]` heading"
+    return match.group(1)
 
 
 def _alternations_after(flag: str) -> list[list[str]]:
@@ -140,6 +196,58 @@ class TestTheThreeManifestsDescribeOnePlugin:
         names = {_frontmatter(SKILL_MD)["name"]}
         names.update(json.loads(p.read_text(encoding="utf-8"))["name"] for p in MANIFESTS)
         assert names == {"moviola"}
+
+
+class TestTheChangelogDescribesTheVersionBeingShipped:
+    """The three manifests agreeing on a string says nothing about which string.
+
+    `TestTheThreeManifestsDescribeOnePlugin` proves the number is the same in all
+    three places. Three files agreeing on a stale number passes that cleanly — so
+    a release that bumped the manifests and forgot the CHANGELOG, or wrote the
+    entry under the previous number, looked identical to a correct one.
+
+    This pins the manifests to the one other file that has to move with them: the
+    newest CHANGELOG heading. It is the half of "agreement is not correctness"
+    that a network-free suite can actually reach.
+
+    NON-GOALS, because the gap this leaves is the larger half:
+
+      * It does NOT check the version against a git tag or a published release.
+        That needs the network, or a `git` invocation whose answer depends on
+        which refs happen to be fetched, and this suite is neither. `v0.3.0` can
+        be absent, point at the wrong commit, or never be pushed at all, and
+        every test here still passes. The README's claim that a `.skill` is
+        downloadable from the latest release is checkable by nothing in this repo.
+      * It does NOT prove the version was bumped for the change being shipped.
+        A release that edits behaviour and moves neither the manifests nor the
+        CHANGELOG is invisible to it — both halves are consistent at the old
+        number.
+      * It reads the NEWEST heading only. An older entry rewritten after the fact
+        passes; `test_consistency.py` records one such case deliberately (the
+        released 0.2.0 entry says 25 MB where the code says 24, and rewriting a
+        shipped entry is the wrong fix).
+      * It says nothing about the entry's CONTENT. A heading at the right number
+        above a body describing different work is exactly as green as a correct one.
+    """
+
+    def test_the_newest_changelog_heading_is_the_version_in_the_frontmatter(self) -> None:
+        # Not hypothetical in the other direction: the fork shipped SKILL.md at
+        # 0.2.0 while both manifests said 0.3.0, and the CHANGELOG was the only
+        # file that could have said which was meant.
+        newest = _newest_changelog_version()
+        assert newest == _frontmatter(SKILL_MD)["version"], (
+            f"CHANGELOG's newest entry is [{newest}] but SKILL.md ships "
+            f"{_frontmatter(SKILL_MD)['version']}"
+        )
+
+    def test_the_newest_changelog_heading_is_the_version_in_both_manifests(self) -> None:
+        newest = _newest_changelog_version()
+        for path in MANIFESTS:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            assert manifest["version"] == newest, (
+                f"{path.parent.name} ships {manifest['version']}, "
+                f"CHANGELOG's newest entry is [{newest}]"
+            )
 
 
 class TestNoUrlStillPointsAtTheRepositoryThisWasForkedFrom:
