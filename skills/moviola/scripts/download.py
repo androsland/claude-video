@@ -41,8 +41,52 @@ def resolve_local(path: str) -> dict:
     }
 
 
-def _pick_subtitle(out_dir: Path) -> Path | None:
-    candidates = sorted(out_dir.glob("video*.vtt"))
+def snapshot_dir(out_dir: Path) -> dict[str, tuple[int, int]]:
+    """What `out_dir` holds right now, so a later pick can tell new from stale.
+
+    `--out-dir` is a documented flag and the skill tells the agent to reuse the
+    directory, so "a file named video.* is in there" has never meant "this run
+    downloaded it". A run whose download failed outright picked up the PREVIOUS
+    run's video and reported on it: right filename, wrong film, no error
+    anywhere. Recording (mtime, size) per name before yt-dlp starts is what
+    makes the difference visible.
+
+    NON-GOALS. It cannot tell a re-download of the SAME video from a stale copy
+    of it, and does not need to — either way the file answers the URL that was
+    asked for. It compares mtime and size, so a byte-identical rewrite at an
+    identical mtime reads as stale. And it says nothing about a file another
+    process writes into the directory while yt-dlp is running, which is the
+    separate problem of two runs sharing one work directory.
+    """
+    snapshot: dict[str, tuple[int, int]] = {}
+    try:
+        entries = list(out_dir.iterdir())
+    except OSError:
+        return snapshot
+    for entry in entries:
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        snapshot[entry.name] = (stat.st_mtime_ns, stat.st_size)
+    return snapshot
+
+
+def _is_from_this_run(path: Path, before: dict[str, tuple[int, int]]) -> bool:
+    """True if `path` did not exist before this run, or changed during it."""
+    prior = before.get(path.name)
+    if prior is None:
+        return True
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    return (stat.st_mtime_ns, stat.st_size) != prior
+
+
+def _pick_subtitle(out_dir: Path, before: dict[str, tuple[int, int]]) -> Path | None:
+    candidates = [c for c in sorted(out_dir.glob("video*.vtt"))
+                  if _is_from_this_run(c, before)]
     if not candidates:
         return None
     preferred = [
@@ -52,12 +96,13 @@ def _pick_subtitle(out_dir: Path) -> Path | None:
     return preferred[0] if preferred else candidates[0]
 
 
-def _pick_video(out_dir: Path) -> Path | None:
+def _pick_video(out_dir: Path, before: dict[str, tuple[int, int]]) -> Path | None:
     for ext in (".mp4", ".mkv", ".webm", ".mov", ".m4a", ".mp3", ".opus"):
-        for candidate in out_dir.glob(f"video*{ext}"):
-            return candidate
-    for candidate in out_dir.glob("video.*"):
-        if candidate.suffix.lower() in VIDEO_EXTS:
+        for candidate in sorted(out_dir.glob(f"video*{ext}")):
+            if _is_from_this_run(candidate, before):
+                return candidate
+    for candidate in sorted(out_dir.glob("video.*")):
+        if candidate.suffix.lower() in VIDEO_EXTS and _is_from_this_run(candidate, before):
             return candidate
     return None
 
@@ -68,6 +113,7 @@ def fetch_captions(url: str, out_dir: Path) -> dict:
         raise SystemExit("yt-dlp is not installed. Install with: brew install yt-dlp")
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    before = snapshot_dir(out_dir)
     output_template = str(out_dir / "video.%(ext)s")
     cmd = [
         "yt-dlp",
@@ -84,9 +130,20 @@ def fetch_captions(url: str, out_dir: Path) -> dict:
         "--",
         url,
     ]
-    subprocess.run(cmd, stdout=sys.stderr, stderr=sys.stderr)
-    subtitle = _pick_subtitle(out_dir)
-    info = _read_info(out_dir / "video.info.json", url)
+    result = subprocess.run(cmd, stdout=sys.stderr, stderr=sys.stderr)
+    subtitle = _pick_subtitle(out_dir, before)
+    info = _read_info(out_dir / "video.info.json", url, before)
+    if result.returncode != 0 and subtitle is None:
+        # Having no captions is an ordinary outcome, not an error. Having none
+        # AFTER a non-zero exit is a different thing, and the two used to be
+        # reported identically — as silence — so a rate-limited caption fetch
+        # looked exactly like a video that has none, and the caller went on to
+        # pay for a transcript.
+        print(
+            f"[moviola] yt-dlp exited {result.returncode} and produced no captions "
+            "— treating this video as having none",
+            file=sys.stderr,
+        )
     return {
         "video_path": None,
         "subtitle_path": str(subtitle) if subtitle else None,
@@ -95,9 +152,10 @@ def fetch_captions(url: str, out_dir: Path) -> dict:
     }
 
 
-def _read_info(info_path: Path, url: str) -> dict:
+def _read_info(info_path: Path, url: str, before: dict[str, tuple[int, int]]) -> dict:
+    """Read this run's info.json. A leftover one describes a different video."""
     info: dict = {}
-    if info_path.exists():
+    if info_path.exists() and _is_from_this_run(info_path, before):
         try:
             raw = json.loads(info_path.read_text(encoding="utf-8"))
             info = {
@@ -121,6 +179,7 @@ def download_url(
         raise SystemExit("yt-dlp is not installed. Install with: brew install yt-dlp")
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    before = snapshot_dir(out_dir)
     output_template = str(out_dir / "video.%(ext)s")
 
     fmt = "ba/bestaudio" if audio_only else "bv*[height<=720]+ba/b[height<=720]/bv+ba/b"
@@ -143,16 +202,28 @@ def download_url(
     ]
 
     # yt-dlp may exit non-zero if a subtitle variant fails (e.g. 429) even when
-    # the video itself downloaded fine. Treat "video file present" as success.
+    # the video itself downloaded fine, so a non-zero exit is not by itself a
+    # failure. What it cannot mean is "use whatever file happens to be lying
+    # here": the test is a video file THIS RUN produced, which is what `before`
+    # is for.
     result = subprocess.run(cmd, stdout=sys.stderr, stderr=sys.stderr)
-    video = _pick_video(out_dir)
+    video = _pick_video(out_dir, before)
     if video is None:
         raise SystemExit(
             f"yt-dlp did not produce a video file in {out_dir} (exit {result.returncode})"
         )
 
-    subtitle = _pick_subtitle(out_dir)
-    info = _read_info(out_dir / "video.info.json", url)
+    if result.returncode != 0:
+        # Succeeding quietly after a partial failure is how a report ends up
+        # missing its transcript with nothing anywhere saying why.
+        print(
+            f"[moviola] yt-dlp exited {result.returncode} but produced a video "
+            "— continuing; captions or metadata may be missing",
+            file=sys.stderr,
+        )
+
+    subtitle = _pick_subtitle(out_dir, before)
+    info = _read_info(out_dir / "video.info.json", url, before)
 
     return {
         "video_path": str(video),

@@ -68,7 +68,82 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   the transcript block, say) would not be caught by anything here. Adding `markdown-it-py`
   as a dev dependency and asserting the heading tree is the shape.
 
+## Quiet failures
+
+- **A frame can still be paired with a timestamp that is not its own, when ffmpeg
+  reports FEWER of them than it wrote frames.** (quiet-failures review, 2026-08-26)
+  `extract_scene_candidates` and `extract_keyframes` both do
+  `ts = timestamps[i] if i < len(timestamps) else offset`, so once showinfo's output is
+  shorter than the frame list every remaining image is labelled with the START of the
+  requested range. That is a plausible number in the right units, which is what makes it
+  bad: a report saying "at 0:00" for a frame from minute nine looks like ordinary output.
+  Sorting the frames numerically (this pass) removed the reason the two lists diverge in
+  the common case, but not the fallback itself — showinfo can drop lines under `-loglevel`
+  changes, and a filter graph that emits a frame without a `pts_time` would do it too. The
+  honest fix is to treat a length mismatch as an error, or carry the frame NUMBER through
+  from the filename and index the timestamps by it rather than by position.
+
+- **`frames_in_order` sorts on the last run of digits in the name and cannot see a
+  directory that mixes two naming schemes.** (quiet-failures review, 2026-08-26) Every
+  caller writes `frame_%04d.jpg` into a directory it has just emptied of `frame_*.jpg`,
+  so today there is exactly one scheme and the sort is total. Nothing enforces that. If a
+  future extractor writes `frame_a_0001.jpg` alongside `frame_0001.jpg`, both parse to 1
+  and the tiebreak is the filename, which is the lexicographic bug again in a smaller
+  room. Naming the scheme in one constant that the writer and the sorter share would
+  close it.
+
+- **The stale-file guard compares (mtime, size) and cannot see a second run writing into
+  the same `--out-dir`.** (quiet-failures review, 2026-08-26) `snapshot_dir` answers "did
+  THIS run produce this file", which is the right question for a reused directory and the
+  wrong one for a shared directory: a file another moviola process writes while yt-dlp is
+  running is new-since-the-snapshot and reads as ours. Two concurrent runs pointed at one
+  `--out-dir` also clobber each other's `video.*` and `frame_*.jpg` outright, which is the
+  larger problem the guard does not address. A per-run subdirectory, or a lock file, is
+  the shape.
+
+- **`parse_vtt` warns on a caption track that is legitimately empty.** (quiet-failures
+  review, 2026-08-26) The warning fires whenever a subtitle file yields zero segments,
+  and a video whose caption track exists but contains no cues will trip it. That is a
+  deliberate false positive: the cost of a spurious stderr line is one line, and the cost
+  of the silence it replaces was a paid API upload for a transcript already on disk. Worth
+  revisiting only if the line turns out to be common enough to train people to ignore it.
+
 ## Completed
+
+### Four quiet failures in the download and pairing paths
+
+Each of these produced a confident, well-formed result that was not true, and said
+nothing — which is worse than a crash, because a traceback stops the user and a plausible
+report does not: it goes into an agent's context and gets acted on.
+
+`download_url` treated "a file matching `video*` exists in the output directory" as proof
+the download worked and never looked at yt-dlp's exit code. `--out-dir` is a documented
+flag and the skill tells the agent to reuse the directory, so a run whose download failed
+outright picked up the PREVIOUS run's video and reported on it: right filename, wrong
+film. `snapshot_dir` now records (mtime, size) per name before yt-dlp starts, and
+`_pick_video`, `_pick_subtitle` and `_read_info` only accept files that are new or changed
+since. The exit code is no longer swallowed either — a non-zero exit that still produced a
+video is a real and expected case (a subtitle variant 429s) and continues, but says so.
+
+`TS_RE` demanded exactly two-digit hours. WebVTT's hours component is OPTIONAL and may be
+longer than two digits, so spec-legal `MM:SS.mmm` and `100:00:00.000` files both parsed to
+zero segments — and zero segments is indistinguishable from "this video has no captions"
+at every call site, so moviola escalated to a PAID upload while a perfectly good
+transcript sat on disk. The pattern now makes hours optional and unbounded, and a subtitle
+file that yields nothing says so on stderr while its name is still in scope.
+
+Frames were paired with timestamps by position after a LEXICOGRAPHIC sort of
+`frame_%04d.jpg`. `%04d` is a minimum width, not a maximum: past 9999 ffmpeg writes
+`frame_10000.jpg`, which sorts between `frame_1000.jpg` and `frame_1001.jpg` (`.` is 0x2E,
+`0` is 0x30), and from there every image carries somebody else's timestamp. Uncapped scene
+detection on a long video reaches that count. `frames_in_order` sorts on the trailing digit
+run and all three call sites go through it.
+
+`tests/test_quiet_failures.py` states each as an invariant rather than as a regression
+case. All five mutations died: accepting stale files (2 failed), swallowing the exit code
+(1), the old two-digit `TS_RE` (5), dropping the zero-cue warning (1), and reverting to a
+lexicographic sort (2).
+
 
 ### The report's fencing was built from the exploit, not from the boundary
 
