@@ -234,6 +234,7 @@ Other knobs (passed to `scripts/moviola.py`):
 │       ├── whisper.py            # backend selection + Groq / OpenAI clients (pure stdlib)
 │       ├── local_whisper.py      # on-device backend (optional: faster-whisper)
 │       ├── config.py             # shared config (~/.config/moviola/.env)
+│       ├── untrusted.py          # structural fencing for values this program did not write
 │       ├── setup.py              # preflight + installer
 │       └── build-skill.sh        # build dist/moviola.skill for claude.ai upload (dev-only)
 ├── hooks/                        # SessionStart status hook (Claude Code only)
@@ -242,7 +243,7 @@ Other knobs (passed to `scripts/moviola.py`):
 ├── .agents/plugins/              # marketplace.json — Agent Skills marketplace listing
 ├── AGENTS.md → CLAUDE.md         # generic-agent entry point
 ├── tests/                        # pytest suite (ffmpeg-synthesized clips, no network)
-└── .github/workflows/            # release.yml — auto-builds moviola.skill on tag push
+└── .github/workflows/            # tests.yml (suite on every PR) + release.yml (builds moviola.skill on tag push)
 ```
 
 ## Develop

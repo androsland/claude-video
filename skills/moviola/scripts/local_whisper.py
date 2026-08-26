@@ -27,6 +27,14 @@ import site
 import sys
 from pathlib import Path
 
+# This module has a __main__ block, so it has to find its siblings when run
+# directly as well as when its callers import it. Same guarded insert whisper.py
+# and setup.py use.
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from untrusted import stderr_line  # noqa: E402
+
 
 # Default model. Overridable via MOVIOLA_WHISPER_MODEL — accepts a faster-whisper
 # size alias ("tiny", "base", "small", "medium", "large-v3", "distil-large-v3"),
@@ -509,7 +517,19 @@ def transcribe_local(
             # model would stay resident in VRAM while the CPU attempt loads a
             # second copy of the same weights. That doubles peak memory in exactly
             # the OOM case the retry exists to survive.
-            last_error = f"{type(exc).__name__}: {exc}"
+            # `exc` is whatever _load_model raised. On a cache miss that
+            # comes from huggingface_hub, and an HfHubHTTPError embeds the
+            # hub's response body — remote text, on the default backend.
+            # Fenced here rather than at the two sites that report it, so
+            # the notice below and the SystemExit at the end share one fence.
+            #
+            # Truncated BEFORE the fence, and unlike whisper.py's error bodies
+            # this value arrives with no bound of its own — the hub's response
+            # body reaches str(exc) entire. 400 characters is the slice
+            # _read_error_body uses; the ceiling matters twice over, because an
+            # untruncated message both floods the context of whoever reads this
+            # line and is the input balance_bidi then has to walk.
+            last_error = f"{type(exc).__name__}: {stderr_line(str(exc)[:400])}"
             if index + 1 < len(attempts):
                 print(
                     f"[moviola] {attempt_device} backend failed "
