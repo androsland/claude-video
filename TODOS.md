@@ -714,17 +714,98 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   dependency list they are not reading. Deliberately not fixed here: adding a
   `requirements-dev.txt` would reverse a posture the repo took on purpose, and
   `test_ci_runs_the_whole_suite.py` reads the workflow text, so the move would
-  also break that check until it is taught to follow the reference.
+  also break that check until it is taught to follow the reference. (That last
+  clause is now enforced rather than asserted: with comments stripped, moving
+  the install to `-r requirements-dev.txt` fails the load-bearing test, and a
+  mutation proves it. Before the fix the step's comment kept the match alive and
+  the move would have passed silently — the NON-GOAL claimed a safety the file
+  did not have.)
+
+- **Unpinned CI dependencies fail in BOTH directions, and only one was filed.**
+  (security review of ci/run-the-suite, 2026-08-26) The entry above frames
+  `pip install pytest yt-dlp` with no version as a drift risk — a yt-dlp release
+  changing selector semantics turns the suite red with no change here, a false
+  RED. The opposite direction is unfiled and worse: a compromised or typosquatted
+  release installs into a job that then runs the repository's own test code, and
+  the failure mode is a false GREEN. The two want different remedies — the false
+  RED wants a scheduled unpinned job reporting drift separately, the false GREEN
+  wants a hash-pinned install — so filing only the first frames the whole problem
+  as a nuisance rather than as a supply-chain surface. Neither is urgent on a
+  public repo with `contents: read` and no secrets in this workflow; both should
+  be decided together when either is.
+
+- **The behavioural ladder tests depend on yt-dlp INTERNAL API.** (testing review
+  of ci/run-the-suite, 2026-08-26) `test_the_fallback_stays_small.py` drives
+  `yt_dlp.build_format_selector` and hand-builds the `ctx` dict it consumes.
+  Neither is public API, neither carries a stability guarantee, and yt-dlp
+  releases roughly weekly. This sharpens the drift entry above rather than
+  duplicating it: the exposure is not "a new yt-dlp might change selector
+  semantics", it is "a new yt-dlp may rename or reshape a private function these
+  24 tests call directly", which is both likelier and harder to read as a real
+  regression when it happens.
+
+- **CI's ffmpeg is a major version this suite has never run against.** (testing
+  review of ci/run-the-suite, 2026-08-26) Every measurement in this repository
+  was taken on ffmpeg 4.4.2 (Ubuntu 22.04). `ubuntu-latest` has not been 22.04
+  since 2025, so the runner installs a different major, and six tests in
+  `test_frames.py` depend on x264 GOP placement and scene-detection thresholds —
+  behaviour that is tuned, not specified. This is a risk and not a predicted
+  failure: the workflow has never executed, so nobody knows either way. The
+  cheap answer if it bites is pinning `runs-on` to a specific image rather than
+  loosening the assertions; the assertions are the product.
+
+- **`softprops/action-gh-release@v2` in `release.yml` is a mutable tag under
+  `contents: write`.** (security review of ci/run-the-suite, 2026-08-26) Semgrep
+  `p/github-actions` flags mutable tags on all four actions used in this
+  repository; three are first-party `actions/*` running under `contents: read`
+  with no secrets, which is why they were adjudicated NO CHANGE. The fourth is
+  third-party and runs with a write token at publish time, which is the one
+  worth a SHA pin. Out of scope for `ci/run-the-suite` — it is a different
+  workflow and CLAUDE.md keeps executable-behaviour changes in their own PR.
 
 - **`test_ci_runs_the_whole_suite.py` reads the workflow as text, not as YAML.**
-  (ci/run-the-suite, 2026-08-26) A module name in a comment, in a step behind a
-  false `if:`, or in a job that never runs all read as "installed", and the
-  `on:` block is found by indentation so flow style or a quoted `"on":` defeats
-  it. Both are written into the file's NON-GOALS. Fixing it means a YAML parser,
-  which is a dependency added to check a rule about dependencies; the joke is
-  the reason it is filed rather than done. Note the failure directions differ:
-  the block reader fails loudly (empty block, asserted against), while the text
-  search fails *permissively* — it can say installed when nothing is.
+  (ci/run-the-suite, 2026-08-26; narrowed by review 2026-08-26) Two of the
+  permissive cases are now closed — a name in a `#` comment and a name in a
+  `name:` label are stripped before matching, because as shipped they made the
+  load-bearing assertion satisfiable by a workflow that installed nothing. What
+  remains permissive: a step behind a false `if:`, a job that never runs, and a
+  name in a command that is not an install (`echo yt-dlp`). What remains loud: a
+  quoted `"on":` yields an empty block and is asserted against; a `#` inside a
+  quoted shell string truncates the line, which can hide an install and can
+  never invent one. One correction to the original entry — flow style
+  (`on: {pull_request: null}`) and the list form do NOT defeat the block reader;
+  they happen to read correctly by substring match. That was a claim in the
+  file's own NON-GOALS and it was false; it now says so. Fixing the rest means a
+  YAML parser, which is a dependency added to check a rule about dependencies;
+  the joke is why it stays filed.
+
+- **Nothing sees a skip that is not a guarded import, and the suite already has
+  eight.** (review of ci/run-the-suite, 2026-08-26) `optional_imports()` finds
+  `try/except ImportError`, `importlib.import_module` and `pytest.importorskip`.
+  It structurally cannot see a bare `pytest.skip()` taken on an environment
+  condition — and with `git` shimmed to exit 128 the full run is **718 passed, 8
+  skipped, exit 0**: seven from `repo_files.py:99` (git cannot list the
+  checkout) and one from `test_the_docs_are_checked.py:367` (git archive). A
+  third site, `test_key_file_permissions.py:114`, fires only on a filesystem
+  that does not honour POSIX modes and did not fire here. That is the same
+  green-but-hollow failure the CI checker is named for, at a smaller blast
+  radius. Not fixed because the fix is not obviously a test: these skips are
+  *correct* on a machine without git, and what is wanted is a report of what got
+  skipped, not a rule that forbids skipping. `-rs` in the workflow discloses it
+  to a human; nothing enforces it.
+
+- **The vacuity guard catches a scanner that stopped entirely, not one that
+  stopped partially.** (review of ci/run-the-suite, 2026-08-26)
+  `test_the_scan_finds_something_to_check` pins that `yt_dlp` is still found —
+  and `yt_dlp` is the only real guarded import in the repository, so the guard
+  has a sample size of one. A future optional dependency written in a shape the
+  scanner misses is silently uncovered and nothing goes red. Four shapes that
+  DID slip through are now driven against synthetic input (nested in the try
+  body, `except Exception`, bare `except`, dynamic `import_module`), but that
+  list is a record of what was caught, not a proof of completeness. One known
+  remaining blind spot, deliberately unfixed: a module-level
+  `pytestmark = pytest.mark.skipif(find_spec("x") is None)`, which skips a whole
+  file and looks nothing like an import guard.
 
 - **`AGENTS.md` documents a `.venv` that no longer exists in this checkout.**
   (release staging, 2026-08-26) Its Commands block gives
@@ -874,13 +955,19 @@ the ref cancelling superseded runs everywhere except `main`, and ONE job.
 **The half worth reading is `tests/test_ci_runs_the_whole_suite.py`, which pins
 that CI runs the WHOLE suite.** `pytest` exits 0 on a skip, so a runner missing
 an optional dependency produces a green run that covered less than it appears
-to. Measured on this branch: with `yt_dlp` importable the suite is 712 passed /
-0 skipped; with it blocked it is **688 passed / 24 skipped** — 24 of the 34
-tests in `test_the_fallback_stays_small.py`, the entire behavioural half of the
-format-ladder work, disappearing behind an exit code of 0. The test walks every
-file under `tests/` for guarded imports (`try:`/`except ImportError` and
-`pytest.importorskip`), and requires each module it finds to be named in the
-workflow or listed in `CI_NEED_NOT_INSTALL` with a reason.
+to. Measured on this branch: blocking `yt_dlp` takes **24 of the 34 tests** in
+`test_the_fallback_stays_small.py` — the entire behavioural half of the
+format-ladder work — out of the run behind an exit code of 0. The test walks
+every file under `tests/` for guarded imports (`try:`/`except ImportError`,
+`importlib.import_module`, and `pytest.importorskip`), and requires each module
+it finds to be named in the workflow or listed in `CI_NEED_NOT_INSTALL` with a
+reason.
+
+*(Corrected 2026-08-26. This paragraph first shipped as "712 passed / 0 skipped"
+against "688 passed / 24 skipped". Both totals were stale on the branch that
+carried them — it was 726 — because this file's own new tests are the
+difference. A delta is quoted now instead: a total goes stale the moment anyone
+adds a test, which is exactly what happened here.)*
 
 The rule was written against three instances rather than the one that prompted
 it: `yt_dlp` today, `markdown-it-py` already filed under `## Report as an
@@ -890,20 +977,31 @@ deliberately network-free, which is what `CI_NEED_NOT_INSTALL` exists for. The
 exemption path is empty today, so a test drives it against a synthetic module
 rather than leaving the first real use to be the first execution.
 
-Eight mutations, eight killed, `__pycache__` cleared and each file restored from
-a post-fix snapshot and sha256-compared: the workflow deleted outright; `yt-dlp`
-dropped from the install line (kills exactly the one load-bearing test); the
-ffmpeg step removed; `pull_request` removed from the triggers; `release.yml`
-given a pytest step; and three against the checker itself — the scanner made
-blind to `try/except ImportError`, made blind to `importorskip`, and
-`installed_by()` forced to return True. The first scanner mutation is the one
-that matters: it fires the vacuity guard, which is what stops the whole rule
-passing over an empty set if it ever stops matching.
+**One recorded mutation kill was wrong, and the review caught it.** This entry
+first read "eight mutations, eight killed", including "`yt-dlp` dropped from the
+install line → kills exactly the one load-bearing test". That mutation killed
+NOTHING. `installed_by()` searched the raw workflow text, and the install step's
+own comment says `yt-dlp` three times and its label says it once — so deleting
+the install left the check green over a workflow that installed nothing. Four
+independent review passes found it; one reproduced it by running the mutation
+and measuring `10 passed, 24 skipped` on `test_the_fallback_stays_small.py`
+against a green gate. The recorded mutation must have removed the whole step
+rather than the one line the entry claims.
+
+Fixed on the same branch by matching against what the workflow *does* instead of
+what it *says*: comments are stripped following YAML's actual rule (a `#` at
+line start or after whitespace, so `git+https://…#egg=yt_dlp` survives) and
+`name:` display labels are dropped. **18 mutations, 18 killed** after the fix,
+`__pycache__` cleared and each file restored from a post-fix snapshot with
+sha256 compared — never `git checkout --`, which would revert the fix along with
+the mutation. Two of the eighteen were survivors first: the exemption
+reason-required guard was vacuous over two empty dicts (the rule now lives in a
+helper driven against synthetic input), and nothing pinned the job timeout.
 
 `python-version` is `3.10`, which is measured rather than chosen — see the open
 entry under `## Documentation as a checked claim`; nothing in the repository
 declares a supported range and 3.10.12 is the only interpreter this suite has
-been observed to pass on. 726 tests green.
+been observed to pass on. 750 tests green after the review pass.
 
 ### A second pass over the bounded-failures review
 
