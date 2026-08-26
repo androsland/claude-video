@@ -1,0 +1,17 @@
+# Dev-only files inside the skill tree, kept out of every archive that ships.
+#
+# This file exists because `export-ignore` patterns match relative to the ARCHIVE
+# ROOT, not the repository root. build-skill.sh runs
+# `git archive HEAD:skills/moviola`, so the root is THIS directory — a pattern
+# written at the repo root as `skills/moviola/scripts/build-skill.sh` can never
+# match, and both files below shipped in every claude.ai .skill bundle despite the
+# repo-root .gitattributes claiming otherwise.
+#
+# Paths here are relative to skills/moviola/. Git also applies them during the
+# full-repo archive that Claude Code's /plugin install uses, so this is the only
+# place the exclusions need to be stated.
+# Pinned by TestThePublishedBundleShipsWhatGitattributesClaims.
+
+scripts/build-skill.sh export-ignore
+.skillignore           export-ignore
+.gitattributes         export-ignore

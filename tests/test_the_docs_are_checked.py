@@ -23,9 +23,12 @@ NON-GOALS, so a green run is not read as more than it is:
     `v0.3.0` can be absent, misplaced or never pushed with everything here green.
     Agreement plus a matching entry is as far as this file reaches; being correct
     is a release decision no test can make.
-  * `_tracked_text_files` asks git, so every file-sweeping test here audits what
+  * `tracked_text_files` asks git, so every file-sweeping test here audits what
     the repository SHIPS. Local scratch is invisible to them by design — and so
     is a real problem introduced in an untracked file that is about to be added.
+    Where git cannot answer at all, those sweeps SKIP rather than guess, so a
+    green run on such a machine is three checks lighter than it looks. `tests/
+    repo_files.py` carries the reasoning and the rest of that helper's limits.
   * The flag test runs in ONE direction: every long flag `build_parser` defines
     must appear in README. The reverse would false-fire on correct docs — README
     also documents `setup.py`'s `--agent`, `--check`, `--copy` and `--list`,
@@ -51,10 +54,12 @@ NON-GOALS, so a green run is not read as more than it is:
 from __future__ import annotations
 
 import ast
+import io
 import json
 import re
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -64,6 +69,8 @@ import whisper
 from config import DETAILS, WHISPER_BACKENDS
 
 import test_check_setup_hook
+import repo_files
+from repo_files import tracked_text_files
 
 REPO = Path(__file__).resolve().parent.parent
 SKILL_MD = REPO / "skills" / "moviola" / "SKILL.md"
@@ -71,53 +78,7 @@ README = REPO / "README.md"
 CHANGELOG = REPO / "CHANGELOG.md"
 MANIFESTS = [REPO / ".claude-plugin" / "plugin.json", REPO / ".codex-plugin" / "plugin.json"]
 
-SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules"}
-TEXT_SUFFIXES = {".py", ".md", ".json", ".sh", ".txt", ".yml", ".yaml"}
-
-
-def _tracked_text_files() -> list[Path]:
-    """The repo's own text files, as git sees them.
-
-    Asks git rather than walking the working tree, because the name is the whole
-    point: every caller audits these files as CLAIMS THE REPOSITORY MAKES, and an
-    untracked file makes no claim to anyone but the person who wrote it. The
-    walk scanned local scratch — `SESSION.md` from the write-session plugin,
-    `LOOP.md`, an editor backup, a downloaded sample — and reported findings
-    against files that ship with nobody. It failed exactly that way here: a
-    merge-commit line in `SESSION.md` quoting a branch name of the form
-    `<owner>/chore/<slug>` parsed as a reference to a repository called
-    `chore`, and the self-reference audit went red in a working tree while a
-    clean checkout of the same commit stayed green.
-
-    Note the shape of that false positive, because tracking does not remove it:
-    the audit reads `<owner>/<word>` as a repo slug, and a branch name written
-    in prose has the same shape. A tracked file quoting one — a CHANGELOG line,
-    a runbook — would still trip it. Consulting git fixes the file SET, not the
-    pattern.
-
-    Falls back to the walk when git cannot answer — a source export, a vendored
-    copy, a checkout with no `.git`. In that situation there is no untracked/
-    tracked distinction to honour anyway, and a suite that refuses to run is
-    worse than one that scans a little too much.
-    """
-    try:
-        listed = subprocess.run(
-            ["git", "-C", str(REPO), "ls-files", "-z"],
-            capture_output=True,
-            check=True,
-        ).stdout.decode("utf-8")
-        candidates = [REPO / rel for rel in listed.split("\0") if rel]
-    except (OSError, subprocess.CalledProcessError):
-        candidates = list(REPO.rglob("*"))
-
-    out = []
-    for path in candidates:
-        if not path.is_file() or path.suffix not in TEXT_SUFFIXES:
-            continue
-        if SKIP_DIRS & set(path.relative_to(REPO).parts):
-            continue
-        out.append(path)
-    return out
+SKILL_DIR = REPO / "skills" / "moviola"
 
 
 def _frontmatter(path: Path) -> dict[str, str]:
@@ -139,20 +100,49 @@ def _frontmatter(path: Path) -> dict[str, str]:
     return fields
 
 
-_CHANGELOG_HEADING = re.compile(r"^## \[(\d+\.\d+\.\d+)\]", re.MULTILINE)
+_ANY_HEADING = re.compile(r"^## +(\S.*?)\s*$", re.MULTILINE)
+_VERSION_HEADING = re.compile(r"^\[(\d+\.\d+\.\d+)\]")
+_UNRELEASED_HEADING = re.compile(r"^\[Unreleased\]", re.IGNORECASE)
 
 
-def _newest_changelog_version() -> str:
-    """The version in the topmost `## [x.y.z]` heading of the CHANGELOG.
+def _newest_version_in(text: str) -> str:
+    """The version in the topmost `## [x.y.z]` heading of a CHANGELOG.
 
     Topmost rather than highest: the file is newest-first by convention, and
     sorting the numbers instead would quietly accept an entry filed in the wrong
-    place. If the convention is ever broken, this should fail rather than paper
-    over it.
+    place. If the convention is ever broken, this fails rather than papering over
+    it — which is what it used to do. A `^## \\[(\\d+\\.\\d+\\.\\d+)\\]` search
+    across the whole file SKIPS a heading it cannot parse and returns the next one
+    down, so `## [0.4.0-rc.1]`, `## 0.4.0` and `## [v0.4.0]` above a `## [0.3.0]`
+    entry all returned `0.3.0` and the caller then reported "CHANGELOG's newest
+    entry is [0.3.0] but SKILL.md ships 0.4.0-rc.1" — pointing the reader at the
+    wrong file. Reading the topmost heading and refusing to look past it is what
+    makes the failure name the thing that is actually wrong.
+
+    `## [Unreleased]` is the one heading skipped rather than rejected: it is the
+    Keep a Changelog convention, not a broken version string, and treating it as a
+    parse failure would fire on a legitimate file. See the NON-GOAL on the class
+    below for what that skip costs.
     """
-    match = _CHANGELOG_HEADING.search(CHANGELOG.read_text(encoding="utf-8"))
-    assert match, "CHANGELOG.md has no `## [x.y.z]` heading"
-    return match.group(1)
+    seen: list[str] = []
+    for match in _ANY_HEADING.finditer(text):
+        heading = match.group(1)
+        seen.append(heading)
+        if _UNRELEASED_HEADING.match(heading):
+            continue
+        version = _VERSION_HEADING.match(heading)
+        assert version, (
+            f"the newest CHANGELOG entry is headed `## {heading}`, which is not the "
+            "`## [x.y.z]` form this file is read newest-first by. Fix the heading "
+            "rather than this test — a version string no parser can read is a "
+            f"release nothing can check. Headings seen: {seen}"
+        )
+        return version.group(1)
+    raise AssertionError(f"no `## [x.y.z]` heading found. Headings seen: {seen}")
+
+
+def _newest_changelog_version() -> str:
+    return _newest_version_in(CHANGELOG.read_text(encoding="utf-8"))
 
 
 def _alternations_after(flag: str) -> list[list[str]]:
@@ -216,18 +206,31 @@ class TestTheChangelogDescribesTheVersionBeingShipped:
         That needs the network, or a `git` invocation whose answer depends on
         which refs happen to be fetched, and this suite is neither. `v0.3.0` can
         be absent, point at the wrong commit, or never be pushed at all, and
-        every test here still passes. The README's claim that a `.skill` is
-        downloadable from the latest release is checkable by nothing in this repo.
+        every test here still passes. Read that as a limit of THIS FILE, not of
+        the repository: `release.yml` already knows the tag as `GITHUB_REF_NAME`
+        and could compare `${GITHUB_REF_NAME#v}` against the frontmatter before
+        it builds the asset. It does not, and that gap is filed in TODOS.
       * It does NOT prove the version was bumped for the change being shipped.
         A release that edits behaviour and moves neither the manifests nor the
         CHANGELOG is invisible to it — both halves are consistent at the old
         number.
       * It reads the NEWEST heading only. An older entry rewritten after the fact
-        passes; `test_consistency.py` records one such case deliberately (the
-        released 0.2.0 entry says 25 MB where the code says 24, and rewriting a
-        shipped entry is the wrong fix).
+        passes — `TODOS.md` records one such case deliberately: the released 0.2.0
+        entry at `CHANGELOG.md:84` says 25 MB where the code says 24, and rewriting
+        a shipped entry is the wrong fix. (`test_consistency.py` records the 25-vs-24
+        DISTINCTION, in the comment above `OUR_CAP`, but it reads `whisper.py` only
+        and never opens the CHANGELOG — so nothing in the suite sees that line.)
       * It says nothing about the entry's CONTENT. A heading at the right number
         above a body describing different work is exactly as green as a correct one.
+
+    The legitimate configuration it must NOT fire on is a Keep a Changelog
+    `## [Unreleased]` section above the newest release: that is a convention, not a
+    broken version heading, and `_newest_version_in` skips past it rather than
+    rejecting it. The cost of that skip, stated so it is not discovered later: while
+    an `## [Unreleased]` section is open, these tests pin the manifests to the last
+    RELEASED number, so bumping the manifests ahead of cutting the entry goes red.
+    This repo has no such section today; adopting one is a workflow decision that
+    should revisit these two tests rather than be silently absorbed by them.
     """
 
     def test_the_newest_changelog_heading_is_the_version_in_the_frontmatter(self) -> None:
@@ -249,6 +252,129 @@ class TestTheChangelogDescribesTheVersionBeingShipped:
                 f"CHANGELOG's newest entry is [{newest}]"
             )
 
+    # The parser's own guarantees, on crafted text rather than the real file: the
+    # real CHANGELOG is correct, so it cannot demonstrate a broken convention.
+
+    def test_a_heading_the_parser_cannot_read_fails_instead_of_skipping(self) -> None:
+        # The regression this replaced: `^## \[(\d+\.\d+\.\d+)\]` searched the WHOLE
+        # file and returned the first heading it could parse, so every one of these
+        # silently reported 0.3.0 — the entry BELOW the one being shipped — and the
+        # caller then blamed SKILL.md for a mismatch the CHANGELOG had caused.
+        for broken in ("[0.4.0-rc.1]", "0.4.0", "[v0.4.0]"):
+            text = f"# Changelog\n\n## {broken}\n\nwork\n\n## [0.3.0]\n\nold\n"
+            with pytest.raises(AssertionError) as caught:
+                _newest_version_in(text)
+            assert broken in str(caught.value), (
+                f"the failure for `## {broken}` has to name that heading — naming "
+                "0.3.0 instead is what sent the reader to the wrong file"
+            )
+
+    def test_an_unreleased_section_is_a_convention_not_a_broken_heading(self) -> None:
+        # The legitimate configuration this must NOT fire on.
+        text = "# Changelog\n\n## [Unreleased]\n\npending\n\n## [0.3.0]\n\nshipped\n"
+        assert _newest_version_in(text) == "0.3.0"
+
+    def test_it_reads_the_topmost_entry_not_the_highest_number(self) -> None:
+        # A hotfix filed above a larger number is exactly what sorting gets wrong.
+        text = "# Changelog\n\n## [0.2.1]\n\nhotfix\n\n## [0.3.0]\n\nolder\n"
+        assert _newest_version_in(text) == "0.2.1"
+
+
+class TestTheFileSweepReadsOnlyWhatTheRepositoryShips:
+    """The three repo-wide audits are only as honest as the file set they read.
+
+    This is the guarantee `tracked_text_files` exists for, and nothing pinned it.
+    The helper was changed from a working-tree walk to `git ls-files` and the suite
+    stayed green either way — 18 passed before, 18 passed after, and 18 passed again
+    with the change reverted — so the fix had no evidence behind it and a revert
+    would have been silent. These two tests are that evidence.
+
+    NON-GOALS:
+
+      * It does not check WHICH tracked files come back beyond the suffix and
+        skip-dir rules — only that an untracked one does not.
+      * It cannot run where git cannot answer, and skips there for the same reason
+        the helper does, so on such a machine this guarantee is unproven too.
+    """
+
+    PROBE = REPO / "zz-untracked-sweep-probe.md"
+
+    # Concatenated rather than written out. A literal upstream URL here would make
+    # THIS file a tracked file linking upstream, which is what the audit three
+    # classes down forbids — the test would break the rule it exists to test. It
+    # went red exactly that way when first written.
+    POISON = "https://github.com/" + "bradautomates" + "/claude-video"
+
+    def test_an_untracked_file_is_not_audited(self) -> None:
+        # The probe carries the exact string the upstream-URL audit hunts for, so
+        # under the working-tree walk it both APPEARS in the sweep and makes that
+        # audit fail. Under `git ls-files` it is invisible, which is the point.
+        self.PROBE.write_text(f"see {self.POISON}\n", encoding="utf-8")
+        try:
+            swept = tracked_text_files()
+        finally:
+            self.PROBE.unlink()
+        assert self.PROBE not in swept, (
+            "an untracked file reached the audit — the sweep is walking the working "
+            "tree again, and local scratch is being read as a claim the repo makes"
+        )
+
+    def test_a_tracked_file_is_audited(self) -> None:
+        # The guard above must not be satisfiable by returning nothing at all.
+        assert CHANGELOG in tracked_text_files()
+
+    def test_an_empty_listing_fails_instead_of_passing_over_nothing(self, monkeypatch) -> None:
+        # git answering "no files" is not the same as git being unable to answer,
+        # and only the second one skips. Without this guard all three repo-wide
+        # audits assert `[] == []` and report green having read nothing — which
+        # happens for real when REPO resolves inside a different repository that
+        # has no commits yet.
+        monkeypatch.setattr(repo_files, "git_listed_paths", lambda: [])
+        with pytest.raises(AssertionError, match="no text files"):
+            repo_files.tracked_text_files()
+
+
+class TestThePublishedBundleShipsWhatGitattributesClaims:
+    """`.gitattributes` says two dev files stay out of the claude.ai bundle. They did not.
+
+    `export-ignore` patterns match relative to the ARCHIVE ROOT. `build-skill.sh`
+    runs `git archive HEAD:skills/moviola`, so the root is `skills/moviola/` and a
+    repo-root pattern spelled `skills/moviola/scripts/build-skill.sh` could never
+    match. Both files shipped in every bundle, and the shipped `.skillignore` even
+    named `scripts/build-skill.sh` — so the bundle carried a dev script together
+    with an instruction telling install-time scanners not to look at it.
+
+    NON-GOALS:
+
+      * It archives HEAD, not the working tree, which is what actually ships but
+        means an uncommitted fix here still reads as broken.
+      * It checks the file LIST, not the contents. A runtime script that is present
+        but wrong is exactly as green as a correct one.
+      * It says nothing about the other two install surfaces. `/plugin install`
+        takes a full-repo archive and `npx skills add` copies the directory
+        wholesale; only the first is covered by the same `.gitattributes`.
+    """
+
+    def test_the_bundle_excludes_the_files_export_ignore_names(self) -> None:
+        try:
+            archive = subprocess.run(
+                ["git", "-C", str(REPO), "archive", "--format=zip", "HEAD:skills/moviola"],
+                capture_output=True,
+                check=True,
+                timeout=60,
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            pytest.skip(f"git archive cannot run here: {exc}")
+
+        names = zipfile.ZipFile(io.BytesIO(archive)).namelist()
+        assert "SKILL.md" in names, f"the bundle lost its SKILL.md: {names}"
+        for dev_only in ("scripts/build-skill.sh", ".skillignore", ".gitattributes"):
+            assert dev_only not in names, (
+                f"{dev_only} ships inside dist/moviola.skill. `export-ignore` matches "
+                "relative to the archive root, so the pattern has to live in "
+                "skills/moviola/.gitattributes — a repo-root pattern cannot reach it."
+            )
+
 
 class TestNoUrlStillPointsAtTheRepositoryThisWasForkedFrom:
     """A fork's own badges pointing upstream send its users to someone else."""
@@ -260,7 +386,7 @@ class TestNoUrlStillPointsAtTheRepositoryThisWasForkedFrom:
 
     def test_no_tracked_file_links_to_the_upstream_repository(self) -> None:
         offenders = []
-        for path in _tracked_text_files():
+        for path in tracked_text_files():
             for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 if not self.UPSTREAM.search(line):
                     continue
@@ -306,7 +432,7 @@ class TestEverySelfReferenceNamesTheSameRepository:
         owner, name = self._slug()
         pattern = re.compile(re.escape(owner) + r"(?:/|%2F)([A-Za-z0-9._-]+)")
         offenders = []
-        for path in _tracked_text_files():
+        for path in tracked_text_files():
             for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 for match in pattern.finditer(line):
                     got = match.group(1).removesuffix(".git")
@@ -331,7 +457,7 @@ class TestEverySelfReferenceNamesTheSameRepository:
         )["name"]
         pattern = re.compile(re.escape(plugin) + r"@([A-Za-z0-9._-]+)")
         offenders = []
-        for path in _tracked_text_files():
+        for path in tracked_text_files():
             for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 for match in pattern.finditer(line):
                     if match.group(1) != marketplace:

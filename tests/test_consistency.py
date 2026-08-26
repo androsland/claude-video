@@ -19,29 +19,18 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from repo_files import tracked_text_files
+
 REPO = Path(__file__).resolve().parent.parent
 # The trailing exclusions matter: these strings live inside Python source, so a
 # match runs into the backslash of an escaped quote (\\"faster-whisper>=1.0\\")
 # unless the class stops there too.
 PIN = re.compile(r"faster-whisper\s*([<>=!~]=?[^\"'`\\\s,)]*)")
-SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules"}
-TEXT_SUFFIXES = {".py", ".md", ".json", ".sh", ".txt", ".yml", ".yaml"}
-
-
-def _tracked_text_files() -> list[Path]:
-    out = []
-    for path in REPO.rglob("*"):
-        if not path.is_file() or path.suffix not in TEXT_SUFFIXES:
-            continue
-        if SKIP_DIRS & set(path.relative_to(REPO).parts):
-            continue
-        out.append(path)
-    return out
 
 
 def test_the_faster_whisper_pin_is_identical_everywhere():
     found: dict[str, list[str]] = {}
-    for path in _tracked_text_files():
+    for path in tracked_text_files():
         for pin in PIN.findall(path.read_text(encoding="utf-8", errors="replace")):
             found.setdefault(pin, []).append(str(path.relative_to(REPO)))
     assert found, "no faster-whisper pin found at all — did the spelling change?"
@@ -56,7 +45,7 @@ def test_the_pin_is_quoted_wherever_it_is_a_shell_command():
     file `faster-whisper` and install the unpinned package. Every site that
     prints an install command has to carry the quotes."""
     unquoted = []
-    for path in _tracked_text_files():
+    for path in tracked_text_files():
         if path.name == Path(__file__).name:
             continue
         for line_no, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):

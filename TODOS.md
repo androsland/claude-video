@@ -6,7 +6,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 - **No manifest means dependency CVE scanning has nothing to read.** `faster-whisper` is introduced only as a string in `setup.py`'s output and a lazy `import` — there is no `requirements.txt`, `pyproject.toml` or lockfile in the repo, which is correct for a project whose runtime is otherwise pure stdlib, but it means a manifest-driven scanner (`trivy fs`, `osv-scanner`) has no artifact to point at and will report clean without having checked anything. The dependency chain to check by hand is `faster-whisper` -> `ctranslate2`, `onnxruntime`, `huggingface-hub`, `tokenizers`, `av`. Do not read a clean scan of this repo as a clean bill for that chain. (supply-chain review, 2026-08-26)
 
-- **No test loads a real Whisper model.** `tests/test_local_whisper.py` now drives `_collect()`, `_run()`'s VAD fallback and `transcribe_local()`'s cuda-to-cpu retry against stub objects shaped like faster-whisper's `Segment`/`TranscriptionInfo`, so the segment contract and the fallback loop are covered; seven mutations were each confirmed to fail the suite (segment rounding, the dropped CPU retry, kept-empty-text, the progress catch-up loop, the language-pin guard, the progress line's own format, and moving the drain outside the retry's `try` — that last one fails only the fail-mid-drain test, which is what proves the two fallback tests exercise different paths). What remains uncovered is the real library boundary: if faster-whisper renames an attribute or changes `WhisperModel(...)`/`transcribe(...)`'s signature, the stubs keep matching the old shape and the suite stays green. Closing that needs a real model load, which means a multi-hundred-MB download in a suite that is otherwise network-free. Verified by hand instead: `large-v3` int8_float16 on a GTX 1650 Ti transcribed a 38.6 s clip in 22 s including model load. If a CI runner ever gets a model cache, add a `tiny`-model smoke test behind an opt-in marker. **Corrected 2026-08-26:** this entry originally said "CI stays green" and "If CI ever gets a model cache" as though a CI ran the suite. None does — `release.yml` on tag push is the whole of `.github/workflows/`, so the only thing that has ever run these 557 tests is somebody's terminal. The wording is fixed above and the gap is its own entry under `## Documentation as a checked claim`. (ai-output review, 2026-08-26)
+- **No test loads a real Whisper model.** `tests/test_local_whisper.py` now drives `_collect()`, `_run()`'s VAD fallback and `transcribe_local()`'s cuda-to-cpu retry against stub objects shaped like faster-whisper's `Segment`/`TranscriptionInfo`, so the segment contract and the fallback loop are covered; seven mutations were each confirmed to fail the suite (segment rounding, the dropped CPU retry, kept-empty-text, the progress catch-up loop, the language-pin guard, the progress line's own format, and moving the drain outside the retry's `try` — that last one fails only the fail-mid-drain test, which is what proves the two fallback tests exercise different paths). What remains uncovered is the real library boundary: if faster-whisper renames an attribute or changes `WhisperModel(...)`/`transcribe(...)`'s signature, the stubs keep matching the old shape and the suite stays green. Closing that needs a real model load, which means a multi-hundred-MB download in a suite that is otherwise network-free. Verified by hand instead: `large-v3` int8_float16 on a GTX 1650 Ti transcribed a 38.6 s clip in 22 s including model load. If a CI runner ever gets a model cache, add a `tiny`-model smoke test behind an opt-in marker. **Corrected 2026-08-26:** this entry originally said "CI stays green" and "If CI ever gets a model cache" as though a CI ran the suite. None does — `release.yml` on tag push is the whole of `.github/workflows/`, and it has never executed once in this repository (no workflow run of any kind exists), so the only thing that has ever run these 564 tests is somebody's terminal. The wording is fixed above and the gap is its own entry under `## Documentation as a checked claim`. (ai-output review, 2026-08-26)
 
 - **`MOVIOLA_WHISPER_MODEL` accepts an arbitrary Hugging Face repo id or path with no validation beyond what `huggingface_hub` does.** That is deliberate — it is how anyone uses a fine-tune or a local conversion — but it means a typo'd or hostile repo id is fetched and loaded on the user's behalf. Documented as a non-goal in SKILL.md's security section rather than fixed. (local-whisper branch, 2026-08-26)
 
@@ -226,8 +226,10 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 - **The released 0.2.0 changelog entry says 25 MB where the code says 24.** (docs-are-
   checked review, 2026-08-26) The providers' documented cap is 25 MB and moviola splits
-  at 24 deliberately, which `test_consistency.py` already records. Rewriting a released
-  changelog entry is the wrong fix; the entry describes what shipped that day.
+  at 24 deliberately. `test_consistency.py` records that *distinction* in a comment above
+  `OUR_CAP`, but it does not cover this line: it reads `whisper.py` and `SKILL.md` and
+  never opens `CHANGELOG.md`, so nothing in the suite sees `CHANGELOG.md:84`. Rewriting a
+  released changelog entry is the wrong fix; the entry describes what shipped that day.
 
 - **The work directory is printed with bare backticks while SKILL.md tells the agent to
   `rm -rf` it.** (docs-are-checked review, 2026-08-26) `skills/moviola/SKILL.md:193`
@@ -262,9 +264,13 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   has that shape.** (release staging, 2026-08-26)
   `test_every_reference_under_this_owner_names_the_same_repository` flagged the `chore`
   and `fix` halves of `<owner>/chore/...` and `<owner>/fix/...` as wrong repositories
-  when they were branch names quoted inside a merge-commit subject. `_tracked_text_files` now asks
-  `git ls-files` instead of walking the working tree, which stops the audit reading
-  local scratch — that was the actual failure, and it is fixed — but **consulting git
+  when they were branch names quoted inside a merge-commit subject. The helper now lives once, as
+  `tracked_text_files` in `tests/repo_files.py`, and asks `git ls-files` instead of
+  walking the working tree, which stops the audits reading local scratch — that was the
+  actual failure, and it is fixed. (It was fixed *incompletely* first: the helper was
+  byte-identical in two test modules and only one copy moved to git, so half the audits
+  kept walking the tree while the commit message said the problem was closed. Both
+  callers now import the single copy.) But **consulting git
   narrowed the file set, not the pattern**. A *tracked* file quoting a branch name in
   prose (a CHANGELOG line, a runbook, a migration note) trips it exactly the same way,
   and the workaround is to write the slug in a form the regex cannot see. Fixing the
@@ -275,22 +281,34 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 - **The README's download link points at a release the fork has never published.**
   (rename to moviola, 2026-08-26) `README.md:136` tells a claude.ai user to download
   `moviola.skill` from the latest release, and `gh release list` on `androsland/moviola`
-  returns nothing — the only tags here (`v0.1.2`, `v0.1.3`, `v0.2.0`) are inherited from
-  upstream and predate the fork. The instruction has been dead since the fork, the
+  returns nothing — the five tags here (`0.1.0`, `v0.1.1`, `v0.1.2`, `v0.1.3`, `v0.2.0`)
+  are inherited from upstream and predate the fork; note the first has no `v`. The
+  instruction has been dead since the fork, the
   rename did not cause it, and no test in `test_the_docs_are_checked.py` can see it: the
   suite checks that the docs agree with the code, and a release is neither. Either cut a
   `v0.3.0` release with the built `.skill` asset, or say plainly that the web path is not
   available yet.
-  **Staged, not closed (2026-08-26).** The release path is verified end to end —
-  `build-skill.sh` produces a 13-file, 68K `dist/moviola.skill` rooted at `moviola/`,
-  and `release.yml` builds and attaches exactly that on a `v*` tag push. What is
-  missing is the tag itself, and pushing one publishes a GitHub release, so it is
-  deliberately not automated: `git tag -a v0.3.0 -m "v0.3.0" && git push origin v0.3.0`.
+  **Staged, not closed (2026-08-26). Half this path is verified; say which half.** The
+  BUILD half is verified locally: `build-skill.sh` produces `dist/moviola.skill` rooted
+  at `moviola/`, 9 files in 65,203 bytes. (The script prints `11 files` — its counter
+  reads `unzip -l`'s total line, which counts the two directory entries too. Same
+  bundle, different question.) Until the `skills/moviola/.gitattributes` added in this
+  commit, that bundle was 11 files / 66,354 bytes and shipped `scripts/build-skill.sh`
+  and `.skillignore` to every claude.ai user, because `export-ignore` matches relative
+  to the *archive root* and the patterns were written at the repo root.
+  The PUBLISH half is **not** verified and must not be written as if it were:
+  `release.yml` has never executed once in this repository. `gh run list` returns no run
+  of any workflow, ever — the five `v*` tags on origin arrived *with the fork* rather
+  than through a push, so no `push: tags` event has ever fired here. Cutting `v0.3.0`
+  is that workflow's first ever run, and it will run with the defects filed under
+  "Release workflow" below still in it. Pushing a tag publishes a GitHub release to the
+  world, so it is deliberately not automated:
+  `git tag -a v0.3.0 -m "v0.3.0"`, then push that tag.
   **This entry closes when that tag exists, not when this PR merges** — until then
   `README.md:136` still points at a 404. Nothing in the suite can tell the difference;
   see the new NON-GOALS bullet in `test_the_docs_are_checked.py` saying so directly.
 
-- **Nothing runs the 555-test suite in CI.** (release staging, 2026-08-26)
+- **Nothing runs the 564-test suite in CI.** (release staging, 2026-08-26)
   `.github/workflows/release.yml` is the *only* workflow in the repo and it triggers on
   `push: tags: v*`. So the tag that publishes `moviola.skill` to the world is gated by
   nothing except whatever the person cutting it ran locally. The suite is stdlib +
@@ -305,21 +323,111 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `.venv/` here — the first form fails outright and only the fallback works. Left as a
   finding rather than fixed in the same breath because the honest repair is a decision
   about whether this project wants a checked-in venv convention at all, and that is
-  wider than a docs edit. `python3 -m pytest -q` collects 557 as of this commit.
+  wider than a docs edit. `python3 -m pytest -q` collects 564 as of this commit.
+
+- **The file set the repo-wide audits read is a subset under a sparse checkout, and
+  nothing says so.** (release staging, 2026-08-26) `tracked_text_files` asks
+  `git ls-files`, which reports the whole index, and then drops anything failing
+  `is_file()`. Under a sparse checkout the cone has not materialised most of that index,
+  so the audits sweep whatever happens to be on disk and go green. This is written into
+  `tests/repo_files.py` as an explicit NON-GOAL rather than fixed, because the fix is a
+  judgement call: `git config core.sparseCheckout` could gate a skip, but a skip that
+  fires on a legitimate CI shallow-clone setup trades a real blind spot for a suite that
+  refuses to run. Nobody has hit this yet; it is filed so the next person does not
+  discover it as a mystery.
+
+- **`build-skill.sh`'s untracked-file guard has no test.** (release staging, 2026-08-26)
+  The guard added in this commit — `git ls-files --others --exclude-standard --
+  skills/moviola` — closes a real hole: `git diff` sees no untracked files and the
+  archive reads `HEAD`, so a new-but-uncommitted runtime module produced a silently
+  incomplete bundle under a success message. It is verified by hand, not by the suite.
+  Testing it means driving a shell script that hard-exits on a dirty tree from inside
+  pytest, which wants a scratch clone per case; that is a fixture worth building when a
+  second script-level guard needs one, not for a single four-line `if`.
+
+- **A repo-root `.skillignore` still ships in the `/plugin install` archive.**
+  (release staging, 2026-08-26) The root `.gitattributes` export-ignores `.gitignore`
+  and `.gitattributes` but not `.skillignore`, so a 33-line scanner config lands in
+  every Claude Code plugin install. Same class as the bug this commit fixes and a
+  one-line fix, deliberately not taken here: it is the full-repo archive, not the
+  claude.ai bundle, and `TestThePublishedBundleShipsWhatGitattributesClaims` only reads
+  the subtree. Fixing it without extending that test to the root archive would be an
+  unpinned change at the tail of a branch that is otherwise ready.
+
+## Release workflow
+
+Everything here is a defect in `.github/workflows/release.yml`, which has **never run**
+— see the README download entry above. It is filed separately and not fixed on the
+release branch because CI logic is executable behaviour and gets its own PR rather than
+riding along behind prose.
+
+- **Nothing checks the tag against the version the skill actually ships.**
+  (release staging, 2026-08-26) The workflow never compares `${GITHUB_REF_NAME#v}` to
+  the `version:` in `skills/moviola/SKILL.md` frontmatter or to either `plugin.json`.
+  The suite pins those four to each other, so a mismatch cannot exist *inside* the repo
+  — but the tag is outside it, which `test_the_docs_are_checked.py:205` already states
+  as a NON-GOAL: "It does NOT check the version against a git tag or a published
+  release." Tagging `v0.3.1` on a tree that says `0.3.0` publishes a release whose asset
+  contradicts its own name, and nothing anywhere notices. The workflow is the only place
+  that can close this, which is why it is filed here and not there.
+
+- **`tags: - "v*"` publishes a pre-release as `latest`, which is where the README
+  sends people.** (release staging, 2026-08-26) `v*` matches `v0.3.0-rc1`, and the job
+  hardcodes `prerelease: false`, so an rc tag becomes a full release and takes over
+  `/releases/latest` — the exact URL `README.md:104` and `README.md:136` point at. Fix
+  is either a stricter pattern (`v[0-9]+.[0-9]+.[0-9]+`) or deriving `prerelease` from
+  whether the ref contains a hyphen.
+
+- **A tag spelled without the `v` triggers nothing, silently.** (release staging,
+  2026-08-26) This is not hypothetical: `0.1.0` is on origin right now alongside four
+  `v`-prefixed siblings, so the spelling has already been got wrong once in this repo's
+  history. A release cut that way produces no run, no asset and no error — the person
+  cutting it has to notice the absence.
+
+- **`generate_release_notes: true` will synthesise notes from upstream churn.**
+  (release staging, 2026-08-26) GitHub builds those notes from commits since the last
+  release. There is no previous release *here*, and the fork carries upstream's history,
+  so the first run produces notes describing `bradautomates/claude-video`'s commits and
+  ignores the hand-written `CHANGELOG.md` entry that exists precisely to say what
+  changed. Use `body_path: CHANGELOG.md` or an extracted section instead.
+
+- **`softprops/action-gh-release@v2` is a floating major tag, not a pinned SHA.**
+  (release staging, 2026-08-26) The job holds `contents: write`, so whatever that tag
+  resolves to at run time can write releases and tags in this repo. Pin to a commit SHA
+  with the version in a trailing comment. (`actions/checkout@v4` is the same shape and
+  the same fix; it is first-party, which lowers the odds, not the blast radius.)
+
+- **No `concurrency:` group, and `fetch-depth: 0` buys nothing.** (release staging,
+  2026-08-26) Two tags pushed together run two jobs racing to create releases. And the
+  full-history fetch is there for a `git describe` the workflow does not do —
+  `build-skill.sh` archives `HEAD:skills/moviola`, which needs one commit. Minor next to
+  the rest; grouped here so the workflow PR closes them in one pass.
 
 ## Housekeeping
 
-- **This file has crossed the ~50KB archive threshold and the split is currently a
-  no-op.** (2026-08-26) Measured today: 57,276 bytes total, of which `## Completed` is
-  27,595 — 48%, which is a genuine mass and not a rounding error. (Was 52,384 / 53%
-  before this commit; the live sections grew, the completed section did not.) But the archive rule
-  keeps the 5 most recent completions in place, and there are only **4** entries, all
-  written on 2026-08-26 from one body of work. So moving them to `TODOS-DONE.md` would
-  move nothing. The split starts doing real work at the sixth completion; until then the
-  file is over the threshold for a reason that archiving cannot fix. When it does run,
-  the entries here carry reversed decisions worth lifting into `AGENTS.md` as
-  constraints rather than leaving as narrative — the `find_spec` rejection and the
-  ambient-key rule are both in that class.
+- **This file is over the ~50KB archive threshold, and the split is deferred on a
+  judgement, not on arithmetic.** (2026-08-26) Measured with
+  `awk '/^## Completed/{f=1} f' TODOS.md | wc -c`: 65,185 bytes total, of which
+  `## Completed` is 27,595 — 42%, a genuine mass and not a rounding error. (At the merge
+  base it was 53,933 / 51.2%; the live sections grew, the completed section did not.)
+  **The previous version of this entry said the split would "move nothing" because there
+  are "only 4 entries". That was an eyeballed count and it decided the outcome.**
+  `## Completed` holds 4 `###` subsections *and* 26 bulleted findings, and the archive
+  rule — keep the 5 most recent — never says which of those is an entry. Counted by
+  subsection, one moves and the file barely shrinks. Counted by bullet, 21 of 26 move
+  and roughly 21KB with them, so "moving them would move nothing" is false by very
+  nearly the entire payoff of the split. The ambiguity is the finding; the arithmetic was never the
+  reason.
+  The actual reason to defer: all 26 came from one investigation on one day, and 20,181
+  of the 27,595 bytes are a single subsection. Archiving by bullet would cut that
+  investigation in half across two files and leave the surviving five as orphans of an
+  argument that lives elsewhere. Cut at the next *distinct* body of work, when there is
+  a seam to cut along. Until then the file stays over the threshold for a reason
+  archiving cannot fix.
+  When it does run, the entries here carry reversed decisions worth lifting into
+  `AGENTS.md` as constraints rather than leaving as narrative — the `find_spec`
+  rejection and the ambient-key rule are both in that class. Nothing verifies that
+  extraction step, so a pass that archives without lifting them is a silent regression.
 
 ## Completed
 
