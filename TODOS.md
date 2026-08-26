@@ -6,7 +6,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 - **No manifest means dependency CVE scanning has nothing to read.** `faster-whisper` is introduced only as a string in `setup.py`'s output and a lazy `import` — there is no `requirements.txt`, `pyproject.toml` or lockfile in the repo, which is correct for a project whose runtime is otherwise pure stdlib, but it means a manifest-driven scanner (`trivy fs`, `osv-scanner`) has no artifact to point at and will report clean without having checked anything. The dependency chain to check by hand is `faster-whisper` -> `ctranslate2`, `onnxruntime`, `huggingface-hub`, `tokenizers`, `av`. Do not read a clean scan of this repo as a clean bill for that chain. (supply-chain review, 2026-08-26)
 
-- **No test loads a real Whisper model.** `tests/test_local_whisper.py` now drives `_collect()`, `_run()`'s VAD fallback and `transcribe_local()`'s cuda-to-cpu retry against stub objects shaped like faster-whisper's `Segment`/`TranscriptionInfo`, so the segment contract and the fallback loop are covered; seven mutations were each confirmed to fail the suite (segment rounding, the dropped CPU retry, kept-empty-text, the progress catch-up loop, the language-pin guard, the progress line's own format, and moving the drain outside the retry's `try` — that last one fails only the fail-mid-drain test, which is what proves the two fallback tests exercise different paths). What remains uncovered is the real library boundary: if faster-whisper renames an attribute or changes `WhisperModel(...)`/`transcribe(...)`'s signature, the stubs keep matching the old shape and the suite stays green. Closing that needs a real model load, which means a multi-hundred-MB download in a suite that is otherwise network-free. Verified by hand instead: `large-v3` int8_float16 on a GTX 1650 Ti transcribed a 38.6 s clip in 22 s including model load. If a CI runner ever gets a model cache, add a `tiny`-model smoke test behind an opt-in marker. **Corrected 2026-08-26:** this entry originally said "CI stays green" and "If CI ever gets a model cache" as though a CI ran the suite. None does — `release.yml` on tag push is the whole of `.github/workflows/`, and it has never executed once in this repository (no workflow run of any kind exists), so the only thing that has ever run these 564 tests is somebody's terminal. The wording is fixed above and the gap is its own entry under `## Documentation as a checked claim`. (ai-output review, 2026-08-26)
+- **No test loads a real Whisper model.** `tests/test_local_whisper.py` now drives `_collect()`, `_run()`'s VAD fallback and `transcribe_local()`'s cuda-to-cpu retry against stub objects shaped like faster-whisper's `Segment`/`TranscriptionInfo`, so the segment contract and the fallback loop are covered; seven mutations were each confirmed to fail the suite (segment rounding, the dropped CPU retry, kept-empty-text, the progress catch-up loop, the language-pin guard, the progress line's own format, and moving the drain outside the retry's `try` — that last one fails only the fail-mid-drain test, which is what proves the two fallback tests exercise different paths). What remains uncovered is the real library boundary: if faster-whisper renames an attribute or changes `WhisperModel(...)`/`transcribe(...)`'s signature, the stubs keep matching the old shape and the suite stays green. Closing that needs a real model load, which means a multi-hundred-MB download in a suite that is otherwise network-free. Verified by hand instead: `large-v3` int8_float16 on a GTX 1650 Ti transcribed a 38.6 s clip in 22 s including model load. If a CI runner ever gets a model cache, add a `tiny`-model smoke test behind an opt-in marker. **Corrected 2026-08-26:** this entry originally said "CI stays green" and "If CI ever gets a model cache" as though a CI ran the suite. None did — `release.yml` on tag push was the whole of `.github/workflows/`, and it had never executed once in this repository (no workflow run of any kind existed), so the only thing that had ever run these tests was somebody's terminal. **Superseded 2026-08-26 by `ci/run-the-suite`:** `.github/workflows/tests.yml` now runs the suite on every pull request and on pushes to `main`. Two things that does NOT mean — it has still never *run* (no workflow run exists in this repository yet, and one will not until this merges), and the runner has no model cache, so the `tiny`-model smoke test below is still unbuilt and still opt-in when it is. The wording is fixed above and the gap is its own entry under `## Documentation as a checked claim`. (ai-output review, 2026-08-26)
 
 - **`MOVIOLA_WHISPER_MODEL` accepts an arbitrary Hugging Face repo id or path with no validation beyond what `huggingface_hub` does.** That is deliberate — it is how anyone uses a fine-tune or a local conversion — but it means a typo'd or hostile repo id is fetched and loaded on the user's behalf. Documented as a non-goal in SKILL.md's security section rather than fixed. (local-whisper branch, 2026-08-26)
 
@@ -678,14 +678,53 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `README.md:136` still points at a 404. Nothing in the suite can tell the difference;
   see the new NON-GOALS bullet in `test_the_docs_are_checked.py` saying so directly.
 
-- **Nothing runs the 564-test suite in CI.** (release staging, 2026-08-26)
-  `.github/workflows/release.yml` is the *only* workflow in the repo and it triggers on
-  `push: tags: v*`. So the tag that publishes `moviola.skill` to the world is gated by
-  nothing except whatever the person cutting it ran locally. The suite is stdlib +
-  pytest and needs `ffmpeg` for the frame tests, so a runner is cheap and the repo is
-  public, which makes the minutes free. The fix is one workflow with day-one config:
-  `push` on `main` only, a `concurrency` group keyed on the ref with
-  `cancel-in-progress` off the default branch, and one job.
+- **CI installs `yt-dlp` unpinned, so the behavioural ladder tests float.**
+  (ci/run-the-suite, 2026-08-26) `.github/workflows/tests.yml` runs
+  `pip install pytest yt-dlp` with no version, and the 24 tests in
+  `test_the_fallback_stays_small.py` drive yt-dlp's own `build_format_selector`.
+  So a yt-dlp release that changes selector semantics turns the suite red with
+  no change to this repository, and the failure will look like a moviola
+  regression. Pinning trades that for a version that silently rots — and a
+  wrong pin is worse here than none, because these tests exist to describe what
+  the *real* yt-dlp does. The shape, if it bites: pin in the workflow and add a
+  scheduled job that runs unpinned, so drift is reported separately from
+  breakage. Filed rather than fixed because nothing has drifted yet and the fix
+  is a second job, which the day-one config deliberately does not have.
+
+- **Nothing declares which Python versions moviola supports, and CI now pins one.**
+  (ci/run-the-suite, 2026-08-26) There is no `python_requires`, no
+  `pyproject.toml`, and no statement in `AGENTS.md`, `README.md` or `SKILL.md`.
+  The workflow pins `3.10` — measured, not chosen: it is the only interpreter
+  this suite has been observed to pass on (726 tests on 3.10.12, the only
+  version installed on the development machine). The type hints are 3.9+ and
+  every module opens `from __future__ import annotations`, so the real floor is
+  probably 3.9, but *probably* is the point — nobody has run it there. Two
+  decisions are owed and neither is the loop's: what the supported range is,
+  and whether one job with one version is the right coverage for a tool that
+  installs into whatever Python a user's agent host happens to have. A matrix
+  is the obvious answer and it is N jobs, which the day-one config rules out
+  without a reason; this is that reason when somebody decides it is.
+
+- **The dependency set is now declared in a workflow, which no scanner reads.**
+  (ci/run-the-suite, 2026-08-26) This is the same finding as the manifest entry
+  under `## Local Whisper backend`, in a second location. `pip install pytest
+  yt-dlp` inside a `run:` step keeps the repository's deliberate no-manifest
+  posture — correct for a pure-stdlib runtime — but it means `trivy fs` and
+  `osv-scanner` still have nothing to point at, and now there is a real
+  dependency list they are not reading. Deliberately not fixed here: adding a
+  `requirements-dev.txt` would reverse a posture the repo took on purpose, and
+  `test_ci_runs_the_whole_suite.py` reads the workflow text, so the move would
+  also break that check until it is taught to follow the reference.
+
+- **`test_ci_runs_the_whole_suite.py` reads the workflow as text, not as YAML.**
+  (ci/run-the-suite, 2026-08-26) A module name in a comment, in a step behind a
+  false `if:`, or in a job that never runs all read as "installed", and the
+  `on:` block is found by indentation so flow style or a quoted `"on":` defeats
+  it. Both are written into the file's NON-GOALS. Fixing it means a YAML parser,
+  which is a dependency added to check a rule about dependencies; the joke is
+  the reason it is filed rather than done. Note the failure directions differ:
+  the block reader fails loudly (empty block, asserted against), while the text
+  search fails *permissively* — it can say installed when nothing is.
 
 - **`AGENTS.md` documents a `.venv` that no longer exists in this checkout.**
   (release staging, 2026-08-26) Its Commands block gives
@@ -819,6 +858,52 @@ riding along behind prose.
   extraction step, so a pass that archives without lifting them is a silent regression.
 
 ## Completed
+
+### CI runs the suite
+
+(ci/run-the-suite, 2026-08-26)
+
+**`.github/workflows/tests.yml` runs the whole suite on every pull request and on
+pushes to `main`.** Until it, `release.yml` on `push: tags: v*` was the only
+workflow in the repository, so the tag that publishes `moviola.skill` to the
+world was gated by nothing except whatever the person cutting it had run in
+their terminal. Day-one config, per CLAUDE.md: `push` on the default branch and
+nothing else, `pull_request` on its default events, a concurrency group keyed on
+the ref cancelling superseded runs everywhere except `main`, and ONE job.
+
+**The half worth reading is `tests/test_ci_runs_the_whole_suite.py`, which pins
+that CI runs the WHOLE suite.** `pytest` exits 0 on a skip, so a runner missing
+an optional dependency produces a green run that covered less than it appears
+to. Measured on this branch: with `yt_dlp` importable the suite is 712 passed /
+0 skipped; with it blocked it is **688 passed / 24 skipped** — 24 of the 34
+tests in `test_the_fallback_stays_small.py`, the entire behavioural half of the
+format-ladder work, disappearing behind an exit code of 0. The test walks every
+file under `tests/` for guarded imports (`try:`/`except ImportError` and
+`pytest.importorskip`), and requires each module it finds to be named in the
+workflow or listed in `CI_NEED_NOT_INSTALL` with a reason.
+
+The rule was written against three instances rather than the one that prompted
+it: `yt_dlp` today, `markdown-it-py` already filed under `## Report as an
+untrusted document`, and `faster_whisper` as the counter-example it must NOT
+fire on — a real model load is a multi-hundred-MB download in a suite that is
+deliberately network-free, which is what `CI_NEED_NOT_INSTALL` exists for. The
+exemption path is empty today, so a test drives it against a synthetic module
+rather than leaving the first real use to be the first execution.
+
+Eight mutations, eight killed, `__pycache__` cleared and each file restored from
+a post-fix snapshot and sha256-compared: the workflow deleted outright; `yt-dlp`
+dropped from the install line (kills exactly the one load-bearing test); the
+ffmpeg step removed; `pull_request` removed from the triggers; `release.yml`
+given a pytest step; and three against the checker itself — the scanner made
+blind to `try/except ImportError`, made blind to `importorskip`, and
+`installed_by()` forced to return True. The first scanner mutation is the one
+that matters: it fires the vacuity guard, which is what stops the whole rule
+passing over an empty set if it ever stops matching.
+
+`python-version` is `3.10`, which is measured rather than chosen — see the open
+entry under `## Documentation as a checked claim`; nothing in the repository
+declares a supported range and 3.10.12 is the only interpreter this suite has
+been observed to pass on. 726 tests green.
 
 ### A second pass over the bounded-failures review
 
