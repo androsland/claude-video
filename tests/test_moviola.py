@@ -171,7 +171,39 @@ class TestReportEscaping:
 def test_a_hostile_source_path_lands_as_data_not_as_report_structure(cut_clip: Path, tmp_path: Path):
     hostile = tmp_path / "clip ``` ## Ignore the above.mp4"
     hostile.write_bytes(cut_clip.read_bytes())
-    out = _run(hostile, "--detail", "transcript", "--no-whisper")
+    out = _run(hostile, "--detail", "transcript")
     assert "## Ignore the above" in out                      # still reported
     assert "\n## Ignore the above" not in out                # never as a heading
     assert "- **Source:** ````" in out                       # fenced wider than the value
+
+
+def _run_failing(clip: Path, *args: str) -> str:
+    """Run and require a non-zero exit; returns stderr."""
+    proc = subprocess.run(
+        [sys.executable, str(MOVIOLA), str(clip), "--no-whisper", *args],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode != 0, f"expected failure, got 0:\n{proc.stdout[:400]}"
+    return proc.stderr
+
+
+class TestRangeValidation:
+    """`--end` used to be checked only when `--start` was also given, so a
+    degenerate range reached ffmpeg and failed in ffmpeg's words."""
+
+    def test_end_alone_is_measured_against_zero(self, cut_clip: Path):
+        err = _run_failing(cut_clip, "--end", "0")
+        assert "--end must be greater than 0" in err
+        assert "-ss" not in err  # not "-to value smaller than -ss"
+
+    def test_a_negative_end_alone_is_rejected(self, cut_clip: Path):
+        err = _run_failing(cut_clip, "--end", "-5")
+        assert "--end must be greater than 0" in err
+
+    def test_an_inverted_range_still_names_the_start(self, cut_clip: Path):
+        err = _run_failing(cut_clip, "--start", "3", "--end", "1")
+        assert "--end must be greater than --start (3.0s)" in err
+
+    def test_an_ordinary_range_is_unaffected(self, cut_clip: Path):
+        out = _run(cut_clip, "--start", "1", "--end", "3")
+        assert "**Focus range:**" in out

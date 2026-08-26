@@ -226,8 +226,15 @@ def main() -> int:
 
     if start_sec is not None and start_sec < 0:
         raise SystemExit("--start must be non-negative")
-    if end_sec is not None and start_sec is not None and end_sec <= start_sec:
-        raise SystemExit("--end must be greater than --start")
+    # Compare against the EFFECTIVE start, not only an explicit one. Requiring
+    # start_sec to be set skipped the check entirely for `--end 0` and
+    # `--end -5`, which then reached ffmpeg and failed with "-to value smaller
+    # than -ss" — a message about flags the user never typed.
+    if end_sec is not None and end_sec <= (start_sec or 0.0):
+        raise SystemExit(
+            f"--end must be greater than --start ({start_sec:.1f}s)" if start_sec
+            else "--end must be greater than 0"
+        )
     if full_duration > 0 and start_sec is not None and start_sec >= full_duration:
         raise SystemExit(f"--start {start_sec:.1f}s is past end of video ({full_duration:.1f}s)")
 

@@ -168,3 +168,45 @@ class TestTranscribeChunks:
 
         with pytest.raises(SystemExit):
             whisper.transcribe_chunks(chunks, always_fail)
+
+
+class TestExtractAudioRangeGuard:
+    """extract_audio is where start/end become an ffmpeg command line, so the
+    shape check lives there — moviola.py validates its own flags, but
+    transcribe_video() takes the range from any caller."""
+
+    def test_inverted_range_is_named_not_left_to_ffmpeg(self, tmp_path: Path):
+        with pytest.raises(SystemExit) as exc:
+            whisper.extract_audio("unused.mp4", tmp_path / "a.mp3", 30.0, 10.0)
+        message = str(exc.value)
+        assert "must be greater than" in message
+        assert "-ss" not in message and "-to" not in message  # not ffmpeg's words
+
+    def test_zero_length_range_is_rejected(self, tmp_path: Path):
+        with pytest.raises(SystemExit):
+            whisper.extract_audio("unused.mp4", tmp_path / "a.mp3", 5.0, 5.0)
+
+    def test_end_without_start_is_measured_against_zero(self, tmp_path: Path):
+        # The bug this closes: with no start, the old check compared against
+        # None and was skipped, so `--end 0` sailed through to ffmpeg.
+        with pytest.raises(SystemExit) as exc:
+            whisper.extract_audio("unused.mp4", tmp_path / "a.mp3", None, 0.0)
+        assert "0.000s" in str(exc.value)
+
+    def test_negative_start_is_rejected(self, tmp_path: Path):
+        with pytest.raises(SystemExit) as exc:
+            whisper.extract_audio("unused.mp4", tmp_path / "a.mp3", -1.0, 10.0)
+        assert "non-negative" in str(exc.value)
+
+    def test_a_valid_range_is_not_rejected(self, tmp_path: Path, monkeypatch):
+        # The guard must not fire on the ordinary case. Stop before ffmpeg runs.
+        monkeypatch.setattr(whisper.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("reached ffmpeg")))
+        with pytest.raises(RuntimeError, match="reached ffmpeg"):
+            whisper.extract_audio("unused.mp4", tmp_path / "a.mp3", 10.0, 30.0)
+
+    def test_an_absent_range_is_not_rejected(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(whisper.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("reached ffmpeg")))
+        with pytest.raises(RuntimeError, match="reached ffmpeg"):
+            whisper.extract_audio("unused.mp4", tmp_path / "a.mp3", None, None)
