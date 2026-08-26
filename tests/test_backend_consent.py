@@ -61,7 +61,7 @@ class TestUnpinnedIgnoresTheProcessEnvironment:
         # is the difference this whole change turns on.
         assert whisper.resolve_backend() == ("groq", FAKE_CONFIGURED)
 
-    def test_uses_a_key_from_the_working_directorys_dotenv(
+    def test_declines_a_key_from_the_working_directorys_dotenv(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         _isolate(monkeypatch, tmp_path)
@@ -69,11 +69,29 @@ class TestUnpinnedIgnoresTheProcessEnvironment:
             "OPENAI_API_KEY=%s\n" % FAKE_CONFIGURED, encoding="utf-8"
         )
         monkeypatch.setattr(whisper, "local_available", lambda: False)
-        # A stated NON-GOAL, pinned by a test so it cannot drift silently: the
-        # project .env is treated as deliberate, the same as upstream treats it,
-        # even though it may belong to another tool entirely. Narrowing that is
-        # a separate decision from this one.
-        assert whisper.resolve_backend() == ("openai", FAKE_CONFIGURED)
+        # This assertion was the opposite until the consent chain was audited.
+        # `$PWD/.env` was read as deliberate because upstream read it that way.
+        # It is not: for a Claude Code plugin the working directory is the
+        # user's checkout by construction, so that file belongs to whatever
+        # project they happen to be standing in and may have been committed by
+        # someone they have never met. Reading it is the ambient-environment
+        # mistake wearing a different hat — a credential's presence taken for
+        # its owner's permission — and it was invisible to both preflights,
+        # which consult the config file alone, so a key found here uploaded
+        # audio underneath a "no backend configured" notice.
+        assert whisper.resolve_backend() == (None, None)
+
+    def test_a_pin_does_not_restore_the_working_directorys_dotenv(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _isolate(monkeypatch, tmp_path)
+        (tmp_path / CONFIG_BASENAME).write_text(
+            "GROQ_API_KEY=%s\n" % FAKE_CONFIGURED, encoding="utf-8"
+        )
+        monkeypatch.setattr(whisper, "local_available", lambda: False)
+        # A pin re-opens the process environment, not the filesystem. The two
+        # are separate switches and only one of them moves.
+        assert whisper.resolve_backend("groq") == (None, None)
 
     def test_local_still_wins_over_a_configured_key(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

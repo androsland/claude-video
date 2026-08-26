@@ -6,11 +6,16 @@ set -euo pipefail
 
 CONFIG_FILE="$HOME/.config/moviola/.env"
 
-# Warn if the secrets file has loose permissions.
+# Warn if anyone but the owner can reach the secrets file. The predicate is
+# `mode & 0o077`, the same one whisper.warn_if_key_file_is_exposed applies, and
+# it has to be arithmetic: this used to read `perms != "600" && perms != "400"`,
+# a string comparison against two literals, so it warned about 700 — owner-only,
+# with nothing to warn about — and any mode not spelled exactly those three
+# digits was a warning whether or not it granted anyone anything.
 if [[ -f "$CONFIG_FILE" ]]; then
   perms=$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || echo "")
-  if [[ -n "$perms" && "$perms" != "600" && "$perms" != "400" ]]; then
-    echo "/moviola: WARNING — $CONFIG_FILE has permissions $perms (should be 600)."
+  if [[ "$perms" =~ ^[0-7]+$ ]] && (( 8#$perms & 8#77 )); then
+    echo "/moviola: WARNING — $CONFIG_FILE has permissions $perms — other users on this machine can reach your API key."
     echo "  Fix: chmod 600 $CONFIG_FILE"
   fi
 fi

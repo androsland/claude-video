@@ -32,6 +32,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 from config import get_config  # noqa: E402
+from whisper import warn_if_key_file_is_exposed  # noqa: E402
 
 
 REQUIRED_BINARIES = ["ffmpeg", "ffprobe", "yt-dlp"]
@@ -95,26 +96,17 @@ def _check_binaries() -> list[str]:
     return [b for b in REQUIRED_BINARIES if not _which(b)]
 
 
-_PERM_WARNED: set[str] = set()
-
-
 def _check_file_permissions(path: Path) -> None:
-    """Warn to stderr (once per path per process) if a secrets file is
-    world/group readable."""
-    key = str(path)
-    if key in _PERM_WARNED:
-        return
-    try:
-        mode = path.stat().st_mode
-        if mode & 0o044:
-            _PERM_WARNED.add(key)
-            sys.stderr.write(
-                f"[moviola] WARNING: {path} is readable by other users. "
-                f"Run: chmod 600 {path}\n"
-            )
-            sys.stderr.flush()
-    except OSError:
-        pass
+    """Delegate to whisper.warn_if_key_file_is_exposed — see the note there.
+
+    This was a second copy of the predicate, testing `mode & 0o044`, and the two
+    copies had already drifted: a group- or world-WRITABLE key file warned in
+    the SessionStart hook and passed silently here, even though a key somebody
+    else can replace is worse than one they can only read. The dedupe cache now
+    lives with the predicate too, so setup.py reaching the key through
+    whisper.load_api_key prints one warning rather than two.
+    """
+    warn_if_key_file_is_exposed(path)
 
 
 def _read_env_key(name: str) -> str | None:
@@ -141,12 +133,32 @@ def _read_env_key(name: str) -> str | None:
     return None
 
 
-def _have_api_key() -> tuple[bool, str | None]:
-    if _read_env_key("GROQ_API_KEY"):
-        return True, "groq"
-    if _read_env_key("OPENAI_API_KEY"):
-        return True, "openai"
-    return False, None
+def _have_api_key(pin: str = "auto") -> tuple[bool, str | None]:
+    """Whether an API key is available UNDER THE RULE THE RUNTIME APPLIES.
+
+    Routed through whisper.load_api_key rather than re-deriving the lookup, for
+    the reason _effective_backend spells out below — this field is simply where
+    that lesson had not been applied yet. Re-derived, it answered "does a string
+    named GROQ_API_KEY exist anywhere I can see", so an ambient environment key
+    made `has_api_key: true` while an unpinned run refused that same key and did
+    frames only. `has_transcription`, `status` and `can_proceed` are all
+    downstream of this one boolean.
+
+    The environment counts only when the user pinned an API backend, which is
+    resolve_backend's rule: the pin is the consent an exported variable is not.
+    Under a `local` pin it counts for nothing, since no upload can happen.
+
+    Imported lazily, and falling back to "no key", for the same reason
+    _effective_backend does: a preflight on a machine with a broken scripts/
+    directory should still return a snapshot rather than raise.
+    """
+    try:
+        import whisper
+    except Exception:
+        return False, None
+    preferred = pin if pin in ("groq", "openai") else None
+    backend, key = whisper.load_api_key(preferred, allow_env=preferred is not None)
+    return bool(key), backend
 
 
 def _have_local_whisper() -> bool:
@@ -295,13 +307,18 @@ def _status() -> dict:
     reason to block.
     """
     missing = _check_binaries()
-    has_key, _key_backend = _have_api_key()
+    cfg = get_config()
+    pin = str(cfg["whisper"])
+
+    # The pin has to be read before the key question, not after: whether a key
+    # counts at all depends on it. Deriving has_key first and the pin second is
+    # what let this file answer the two halves under different rules.
+    has_key, _key_backend = _have_api_key(pin)
     has_local = _have_local_whisper()
     has_transcription = has_key or has_local
     setup_complete = not is_first_run()
 
-    cfg = get_config()
-    backend = _effective_backend(str(cfg["whisper"]))
+    backend = _effective_backend(pin)
 
     # `has_transcription` answers "is a backend installed at all"; `backend`
     # answers "would one actually run, given the pin". They differ exactly when
@@ -414,12 +431,20 @@ def cmd_install() -> int:
     else:
         print(f"[setup] config exists: {CONFIG_FILE}")
 
-    has_key, backend = _have_api_key()
+    pin = str(get_config()["whisper"])
+    has_key, _key_backend = _have_api_key(pin)
     has_local = _have_local_whisper()
     if has_key or has_local:
         _write_setup_complete()
-        print(f"[setup] ready. whisper backend: {backend or 'local'}")
-        if has_local and not has_key:
+        # Through _effective_backend, not re-derived. `backend or 'local'` named
+        # the key's provider whenever one existed and fell back to "local"
+        # otherwise, so it reported "groq" for an unpinned machine that has
+        # faster-whisper and would run local, and for `MOVIOLA_WHISPER=local`
+        # with a key in the config file. Both are the drift _effective_backend
+        # was written to end, reintroduced one function away from it.
+        effective = _effective_backend(pin)
+        print(f"[setup] ready. whisper backend: {effective or 'none — frames only'}")
+        if effective == "local":
             print("[setup] transcription runs on this machine — no API key needed.")
             print("[setup] first use downloads the model to the Hugging Face cache;")
             print("[setup] later runs re-check it there unless you set")
