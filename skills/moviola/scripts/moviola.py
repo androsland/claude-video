@@ -19,7 +19,12 @@ from config import frame_cap, get_config  # noqa: E402
 from download import download, fetch_captions, is_url  # noqa: E402
 from frames import MAX_FPS, auto_fps, auto_fps_focus, extract_at_timestamps, extract_keyframes, extract_scene_or_uniform, format_time, get_metadata, merge_frames, parse_time, parse_timestamps  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
-from whisper import LOCAL_BACKEND, resolve_backend, transcribe_video  # noqa: E402
+from whisper import (  # noqa: E402
+    LOCAL_BACKEND,
+    env_key_backend,
+    resolve_backend,
+    transcribe_video,
+)
 
 
 def resolve_whisper_choice(flag: str | None, configured: str) -> str | None:
@@ -360,9 +365,19 @@ def main() -> int:
                 hint = (f"whisper backend '{whisper_choice}' was requested but its API key "
                         f"is missing — run `python3 {setup_py}` to set one")
             else:
-                hint = ("no subtitles and no transcription backend — run "
-                        "`pip install \"faster-whisper>=1.0\"` to transcribe on-device, or "
-                        f"`python3 {setup_py}` to set an API key")
+                ambient = env_key_backend()
+                if ambient:
+                    hint = (
+                        f"no subtitles, and {ambient.upper()}_API_KEY is set in this "
+                        "environment but an unpinned run will not upload audio on the "
+                        "strength of an environment variable alone — set "
+                        f"MOVIOLA_WHISPER={ambient} in ~/.config/moviola/.env or pass "
+                        f"`--whisper {ambient}` to opt in, or `pip install "
+                        "\"faster-whisper>=1.0\"` to transcribe on-device")
+                else:
+                    hint = ("no subtitles and no transcription backend — run "
+                            "`pip install \"faster-whisper>=1.0\"` to transcribe on-device, or "
+                            f"`python3 {setup_py}` to set an API key")
             print(f"[moviola] {hint}", file=sys.stderr)
     elif not transcript_segments and video_path and not meta.get("has_audio"):
         print("[moviola] no audio stream found — proceeding without transcription", file=sys.stderr)

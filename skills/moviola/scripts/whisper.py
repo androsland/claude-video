@@ -72,15 +72,41 @@ def plan_chunks(
     return plan
 
 
-def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, None]:
+API_CANDIDATES = (("GROQ_API_KEY", "groq"), ("OPENAI_API_KEY", "openai"))
+
+
+def _env_key(name: str) -> str | None:
+    """An API key read from the process environment, or None if unset or blank."""
+    value = os.environ.get(name)
+    return value.strip() if value else None
+
+
+def env_key_backend() -> str | None:
+    """The backend whose key sits in the process environment, if any.
+
+    Exists ONLY to explain why an unpinned run declined to upload. Never call it
+    to choose a backend: ignoring the environment is the whole point.
+    """
+    for name, backend in API_CANDIDATES:
+        if _env_key(name):
+            return backend
+    return None
+
+
+def load_api_key(
+    preferred: str | None = None, *, allow_env: bool = True
+) -> tuple[str, str] | tuple[None, None]:
     """Return (backend, api_key). Prefers Groq, falls back to OpenAI.
 
     If `preferred` is "groq" or "openai", only that backend's key is considered.
-    """
-    def _from_env(name: str) -> str | None:
-        value = os.environ.get(name)
-        return value.strip() if value else None
 
+    `allow_env=False` restricts the search to moviola's own config file and the
+    working directory's `.env`, ignoring the process environment. resolve_backend
+    passes it when nothing is pinned: a key exported into a shell was put there
+    for whatever the user was running at the time, and reading it as standing
+    permission to upload their audio mistakes an accident for consent. A key in
+    `~/.config/moviola/.env` is different in kind — setup asked before writing it.
+    """
     def _from_dotenv(path: Path, name: str) -> str | None:
         if not path.exists():
             return None
@@ -105,12 +131,12 @@ def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, 
         Path.cwd() / ".env",
     ]
 
-    candidates = (("GROQ_API_KEY", "groq"), ("OPENAI_API_KEY", "openai"))
+    candidates = API_CANDIDATES
     if preferred is not None:
         candidates = tuple(c for c in candidates if c[1] == preferred)
 
     for key_name, backend in candidates:
-        value = _from_env(key_name)
+        value = _env_key(key_name) if allow_env else None
         if not value:
             for candidate in dotenv_paths:
                 value = _from_dotenv(candidate, key_name)
@@ -135,17 +161,35 @@ def resolve_backend(preferred: str | None = None) -> tuple[str | None, str | Non
     """Return (backend, api_key). api_key is None for "local", which needs none.
 
     Precedence when nothing is pinned is deliberately local-first: if
-    faster-whisper is importable, the audio does not leave the machine. That
-    ordering is the point of this fork — a key that happens to be present in the
-    environment for some unrelated tool should not silently cause an upload. The
-    cost is real and is the reason the ordering is stated everywhere it is
+    faster-whisper is importable, the audio does not leave the machine. The cost
+    is real and is the reason the ordering is stated everywhere it is
     observable: a CPU transcode can take minutes where an API call takes
     seconds. Pin MOVIOLA_WHISPER=groq/openai (or pass --whisper) to trade the
     other way.
 
-    Returns (None, None) when no backend is usable — when `preferred` names an
-    API backend whose key is missing, or "local" without faster-whisper — so the
-    caller reports one hint rather than failing mid-transcode.
+    Local-first alone was not enough, and the gap is the reason for allow_env.
+    On a machine WITHOUT faster-whisper — the state every machine starts in —
+    an unpinned run used to fall through to whatever GROQ_API_KEY or
+    OPENAI_API_KEY it could see, an ambient one exported for a different tool
+    included, and upload the audio. So an unpinned lookup consults only
+    moviola's own config file and the working directory's `.env`. A pin, from
+    either source, is consent and restores the full lookup.
+
+    NON-GOALS, because an unstated limit reads as a claim of coverage:
+      - It cannot tell a key exported FOR moviola from one exported for another
+        tool; both are just os.environ. Someone who deliberately exports one now
+        has to pin MOVIOLA_WHISPER, and the no-backend hint tells them so.
+      - It treats the working directory's `.env` as deliberate, as upstream
+        does, though a project `.env` may belong to something else entirely.
+        Narrowing that is a separate decision from this one.
+      - It does not stop a pinned upload, and is not meant to. Pinning is the
+        consent, and MOVIOLA_WHISPER is itself readable from the environment so
+        CI can still pin without a config file.
+
+    Returns (None, None) when no backend is usable — `preferred` names an API
+    backend whose key is missing, "local" without faster-whisper, or nothing is
+    pinned and the only key found is an ambient environment one — so the caller
+    reports one hint rather than failing mid-transcode.
     """
     if preferred == LOCAL_BACKEND:
         return (LOCAL_BACKEND, None) if local_available() else (None, None)
@@ -154,7 +198,7 @@ def resolve_backend(preferred: str | None = None) -> tuple[str | None, str | Non
 
     if local_available():
         return LOCAL_BACKEND, None
-    return load_api_key()
+    return load_api_key(allow_env=False)
 
 def extract_audio(
     video_path: str,
@@ -550,6 +594,7 @@ def transcribe_video(
 
     Returns (segments, backend_used). Raises SystemExit on any failure.
     """
+    pinned = backend is not None
     if backend is None:
         backend, api_key = resolve_backend()
     elif backend != LOCAL_BACKEND and api_key is None:
@@ -557,11 +602,21 @@ def transcribe_video(
 
     if not backend:
         setup_py = Path(__file__).resolve().parent / "setup.py"
+        ambient = None if pinned else env_key_backend()
+        if ambient:
+            raise SystemExit(
+                f"No Whisper backend available. {ambient.upper()}_API_KEY is set in this "
+                "environment, but an unpinned run does not upload audio on the strength "
+                "of an environment variable alone — it may have been exported for "
+                f"something else entirely. Set MOVIOLA_WHISPER={ambient} in "
+                f"~/.config/moviola/.env (or pass --whisper {ambient}) to opt in, or "
+                "`pip install \"faster-whisper>=1.0\"` to transcribe on this machine."
+            )
         raise SystemExit(
             "No Whisper backend available. Either install the local backend "
             "(`pip install \"faster-whisper>=1.0\"`) for on-device transcription, or set "
-            "GROQ_API_KEY / OPENAI_API_KEY in the environment or in "
-            f"~/.config/moviola/.env. Run `python3 {setup_py}` to configure."
+            "GROQ_API_KEY / OPENAI_API_KEY in ~/.config/moviola/.env. Run "
+            f"`python3 {setup_py}` to configure."
         )
 
     if backend != LOCAL_BACKEND and not api_key:

@@ -24,6 +24,15 @@ have_key() {
     echo "yes"
     return
   fi
+  have_file_key "$name"
+}
+
+# The config-file half on its own. An UNPINNED run ignores the environment
+# entirely (whisper.resolve_backend passes allow_env=False), so the auto branch
+# below must ask this and not have_key — otherwise the hook announces an API
+# backend that a real run would decline to use.
+have_file_key() {
+  local name="$1"
   if [[ -f "$CONFIG_FILE" ]]; then
     awk -F= -v k="$name" '
       /^[[:space:]]*#/ { next }
@@ -83,6 +92,8 @@ command -v yt-dlp >/dev/null 2>&1 && HAS_YTDLP="yes"
 
 HAS_GROQ="$(have_key GROQ_API_KEY)"
 HAS_OPENAI="$(have_key OPENAI_API_KEY)"
+FILE_GROQ="$(have_file_key GROQ_API_KEY)"
+FILE_OPENAI="$(have_file_key OPENAI_API_KEY)"
 SETUP_COMPLETE="$(read_flag SETUP_COMPLETE)"
 WHISPER_PIN="$(read_flag MOVIOLA_WHISPER)"
 WHISPER_PIN="${WHISPER_PIN:-auto}"
@@ -94,10 +105,13 @@ fi
 
 # Which backend would ACTUALLY run — same precedence as whisper.resolve_backend():
 # an explicit MOVIOLA_WHISPER pin wins outright and is not silently replaced when
-# it turns out to be unusable, and an unpinned machine resolves local-first so a
-# key sitting in the environment for some other tool does not imply an upload.
+# it turns out to be unusable, and an unpinned machine resolves local-first.
 # This used to announce "ready" on the strength of a key alone, ignoring the pin
 # entirely, so a user who pinned local was told the API backend was what ran.
+#
+# The unpinned branch reads FILE_* rather than HAS_*: without a pin, a key is
+# only consent when it is in moviola's own config file, so an ambient
+# environment key must not make this hook say "ready".
 #
 # has_local_whisper spawns python3, so it is called only on the branch that needs
 # it — this hook runs at every SessionStart.
@@ -115,9 +129,9 @@ case "$WHISPER_PIN" in
   *)
     if has_local_whisper; then
       BACKEND="local"
-    elif [[ -n "$HAS_GROQ" ]]; then
+    elif [[ -n "$FILE_GROQ" ]]; then
       BACKEND="groq"
-    elif [[ -n "$HAS_OPENAI" ]]; then
+    elif [[ -n "$FILE_OPENAI" ]]; then
       BACKEND="openai"
     fi
     ;;
@@ -132,6 +146,9 @@ elif [[ -n "$BACKEND" ]]; then
   echo "/moviola: ready — transcription via the $BACKEND API."
 elif [[ "$WHISPER_PIN" != "auto" ]]; then
   echo "/moviola: MOVIOLA_WHISPER=$WHISPER_PIN is pinned but that backend is not usable here, so videos without captions get frames only. Either install it (\`pip install \"faster-whisper>=1.0\"\` for local, or set the matching API key in ~/.config/moviola/.env) or unset the pin."
+elif [[ -n "$HAS_GROQ" || -n "$HAS_OPENAI" ]]; then
+  ambient="groq"; [[ -n "$HAS_OPENAI" && -z "$HAS_GROQ" ]] && ambient="openai"
+  echo "/moviola: ready for videos with native captions. An API key is set in this environment, but an unpinned run will not upload audio on the strength of an environment variable alone — set MOVIOLA_WHISPER=$ambient in ~/.config/moviola/.env to opt in, or \`pip install \"faster-whisper>=1.0\"\` to transcribe on this machine."
 else
   echo "/moviola: ready for videos with native captions. For the rest, either \`pip install \"faster-whisper>=1.0\"\` (runs locally, no key) or add GROQ_API_KEY / OPENAI_API_KEY to ~/.config/moviola/.env."
 fi
