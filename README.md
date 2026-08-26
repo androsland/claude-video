@@ -81,14 +81,14 @@ The **Frames** line reports what was collapsed, e.g. `6 selected from 14 candida
 
 The `--detail` dial trades speed and token cost for visual fidelity. Numbers below are from a real run against a **49:08** YouTube video (1280×720, English auto-captions) — a long, mostly-static screen recording, the case that stresses the caps hardest. Extraction times are local CPU against a pre-downloaded copy; the one-time download was **~37 s** / 76 MB, shared by the three frame modes.
 
-| Mode | Engine | Frames | Cap | Extraction time | Temporal coverage | Est. image tokens |
+| Mode | Engine | Frames | Cap | Extraction time | Temporal coverage | Image tokens |
 |------|--------|--------|-----|-----------------|-------------------|-------------------|
 | `transcript` | none (captions) | 0 | — | **~4.5 s** (one yt-dlp call, no download) | full (text) | 0 (≈26.6k text tokens) |
-| `efficient` | keyframe (`-skip_frame nokey`) | 50 | 50 | **~0.5 s** | 0:00 → 49:04 (full) | **~9.8k** |
-| `balanced` | scene-change | 100 | 100 | **~20.9 s** | 0:00 → 48:38 (full) | **~19.7k** |
-| `token-burner` | scene-change | 116 | uncapped | **~21.0 s** | 0:00 → 48:38 (full) | **~22.8k** |
+| `efficient` | keyframe (`-skip_frame nokey`) | 50 | 50 | **~0.5 s** | 0:00 → 49:04 (full) | **10,450** |
+| `balanced` | scene-change | 100 | 100 | **~20.9 s** | 0:00 → 48:38 (full) | **20,900** |
+| `token-burner` | scene-change | 116 | uncapped | **~21.0 s** | 0:00 → 48:38 (full) | **24,244** |
 
-- **Image tokens** use Anthropic's `(width × height) / 750` — at the default 512px width these 720p frames are 512×288, **≈197 tokens/frame**; `--resolution 1024` roughly 4×s that. The transcript is surfaced in every captioned mode and on long videos is often the larger cost.
+- **Image tokens** use Anthropic's current formula, `ceil(width / 28) × ceil(height / 28)` — at the default 512px width these 720p frames are 512×288, so 19 × 11 = **209 tokens/frame**. (The older `(width × height) / 750` estimate is no longer what the API charges; it undercounts these frames by ~6%.) `--resolution 1024` gives 1024×576 → 37 × 21 = 777, so **3.7×** per frame. The transcript is surfaced in every captioned mode and on long videos is often the larger cost.
 - **One sampling rule across frame modes.** Each detects all candidates across the full range, then even-samples (first + last always kept) down to its cap. The modes differ only in candidate *source* (keyframes vs. scene cuts) and cap, never in how coverage is spread — so the last frame always lands at the end, not partway through.
 - **`efficient` is the speed tier** (~0.5 s) — it only reconstructs keyframes, so it's ~40× faster than the scene modes, which decode every frame to find cuts. It can also return *more* frames than `balanced` on low-motion footage (keyframes outnumber scene cuts); "efficient" means fast extraction, not fewer frames.
 - **`token-burner` only diverges from `balanced` past the cap.** This clip had 116 cuts, so `balanced` sampled 100 and `token-burner` kept all 116. On high-motion video with hundreds of cuts, `token-burner` keeps everything (and trips the >250-frame token warning) while `balanced` thins to 100.
@@ -159,7 +159,7 @@ On the first `/moviola` call, the skill runs `scripts/setup.py --check`. If `ffm
 - **Windows** — prints the `winget` / `pip` commands.
 - **Transcription** — offers `pip install "faster-whisper>=1.0"` (runs locally, no account) and scaffolds `~/.config/moviola/.env` (mode `0600`) with placeholders for `GROQ_API_KEY` and `OPENAI_API_KEY`. Either one clears the check.
 
-After setup, preflight is silent and `/moviola` just works. The check is a sub-100ms lookup, so it doesn't slow you down on subsequent runs.
+After setup, preflight is silent and `/moviola` just works. The check costs about 50 ms without faster-whisper installed and about 250–300 ms with it — it imports the package rather than just looking for it, so a broken install reads as absent here instead of failing mid-run.
 
 ## Transcription backends
 

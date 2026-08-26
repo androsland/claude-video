@@ -2,14 +2,6 @@
 
 Deferred work and known issues. Anything not done lives here, not in a PR body.
 
-## Documentation accuracy
-
-- **`skills/moviola/SKILL.md:257` overstates image tokens by 3-4x.** It claims "80 frames at 512px wide is roughly 50-80k image tokens". Anthropic's current image token cost is `ceil(width/28) * ceil(height/28)`, so a 512x288 frame is `19 * 11 = 209` tokens and 80 of them is **~17k**; at 4:3 (512x384) it is `19 * 14 = 266` and **~21k**. The "50-80k" figure would only be right under a formula roughly 3x more expensive than the real one, and it makes the skill look far more costly than it is. The neighbouring claim on line 259 — `--resolution 1024` "roughly quadruples" per-frame tokens — does hold: 1024x576 is `37 * 21 = 777`, i.e. 3.7x. (local-whisper branch, 2026-08-26)
-
-- **`README.md:91` cites the deprecated `(width x height) / 750` formula.** It yields ~197 tokens for a 512x288 frame against the correct 209, so the measured table above it (9.8k / 19.7k / 22.8k) is ~6% low — the right values are ~10.5k / ~20.9k / ~24.2k. Small, but the formula itself is the thing to replace, since it drifts further at other aspect ratios. Fix alongside the SKILL.md entry so the two documents don't disagree. (local-whisper branch, 2026-08-26)
-
-- **`skills/moviola/SKILL.md:86` names the model download without the warm-load caveat its siblings carry.** The bullet is the compact `AskUserQuestion` decision-aid text; it now says the model is "downloaded on first use", which is true and no longer implies exactly-once, but unlike `SKILL.md:228` it neither mentions the revision check against `huggingface.co` on later loads nor points at **Security & Permissions**. A reader who meets only this bullet forms no expectation of later network activity. Append a `(see Security & Permissions)` pointer for parity with line 228. Not fixed on the branch by choice: the finding arrived after the review batch that produced it, and re-editing to close an Optional Low would have restarted the review cycle for a parenthetical. (privacy review, 2026-08-26)
-
 ## Untrusted input handling
 
 - **`skills/moviola/scripts/moviola.py:296-299` prints `info['title']` and `info['uploader']` into the report unescaped.** Both come from `yt-dlp` metadata on an arbitrary remote video, and the report is markdown that goes straight into an agent's context. A title containing markdown, a fenced block, or instruction-shaped text is rendered as report structure rather than as data. Wrap both in backticks or strip control/markdown characters before printing. (local-whisper branch, 2026-08-26)
@@ -26,5 +18,8 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Completed
 
+- **Image-token arithmetic corrected in both documents.** `SKILL.md` claimed 80 frames at 512px cost 50-80k tokens; Anthropic charges `ceil(w/28) * ceil(h/28)`, so a 512x288 frame is 209 and 80 of them is ~17k (~21k at 4:3). `README.md`'s measured table used the deprecated `(w*h)/750` and ran ~6% low; it now carries exact products (10,450 / 20,900 / 24,244). The `--resolution 1024` claim was re-derived rather than assumed and restated as 3.7x, not "quadruples". (local-whisper branch, 2026-08-26)
+- **Preflight-cost claim replaced with measured numbers.** `SKILL.md` and `README.md` both said the faster-whisper check was a "<100ms lookup"; measured five runs each way it is ~50 ms without the package and 250-300 ms with it, because the check does a real import. The import is deliberate — a present-but-broken install has to read as absent — so the documents were fixed, not the code. (local-whisper branch, 2026-08-26)
+- **`SKILL.md:86` now carries the warm-load caveat.** The compact decision-aid bullet said only that the model is downloaded on first use; it now names the later revision check and points at **Security & Permissions**, matching line 228. (privacy review, 2026-08-26)
 - **On-device Whisper backend via faster-whisper.** No API key, no audio upload; CUDA with automatic CPU fallback around the full transcription (not just model load, since CTranslate2 resolves CUDA libraries lazily); pip CUDA wheels preloaded so `libcublas` resolves. Backend precedence is local-first when unpinned so audio never leaves the machine by accident. (local-whisper branch, 2026-08-26)
 - **`--start` / `--end` now clip the audio before transcription.** Input-side ffmpeg seeking plus a timestamp shift back into source time, so a focused run transcribes the range instead of the whole video. (local-whisper branch, 2026-08-26)
