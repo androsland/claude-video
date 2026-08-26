@@ -5,8 +5,8 @@
   "author": {
     "name": "Andreas Demetriou"
   },
-  "homepage": "https://github.com/androsland/claude-video",
-  "repository": "https://github.com/androsland/claude-video",
+  "homepage": "https://github.com/androsland/moviola",
+  "repository": "https://github.com/androsland/moviola",
   "license": "MIT",
   "keywords": ["video", "watch", "moviola", "youtube", "vimeo", "tiktok", "transcription", "whisper", "faster-whisper", "local", "offline", "yt-dlp", "ffmpeg", "multimodal", "frames"]
 }

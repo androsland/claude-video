@@ -5,8 +5,8 @@
   "author": {
     "name": "Andreas Demetriou"
   },
-  "homepage": "https://github.com/androsland/claude-video",
-  "repository": "https://github.com/androsland/claude-video",
+  "homepage": "https://github.com/androsland/moviola",
+  "repository": "https://github.com/androsland/moviola",
   "license": "MIT",
   "keywords": [
     "video",
@@ -36,7 +36,7 @@
       "Interactive",
       "Read"
     ],
-    "websiteURL": "https://github.com/androsland/claude-video",
+    "websiteURL": "https://github.com/androsland/moviola",
     "defaultPrompt": [
       "/moviola https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?",
       "/moviola ~/Movies/screen-recording.mp4 when does the UI break?",

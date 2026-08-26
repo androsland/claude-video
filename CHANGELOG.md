@@ -22,6 +22,14 @@ All notable changes to `/moviola` are documented here.
 - **The skill and plugin are now `moviola`**, forked from `bradautomates/claude-video`.
   `/moviola` replaces `/watch`; config moves to `~/.config/moviola/.env` and the
   settings prefix is `MOVIOLA_*`.
+- **The repository and the marketplace are now `moviola` too.** The fork is
+  `androsland/moviola`, and the marketplace both manifests declare is `moviola`
+  rather than `claude-video`. Two things follow for anyone who installed the
+  earlier name: the install key is now `moviola@moviola`, and the plugin cache
+  directory moves from `~/.claude/plugins/cache/claude-video/moviola/` to
+  `~/.claude/plugins/cache/moviola/moviola/` — re-add the marketplace rather
+  than expecting the old cache to be found. GitHub redirects the old repository
+  URL, so existing clones keep fetching.
 
 ### Security
 

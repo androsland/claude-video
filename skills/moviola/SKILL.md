@@ -4,8 +4,8 @@ version: "0.3.0"
 description: Watch a video (URL or local path). Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls the transcript from captions (or a Whisper fallback that runs locally or via API), and hands the result to Claude so it can answer questions about what's in the video.
 argument-hint: "<video-url-or-path> [question]"
 allowed-tools: Bash, Read, AskUserQuestion
-homepage: https://github.com/androsland/claude-video
-repository: https://github.com/androsland/claude-video
+homepage: https://github.com/androsland/moviola
+repository: https://github.com/androsland/moviola
 author: Andreas Demetriou
 license: MIT
 user-invocable: true
@@ -20,9 +20,9 @@ You don't have a video input; this skill gives you one. A Python script gets cap
 Every `python3 ...` command below runs a bundled script under `SKILL_DIR/scripts/`. Set `SKILL_DIR` to the **absolute path of the directory containing THIS SKILL.md you just Read** — your harness told you that path in the Read result. The scripts are always a direct sibling of this file (`SKILL_DIR/scripts/moviola.py`), in every install layout:
 
 ```
-Read ~/.claude/plugins/cache/claude-video/moviola/<ver>/skills/moviola/SKILL.md → SKILL_DIR=…/skills/moviola
-Read ~/.codex/skills/moviola/SKILL.md                                          → SKILL_DIR=~/.codex/skills/moviola
-Read ~/.agents/skills/moviola/SKILL.md                                         → SKILL_DIR=~/.agents/skills/moviola
+Read ~/.claude/plugins/cache/moviola/moviola/<ver>/skills/moviola/SKILL.md → SKILL_DIR=…/skills/moviola
+Read ~/.codex/skills/moviola/SKILL.md                                      → SKILL_DIR=~/.codex/skills/moviola
+Read ~/.agents/skills/moviola/SKILL.md                                     → SKILL_DIR=~/.agents/skills/moviola
 ```
 
 Substitute that literal path for `${SKILL_DIR}` in every command. This works on every harness (Claude Code, Codex, Cursor, Gemini CLI, …) without relying on any harness-specific environment variable. Guard once at the start of a run:

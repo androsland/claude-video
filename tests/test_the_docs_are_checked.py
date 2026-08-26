@@ -34,6 +34,13 @@ NON-GOALS, so a green run is not read as more than it is:
     are true.
   * The CHANGELOG count is checked against COLLECTION. It says nothing about
     whether those tests assert anything worth asserting.
+  * The self-reference test proves every URL names the SAME repository the
+    manifest names. It cannot tell whether that repository exists, is reachable,
+    or is the one that was meant: a rename to a typo'd name passes cleanly so
+    long as every file agrees on the typo.
+  * It only sees references written with the owner prefix. A bare relative link,
+    a shortened URL, or a reference under a different owner is invisible to it,
+    and a rename that leaves one of those behind still half-lands.
 """
 from __future__ import annotations
 
@@ -162,6 +169,77 @@ class TestNoUrlStillPointsAtTheRepositoryThisWasForkedFrom:
         text = README.read_text(encoding="utf-8")
         assert "youtube.com/@bradbonanno" in text
         assert "solarisautomation.io" in text
+
+
+
+class TestEverySelfReferenceNamesTheSameRepository:
+    """A rename is a claim made in twenty places, and it half-lands by default.
+
+    Renaming `claude-video` to `moviola` had to touch nine files: two plugin
+    manifests, two marketplace manifests, the skill frontmatter, the skill's
+    plugin-cache path, the README's install commands and clone path, AGENTS.md,
+    and `dev-sync.sh`'s plugin key. Nothing checked any of them against anything,
+    so a miss anywhere reads as a working install command and fails only in a
+    stranger's terminal.
+
+    The manifest's `repository` field is the one that has to be right — it is
+    what a package registry reads — so it is the referent here and everything
+    else is compared to it.
+    """
+
+    @staticmethod
+    def _slug() -> tuple[str, str]:
+        """`(owner, name)` from the manifest's repository URL."""
+        url = json.loads(MANIFESTS[0].read_text(encoding="utf-8"))["repository"]
+        owner, _, name = url.rstrip("/").removesuffix(".git").rpartition("/")
+        return owner.rsplit("/", 1)[-1], name
+
+    def test_every_reference_under_this_owner_names_the_same_repository(self) -> None:
+        owner, name = self._slug()
+        pattern = re.compile(re.escape(owner) + r"(?:/|%2F)([A-Za-z0-9._-]+)")
+        offenders = []
+        for path in _tracked_text_files():
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                for match in pattern.finditer(line):
+                    got = match.group(1).removesuffix(".git")
+                    if got != name:
+                        offenders.append(f"{path.relative_to(REPO)}:{number} -> {got}")
+        assert offenders == [], f"expected {name!r}: {offenders}"
+
+    def test_both_marketplaces_are_named_for_the_repository(self) -> None:
+        # The marketplace name is not cosmetic: it is the `@` half of the
+        # install key AND the directory the plugin is cached into
+        # (~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/), so a
+        # stale one breaks a documented path as well as a command.
+        _, name = self._slug()
+        for rel in (".claude-plugin/marketplace.json", ".agents/plugins/marketplace.json"):
+            data = json.loads((REPO / rel).read_text(encoding="utf-8"))
+            assert data["name"] == name, rel
+
+    def test_every_install_key_matches_the_plugin_and_the_marketplace(self) -> None:
+        plugin = json.loads(MANIFESTS[0].read_text(encoding="utf-8"))["name"]
+        marketplace = json.loads(
+            (REPO / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
+        )["name"]
+        pattern = re.compile(re.escape(plugin) + r"@([A-Za-z0-9._-]+)")
+        offenders = []
+        for path in _tracked_text_files():
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                for match in pattern.finditer(line):
+                    if match.group(1) != marketplace:
+                        offenders.append(f"{path.relative_to(REPO)}:{number}")
+        assert offenders == [], f"expected {plugin}@{marketplace}: {offenders}"
+
+    def test_the_cache_path_the_skill_documents_is_the_one_the_names_produce(self) -> None:
+        # SKILL.md tells the agent where to find itself when it was installed as
+        # a plugin. That path is assembled from two names this test already
+        # pins, and it is the one reference a reader cannot verify by clicking.
+        plugin = json.loads(MANIFESTS[0].read_text(encoding="utf-8"))["name"]
+        marketplace = json.loads(
+            (REPO / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
+        )["name"]
+        expected = f"plugins/cache/{marketplace}/{plugin}/"
+        assert expected in SKILL_MD.read_text(encoding="utf-8")
 
 
 class TestTheReadmeDocumentsTheFlagsThatExist:

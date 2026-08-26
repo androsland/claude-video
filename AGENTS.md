@@ -26,8 +26,8 @@ Agent Skills package that gives an agent a video input. Installable across Claud
 
 | Surface | Install |
 |---------|---------|
-| Claude Code | `/plugin marketplace add androsland/claude-video` then `/plugin install moviola@claude-video` |
-| Codex / Cursor / Copilot / +50 | `npx skills add androsland/claude-video -g` |
+| Claude Code | `/plugin marketplace add androsland/moviola` then `/plugin install moviola@moviola` |
+| Codex / Cursor / Copilot / +50 | `npx skills add androsland/moviola -g` |
 | claude.ai (web) | upload `dist/moviola.skill` (built by `skills/moviola/scripts/build-skill.sh`) |
 
 ## Commands

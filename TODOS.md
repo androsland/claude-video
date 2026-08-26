@@ -258,6 +258,16 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   failures` already warns about. A typo'd backend name should say "not a backend name"
   in both places.
 
+- **The README's download link points at a release the fork has never published.**
+  (rename to moviola, 2026-08-26) `README.md:136` tells a claude.ai user to download
+  `moviola.skill` from the latest release, and `gh release list` on `androsland/moviola`
+  returns nothing — the only tags here (`v0.1.2`, `v0.1.3`, `v0.2.0`) are inherited from
+  upstream and predate the fork. The instruction has been dead since the fork, the
+  rename did not cause it, and no test in `test_the_docs_are_checked.py` can see it: the
+  suite checks that the docs agree with the code, and a release is neither. Either cut a
+  `v0.3.0` release with the built `.skill` asset, or say plainly that the web path is not
+  available yet.
+
 ## Housekeeping
 
 - **This file has crossed the ~50KB archive threshold and the split is currently a

@@ -1,5 +1,5 @@
 {
-  "name": "claude-video",
+  "name": "moviola",
   "metadata": {
     "description": "Give Claude a video input. /moviola downloads, extracts frames, transcribes on-device, and hands it all to Claude."
   },
@@ -15,7 +15,7 @@
       },
       "source": "./",
       "category": "productivity",
-      "homepage": "https://github.com/androsland/claude-video"
+      "homepage": "https://github.com/androsland/moviola"
     }
   ]
 }
