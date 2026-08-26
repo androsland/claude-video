@@ -22,6 +22,20 @@ from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from whisper import LOCAL_BACKEND, resolve_backend, transcribe_video  # noqa: E402
 
 
+def resolve_whisper_choice(flag: str | None, configured: str) -> str | None:
+    """Which backend the user pinned, or None for "let resolve_backend decide".
+
+    --whisper wins over MOVIOLA_WHISPER, and "auto" on either side means no pin.
+    `auto` used to be rejected by argparse, which left no way to undo a
+    MOVIOLA_WHISPER=groq pin for a single run short of editing the config file or
+    clearing the variable — so the flag that exists to override the config could
+    override it in every direction except back to normal.
+    """
+    if flag:
+        return None if flag == "auto" else flag
+    return configured if configured and configured != "auto" else None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="moviola",
@@ -56,10 +70,11 @@ def main() -> int:
     )
     ap.add_argument(
         "--whisper",
-        choices=["local", "groq", "openai"],
+        choices=["auto", "local", "groq", "openai"],
         default=None,
         help="Force a specific Whisper backend. 'local' runs faster-whisper on "
-             "this machine and needs no API key. Default: local when "
+             "this machine and needs no API key. 'auto' is the default and is "
+             "also the way to undo a MOVIOLA_WHISPER pin for one run: local when "
              "faster-whisper is importable, else an API key.",
     )
     ap.add_argument(
@@ -72,14 +87,13 @@ def main() -> int:
 
     config = get_config()
     detail = args.detail or str(config["detail"])
-    # --whisper wins over MOVIOLA_WHISPER; "auto" means "let resolve_backend decide".
-    configured_whisper = str(config["whisper"])
-    whisper_choice = args.whisper or (configured_whisper if configured_whisper != "auto" else None)
+    whisper_choice = resolve_whisper_choice(args.whisper, str(config["whisper"]))
     whisper_options = {
         "model": config["whisper_model"],
         "device": config["whisper_device"],
         "compute": config["whisper_compute"],
         "language": config["whisper_language"],
+        "offline": config["whisper_offline"],
     }
     configured_cap = frame_cap(detail)
     if args.max_frames is not None:

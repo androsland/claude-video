@@ -46,12 +46,28 @@ CPU_COMPUTE = "int8"
 DEVICES = frozenset({"auto", "cpu", "cuda"})
 
 
+# Why the failed import is kept: "faster-whisper is not installed" is only one of
+# the reasons this returns False. A half-installed CTranslate2, an ABI mismatch
+# against numpy, or an OSError from a missing libstdc++ all land here too, and
+# telling that user to `pip install faster-whisper` sends them to reinstall a
+# package that is already there. The message is reported verbatim, never parsed.
+_IMPORT_ERROR = ""
+
+
+def import_error() -> str:
+    """Why the last is_available() said no, as "TypeName: message". "" if it said yes."""
+    return _IMPORT_ERROR
+
+
 def is_available() -> bool:
     """True if faster-whisper is importable (i.e. the user opted into local)."""
+    global _IMPORT_ERROR
     try:
         import faster_whisper  # noqa: F401
-    except Exception:
+    except Exception as exc:
+        _IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
         return False
+    _IMPORT_ERROR = ""
     return True
 
 
@@ -61,6 +77,103 @@ def _first_set(*candidates: str | None) -> str:
         if value and value.strip():
             return value.strip().lower()
     return ""
+
+
+def _physical_cores() -> int:
+    """Physical (not logical) cores usable by this process. 0 when unknown.
+
+    0 is a real answer, not a failure code: it is what :func:`_load_model` passes
+    to leave CTranslate2 on its own default, so a platform this cannot read stays
+    exactly as it was rather than getting a guess.
+
+    Measured on a 6-core/12-thread Ryzen 4800H, `small`/int8/CPU over 120 s of
+    audio, three rounds: 6 threads 9.5-9.7 s, 4 threads (CTranslate2's default)
+    11.2-12.4 s, 8 threads 11.6-12.1 s, 12 threads 11.8-12.0 s. Physical cores
+    win and oversubscribing past them is worse than under-using them, which is
+    why this counts cores rather than reaching for os.cpu_count().
+
+    Deliberately NOT handled, because nothing here can see them: a cgroup CPU
+    quota (a container limited to 1 CPU on a 64-core host still reads 64 here),
+    and any platform without /proc or sysctl — Windows returns 0 and keeps the
+    library default.
+    """
+    # Affinity first where it exists: it is the one limit that is visible, and a
+    # taskset-pinned process must not be told it has the whole machine.
+    try:
+        allowed = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        allowed = os.cpu_count() or 0
+
+    physical = 0
+    try:
+        if sys.platform == "darwin":
+            import subprocess
+
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.physicalcpu"],
+                capture_output=True, text=True, timeout=5,
+            )
+            physical = int(out.stdout.strip() or 0)
+        else:
+            pairs = set()
+            physical_id = core_id = None
+            for line in Path("/proc/cpuinfo").read_text().splitlines():
+                key, _, value = line.partition(":")
+                key = key.strip()
+                if key == "physical id":
+                    physical_id = value.strip()
+                elif key == "core id":
+                    core_id = value.strip()
+                elif not key:
+                    if core_id is not None:
+                        pairs.add((physical_id, core_id))
+                    physical_id = core_id = None
+            if core_id is not None:
+                pairs.add((physical_id, core_id))
+            physical = len(pairs)
+    except Exception:
+        return 0
+
+    if physical <= 0:
+        return 0
+    return min(physical, allowed) if allowed else physical
+
+
+def cpu_threads() -> int:
+    """Threads for CPU inference. 0 means "leave CTranslate2's default alone".
+
+    MOVIOLA_WHISPER_CPU_THREADS overrides everything. A pre-set OMP_NUM_THREADS
+    is left alone too: CTranslate2 honours it only when cpu_threads is 0, so
+    passing a number here would silently override a setting the user made on
+    purpose (or that a job scheduler made on their behalf).
+    """
+    pinned = _first_set(os.environ.get("MOVIOLA_WHISPER_CPU_THREADS"))
+    if pinned:
+        try:
+            return max(0, int(pinned))
+        except ValueError:
+            raise SystemExit(
+                f"MOVIOLA_WHISPER_CPU_THREADS must be an integer, got {pinned!r}."
+            )
+    if _first_set(os.environ.get("OMP_NUM_THREADS")):
+        return 0
+    return _physical_cores()
+
+
+def offline() -> bool:
+    """True if the model must load from cache without contacting huggingface.co.
+
+    MOVIOLA_WHISPER_OFFLINE exists alongside huggingface_hub's own HF_HUB_OFFLINE
+    because the plugin's config file is not the process environment: config.py
+    reads ~/.config/moviola/.env for MOVIOLA_* keys only and exports nothing, so
+    HF_HUB_OFFLINE written there would be read by no one. Either switch works;
+    this is the one that works from the file the setup flow actually scaffolds.
+    """
+    for name in ("MOVIOLA_WHISPER_OFFLINE", "HF_HUB_OFFLINE"):
+        value = _first_set(os.environ.get(name))
+        if value and value not in ("0", "false", "no", "off"):
+            return True
+    return False
 
 
 def resolve_runtime(
@@ -121,7 +234,28 @@ def resolve_runtime(
         if GPU_COMPUTE_FALLBACK in supported:
             return resolved_device, GPU_COMPUTE_FALLBACK
         return resolved_device, "float32"
-    return resolved_device, CPU_COMPUTE
+
+    # The CPU side used to hand back "int8" unconditionally while the CUDA side
+    # above probed. That asymmetry has no fallback behind it: the retry list in
+    # transcribe_local only appends a CPU attempt when the *first* attempt was
+    # CUDA, so a CPU that cannot do int8 fails the load and stops. Probe here
+    # too, and keep int8 as the answer whenever the probe cannot run — that is
+    # the previous behaviour, so a missing ctranslate2 changes nothing.
+    return resolved_device, _best_cpu_compute()
+
+
+def _best_cpu_compute() -> str:
+    """First of int8 / int8_float32 / float32 this CPU supports. int8 if unknown."""
+    try:
+        import ctranslate2
+
+        supported = set(ctranslate2.get_supported_compute_types("cpu"))
+    except Exception:
+        return CPU_COMPUTE
+    for candidate in (CPU_COMPUTE, "int8_float32", "float32"):
+        if candidate in supported:
+            return candidate
+    return CPU_COMPUTE
 
 
 def _preload_cuda_libs() -> int:
@@ -137,6 +271,19 @@ def _preload_cuda_libs() -> int:
     Discovery is by glob, never by hardcoded soname, so this keeps working across
     CUDA major versions. It is best-effort: a system-wide CUDA install needs none
     of it, and every failure is ignored in favour of the CPU retry.
+
+    Deliberately NOT narrowed to an allowlist of libraries CTranslate2 "obviously"
+    needs. The tempting cut is nvrtc — 227 MB of JIT compiler for an engine that
+    ships precompiled kernels — but cuDNN's runtime-compiled engine path loads
+    nvrtc itself, so dropping it trades 227 MB for a GPU that silently demotes to
+    CPU on some models. Breadth costs 0.125 s and ~295 MB of demand-paged RSS
+    here (17 libraries, 2.23 GB on disk); that is the price of not guessing.
+
+    NOT supported on Windows, and not silently: the pip wheels put DLLs under
+    nvidia/*/bin rather than */lib, and Windows resolves them through
+    os.add_dll_directory() rather than RTLD_GLOBAL, so the POSIX mechanism below
+    is not portable by adding a pattern. It finds nothing there and the CPU path
+    is used — correct, just slower. See TODOS.md.
     """
     bases: list[str] = []
     # Both are guarded, not just the second one: getsitepackages() is absent from
@@ -153,6 +300,11 @@ def _preload_cuda_libs() -> int:
     libs = []
     for base in bases:
         libs.extend(glob.glob(os.path.join(base, "nvidia", "*", "lib", "*.so*")))
+    # The ".alt" builds are a second copy of a library the glob already found
+    # (libnvrtc.alt.so.12 beside libnvrtc.so.12 — 113 MB of the total). Loading
+    # both RTLD_GLOBAL puts two definitions of the same symbols in one namespace
+    # and glob order picks the winner, which is a coin flip nobody chose.
+    libs = [lib for lib in libs if ".alt." not in os.path.basename(lib)]
     if not libs:
         return 0
 
@@ -175,10 +327,29 @@ def _preload_cuda_libs() -> int:
     return len(loaded)
 
 
-def _load_model(model: str, device: str, compute_type: str):
+def _load_model(model: str, device: str, compute_type: str, threads: int, local_only: bool):
+    """Build the WhisperModel. Two arguments here that faster-whisper defaults badly.
+
+    cpu_threads: its default of 0 means "let CTranslate2 decide", and CTranslate2
+    decides 4 regardless of the machine — measurably the wrong number on anything
+    with more than four cores (see :func:`_physical_cores`). Passing 0 through is
+    still the fallback when the core count cannot be read.
+
+    local_files_only: its default of False means every load calls
+    snapshot_download(), which contacts huggingface.co for a revision check even
+    when the weights have been cached for months. That is the only network access
+    this backend makes, and a fork whose premise is "the audio never leaves the
+    machine" should let a user close it — see :func:`offline`.
+    """
     from faster_whisper import WhisperModel
 
-    return WhisperModel(model, device=device, compute_type=compute_type)
+    return WhisperModel(
+        model,
+        device=device,
+        compute_type=compute_type,
+        cpu_threads=threads,
+        local_files_only=local_only,
+    )
 
 
 def _looks_like_vad_problem(exc: Exception) -> bool:
@@ -253,21 +424,35 @@ def transcribe_local(
     device: str | None = None,
     compute_type: str | None = None,
     language: str | None = None,
+    offline_mode: bool | None = None,
 ) -> list[dict]:
     """Transcribe `audio_path` on-device and return {start, end, text} segments.
 
-    `language` of None lets Whisper auto-detect. Raises SystemExit on failure so
-    the caller's existing `except SystemExit` fallback path keeps working.
+    `language` of None lets Whisper auto-detect. `offline_mode` of None reads
+    :func:`offline`, so the environment answers when the caller has no opinion.
+    Raises SystemExit on failure so the caller's existing `except SystemExit`
+    fallback path keeps working.
     """
     if not is_available():
         raise SystemExit(
-            "faster-whisper is not installed. Install the local backend with:\n"
+            "faster-whisper could not be imported "
+            f"({import_error() or 'no error reported'}). Install the local backend with:\n"
             "  pip install \"faster-whisper>=1.0\"\n"
-            "…or set GROQ_API_KEY / OPENAI_API_KEY to use an API backend instead."
+            "…or set GROQ_API_KEY / OPENAI_API_KEY to use an API backend instead.\n"
+            "If it is already installed, the message above is the real failure — a "
+            "broken CTranslate2 or a numpy ABI mismatch lands here too, and "
+            "reinstalling faster-whisper will not fix either."
         )
 
     model_name = model or os.environ.get("MOVIOLA_WHISPER_MODEL") or DEFAULT_MODEL
     resolved_device, resolved_compute = resolve_runtime(device, compute_type)
+    local_only = offline() if offline_mode is None else bool(offline_mode)
+    if local_only:
+        print(
+            "[moviola] offline: loading the model from cache only, no revision "
+            "check against huggingface.co",
+            file=sys.stderr,
+        )
 
     # A visible CUDA device is not a working one. CTranslate2 resolves cuBLAS and
     # cuDNN lazily, so a machine can enumerate a GPU, construct the model without
@@ -292,13 +477,29 @@ def transcribe_local(
             # load — otherwise it escapes as a non-SystemExit and skips the CPU
             # fallback that exists precisely for a broken CUDA install.
             if attempt_device == "cuda":
-                _preload_cuda_libs()
+                # The count was computed and discarded before. It is the fastest
+                # way to tell "no pip CUDA wheels here, the system install is
+                # doing the work" from "the wheels are here and still did not
+                # help", which are the two shapes behind a surprise CPU fallback.
+                count = _preload_cuda_libs()
+                print(
+                    f"[moviola] preloaded {count} pip CUDA librar"
+                    f"{'y' if count == 1 else 'ies'}"
+                    + ("" if count else " (none found — relying on a system CUDA install)"),
+                    file=sys.stderr,
+                )
             print(
                 f"[moviola] loading local whisper model '{model_name}' "
                 f"({attempt_device}/{attempt_compute})…",
                 file=sys.stderr,
             )
-            loaded = _load_model(model_name, attempt_device, attempt_compute)
+            loaded = _load_model(
+                model_name,
+                attempt_device,
+                attempt_compute,
+                cpu_threads() if attempt_device == "cpu" else 0,
+                local_only,
+            )
             return _run(loaded, audio_path, language)
         except Exception as exc:
             # Keep the message, not the exception object. Binding `exc` to a name
