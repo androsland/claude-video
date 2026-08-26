@@ -9,7 +9,6 @@ on whether the developer's machine happens to have faster-whisper installed.
 """
 from __future__ import annotations
 
-import os
 import stat
 import subprocess
 from pathlib import Path
@@ -54,8 +53,11 @@ def _run(
         "PATH": f"{binpath}:/usr/bin:/bin",
         "HOME": str(home),
     }
-    for leaked in ("GROQ_API_KEY", "OPENAI_API_KEY", "SETUP_COMPLETE", "MOVIOLA_WHISPER"):
-        os.environ.pop(leaked, None)
+    # No environment scrubbing happens here, deliberately. `env=env` below hands
+    # the child a closed dict, so an ambient key in the developer's shell cannot
+    # reach the hook in the first place. This used to pop four names out of
+    # os.environ with no restore, which did nothing for the child and quietly
+    # deleted them for every test that ran after it in the same process.
     if extra_env:
         env.update(extra_env)
     return subprocess.run(

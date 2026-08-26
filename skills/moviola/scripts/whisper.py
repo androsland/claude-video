@@ -367,6 +367,31 @@ def audio_duration(audio_path: Path) -> float:
     return float(fmt.get("duration") or 0.0)
 
 
+def cleanup_chunks(work_dir: Path) -> None:
+    """Delete the chunk files split_audio writes. A no-op when there are none.
+
+    Chunking only happens on audio over the upload cap, so what gets left behind
+    is proportional to the LONGEST videos — and with a reused `--out-dir` it
+    accumulates across runs instead of dying with a temp directory.
+
+    NON-GOALS. It removes `chunk_*.mp3` and nothing else: the extracted audio and
+    the work directory itself outlive the run by design and are recorded in
+    TODOS.md rather than fixed here. It does not remove the directory, because
+    another run may be using it. And it cannot tell a chunk of this audio from
+    one another process is writing into the same directory — the same
+    shared-work-directory limit the download path documents.
+    """
+    try:
+        stale = list(work_dir.glob("chunk_*.mp3"))
+    except OSError:
+        return
+    for path in stale:
+        try:
+            path.unlink()
+        except OSError:
+            continue
+
+
 def split_audio(
     full_audio: Path,
     work_dir: Path,
@@ -381,6 +406,11 @@ def split_audio(
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
     work_dir.mkdir(parents=True, exist_ok=True)
+    # A previous run's chunks may still be here — `--out-dir` is documented and
+    # the skill tells the agent to reuse it — and this run may produce fewer of
+    # them. Whatever is left over carries a name this run could have written and
+    # nothing downstream can tell it apart from a chunk of this audio.
+    cleanup_chunks(work_dir)
     chunks: list[tuple[Path, float]] = []
     for index, (offset, duration) in enumerate(plan):
         out_path = work_dir / f"chunk_{index:03d}.mp3"
@@ -486,6 +516,13 @@ MAX_ATTEMPTS = 4       # initial + 3 retries
 MAX_429_RETRIES = 2
 RETRY_BASE_DELAY = 2.0
 
+# The longest this program will wait between attempts, whatever it is told. A
+# `Retry-After` value went straight to time.sleep, so a provider having a bad
+# day — or a proxy, or anyone who can answer the request — could park a run for
+# as long as it liked with nothing on stderr after the one retry notice.
+# `Retry-After: 86400` is a real answer that real services give.
+MAX_RETRY_DELAY = 60.0
+
 
 def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> dict:
     fields = {
@@ -525,9 +562,11 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
                 rate_limit_hits += 1
                 if rate_limit_hits >= MAX_429_RETRIES:
                     raise SystemExit(f"Whisper request failed: {exc}{detail}")
-                delay = _retry_after(exc) or RETRY_BASE_DELAY * (2 ** attempt) + 1
+                delay = _bounded_delay(
+                    _retry_after(exc) or RETRY_BASE_DELAY * (2 ** attempt) + 1
+                )
             else:
-                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                delay = _bounded_delay(RETRY_BASE_DELAY * (2 ** attempt))
 
             if attempt < MAX_ATTEMPTS - 1:
                 print(
@@ -540,7 +579,7 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
         except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError) as exc:
             last_exc, last_detail = exc, ""
             if attempt < MAX_ATTEMPTS - 1:
-                delay = RETRY_BASE_DELAY * (attempt + 1)
+                delay = _bounded_delay(RETRY_BASE_DELAY * (attempt + 1))
                 print(
                     f"[moviola] whisper network error ({type(exc).__name__}: {exc}) — "
                     f"retrying in {delay:.1f}s (attempt {attempt + 2}/{MAX_ATTEMPTS})",
@@ -572,14 +611,40 @@ def _read_error_body(exc: urllib.error.HTTPError) -> str:
         return ""
 
 
+def _bounded_delay(seconds: float) -> float:
+    """A delay this program is willing to sleep for.
+
+    Two shapes reach time.sleep and neither is survivable: a negative number
+    raises ValueError from inside the handler for the error being retried, and
+    NaN does the same — and `float("nan")` is a perfectly ordinary result of
+    parsing a header. Everything else is capped at MAX_RETRY_DELAY.
+
+    NON-GOAL: capping the wait does not make the request succeed. A rate-limited
+    run still gives up at MAX_429_RETRIES; it just gives up promptly.
+    """
+    if seconds != seconds or seconds < 0:  # NaN, or a server counting backwards
+        return 0.0
+    return min(seconds, MAX_RETRY_DELAY)
+
+
 def _retry_after(exc: urllib.error.HTTPError) -> float | None:
+    """The server's requested wait, clamped — or None to use our own ladder.
+
+    NON-GOAL: RFC 9110 also allows an HTTP-date here. `float()` rejects one, so
+    a date-form header falls back to the exponential ladder rather than being
+    honoured. That is a deliberate under-read: the ladder is bounded and correct,
+    and a date needs a clock comparison this function has no business doing.
+    """
     header = exc.headers.get("Retry-After") if getattr(exc, "headers", None) else None
     if not header:
         return None
     try:
-        return float(header)
+        seconds = float(header)
     except ValueError:
         return None
+    if seconds != seconds or seconds <= 0:
+        return None
+    return _bounded_delay(seconds)
 
 
 def shift_segments(segments: list[dict], offset_seconds: float) -> list[dict]:
@@ -815,8 +880,15 @@ def transcribe_video(
             f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload cap…",
             file=sys.stderr,
         )
-        chunks = split_audio(audio_path, audio_out.parent / "chunks", plan)
-        segments = transcribe_chunks(chunks, transcribe_one)
+        chunk_dir = audio_out.parent / "chunks"
+        try:
+            chunks = split_audio(audio_path, chunk_dir, plan)
+            segments = transcribe_chunks(chunks, transcribe_one)
+        finally:
+            # Especially on the failing path: chunking only happens on the
+            # largest audio, so a run that dies mid-transcript is the one that
+            # leaves the most bytes behind.
+            cleanup_chunks(chunk_dir)
 
     if not segments:
         raise SystemExit("Whisper returned no transcript segments")

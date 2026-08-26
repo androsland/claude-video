@@ -108,7 +108,107 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   of the silence it replaces was a paid API upload for a transcript already on disk. Worth
   revisiting only if the line turns out to be common enough to train people to ignore it.
 
+## Bounded failures
+
+- **`Retry-After` is honoured only in its seconds form.** (bounded-failures review, 2026-08-26)
+  RFC 9110 also allows an HTTP-date, and `float()` rejects one, so a server answering
+  `Retry-After: Wed, 26 Aug 2026 12:00:00 GMT` gets the exponential ladder instead of the
+  wait it asked for. That is a deliberate under-read — the ladder is bounded and correct,
+  and honouring a date needs a clock comparison with its own failure modes (skew, a server
+  that sends a date in the past) — but it does mean moviola can retry sooner than a
+  provider told it to, which on a strict rate limiter is how a 429 becomes a ban.
+
+- **`MAX_RETRY_DELAY` is a fixed 60 seconds with no way to change it.** (bounded-failures
+  review, 2026-08-26) The number was picked to be longer than any legitimate backoff and
+  far shorter than a parked run; nothing measured it. A user on a provider that genuinely
+  wants a five-minute wait has no setting to give it one, and the only signal that the cap
+  bit is that the retry notice prints a smaller number than the server sent.
+
+- **Chunk cleanup cannot tell whose chunks it is deleting.** (bounded-failures review,
+  2026-08-26) `cleanup_chunks` removes `chunk_*.mp3` from the work directory, and two
+  moviola runs sharing one `--out-dir` will delete each other's in-flight chunks — the same
+  shared-work-directory limit the download path already documents. The real fix is a
+  per-run subdirectory, which is a wider change than this pass; the narrow fix is that a
+  single run now leaks nothing.
+
+- **The extracted audio and the work directory itself still outlive the run.**
+  (bounded-failures review, 2026-08-26) Chunks are cleaned up; `audio.mp3`, the downloaded
+  video, and the frames are not, and with `--out-dir` they accumulate across runs. That is
+  partly by design — SKILL.md tells the agent to Read the frame paths after the script
+  exits, so deleting them would break the report — but nothing ever removes them
+  afterwards, and nothing tells the user how much disk a week of use costs.
+
+- **The parser and the config are proven to AGREE, not to be right.**
+  (bounded-failures review, 2026-08-26) `build_parser()` reads `config.DETAILS` and
+  `config.WHISPER_BACKENDS`, and the tests compare the two. A value that is wrong in the
+  config is now wrong in the flag as well, consistently, and invisibly from here. Nothing
+  checks that every name in `WHISPER_BACKENDS` has a working implementation behind it.
+
+- **`--detail transcript` still prints the whole transcript with no cap.**
+  (bounded-failures review, 2026-08-26) A three-hour video's transcript goes to stdout in
+  one piece and straight into an agent's context. Every other output in the report is
+  bounded — frames by `frame_cap`, uploads by `MAX_UPLOAD_BYTES`, retries by
+  `MAX_RETRY_DELAY` — and this one is not. A cap needs a decision about what to drop
+  (middle, tail, or by speaker turn), which is why it is here rather than fixed.
+
+- **`duration_seconds` raises ValueError on non-numeric metadata.** (bounded-failures
+  review, 2026-08-26) ffprobe's `format.duration` is parsed with a bare `float()`. A
+  container that reports `N/A` — some live captures and malformed remuxes do — takes down
+  the whole run with a ValueError about a string, rather than falling back to "duration
+  unknown" and carrying on with the frames it can extract.
+
+- **The video format fallback has no height cap.** (bounded-failures review, 2026-08-26)
+  `bv*[height<=720]+ba/b[height<=720]/bv+ba/b` ends in two unrestricted selectors, so a
+  video with no 720p-or-below variant downloads at whatever the highest rendition is —
+  4K, on a flag whose entire point is to stay small. It is a fallback that silently
+  inverts the intent of the two selectors before it.
+
 ## Completed
+
+### Four unbounded or dishonest failure modes
+
+(bounded-failures review, 2026-08-26 — `fix/bounded-failures`)
+
+Two failure modes with no ceiling, and two tests that were not testing what they
+appeared to.
+
+- **A server could park the run for as long as it liked.** `_retry_after` returned
+  whatever number the `Retry-After` header held and that value went straight to
+  `time.sleep`. `Retry-After: 86400` is a real answer real services give, and honouring
+  it meant a run that never returned and never said anything more. A negative value was
+  worse than a long one: it reached `time.sleep` and raised ValueError from inside the
+  handler for the error being retried, and so did `nan`, which `float()` parses happily.
+  `MAX_RETRY_DELAY` (60s) now caps every wait, `_bounded_delay` rejects NaN and negatives,
+  and a non-positive `Retry-After` falls back to the ladder rather than being obeyed.
+
+- **Chunk files were written and never deleted.** Chunking only happens on audio over the
+  24 MB upload cap, so the leak was proportional to the LONGEST videos, and with a reused
+  `--out-dir` it accumulated across runs instead of dying with a temp directory.
+  `split_audio` now clears stale `chunk_*.mp3` before writing — a run producing fewer
+  chunks than the last one used to leave the tail of the old set behind, with names
+  indistinguishable from real chunks — and `transcribe_video` cleans up in a `finally`, so
+  the failing path leaks nothing either.
+
+- **The CLI's `choices` duplicated the config's sets.** `--detail` and `--whisper` carried
+  string literals repeating `config.DETAILS` and `config.WHISPER_BACKENDS`, with nothing
+  comparing them: adding a backend to the config left the flag rejecting it, and
+  argparse's error reads as "that backend does not exist" rather than "that flag is
+  stale". `build_parser()` is now a function so a test can hold the two up against each
+  other, and both sets are tuples so `--help` keeps its cost progression.
+
+- **The hook tests damaged the process they ran in.** `_run` popped four variables out of
+  `os.environ` with no monkeypatch and no restore. It was dead code — `subprocess.run(env=env)`
+  hands the child a closed dict, so the child never saw the parent's environment either
+  way — and its only effect was on pytest itself, silently deleting those names for every
+  test that ran afterwards. Deleted, with a test that pins the isolation actually in use.
+
+Also pinned: `_truthy`'s tri-state, which nothing tested. `whisper_offline` is `None`
+when unset, `False` for the documented falsey words, `True` otherwise — and the
+difference between `None` and `False` decides whether `HF_HUB_OFFLINE` gets a say.
+
+28 new tests (511 → 539). Five mutations re-applied and all five now fail: unclamped
+`Retry-After`, `split_audio` not clearing, cleanup skipped on the failing path, hardcoded
+`choices`, and the environment-popping loop restored.
 
 ### Four quiet failures in the download and pairing paths
 
