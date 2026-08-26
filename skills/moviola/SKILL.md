@@ -286,6 +286,6 @@ Under the default `auto`, the backend that runs is `local` when faster-whisper i
 - Does not persist anything outside the working directory, `~/.config/moviola/.env`, and the Hugging Face model cache (`local` backend only) — clean up the working directory when you're done (Step 5)
 - Does not verify that a downloaded Whisper model is what it claims to be beyond what `huggingface_hub` checks — `MOVIOLA_WHISPER_MODEL` accepts an arbitrary repo id, so pointing it at an untrusted repo is a trust decision you are making
 
-**Bundled scripts:** `scripts/moviola.py` (entry point), `scripts/download.py` (yt-dlp wrapper), `scripts/frames.py` (ffmpeg frame extraction), `scripts/transcribe.py` (caption selection + Whisper orchestration), `scripts/whisper.py` (backend selection + Groq / OpenAI clients), `scripts/local_whisper.py` (on-device faster-whisper backend), `scripts/setup.py` (preflight + installer)
+**Bundled scripts:** `scripts/moviola.py` (entry point), `scripts/download.py` (yt-dlp wrapper), `scripts/frames.py` (ffmpeg frame extraction), `scripts/transcribe.py` (caption selection + Whisper orchestration), `scripts/whisper.py` (backend selection + Groq / OpenAI clients), `scripts/local_whisper.py` (on-device faster-whisper backend), `scripts/setup.py` (preflight + installer), `scripts/config.py` (settings + `.env` reader), `scripts/untrusted.py` (fencing for values this program did not write)
 
 Review scripts before first use to verify behavior.

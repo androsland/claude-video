@@ -33,6 +33,43 @@ All notable changes to `/moviola` are documented here.
 
 ### Security
 
+- **Remote text on stderr can no longer forge a line moviola wrote.** stderr goes to the
+  same agent context the report does, and every line moviola writes there is identified
+  only by its `[moviola] ` prefix — so an API error body carrying a line break ended the
+  line it was interpolated into and handed the next one to whoever sent it. A new
+  `scripts/untrusted.py` holds `stderr_line()`, which makes the two structural edits
+  `md_inline` already made (line breaks collapse to spaces, unclosed bidi scopes are
+  closed) and no more; it is not a sanitizer and the value is still reported in full.
+  The error *body* is fenced where it is decoded, so one fence covers all four exits that
+  print it. An HTTP response has a second remote half, though, and it needed its own pass:
+  `str(HTTPError)` is `HTTP Error {code}: {reason}`, and `http.client` decodes the status
+  line latin-1 and strips only its edges — so U+0085 and a bare CR survive into `.reason`
+  and forge a line exactly as a body does. The three exits that interpolate the exception
+  alongside the body are fenced individually, as is the failure line the local backend
+  builds from a huggingface_hub exception. Three surfaces still carry remote text to stderr or stdout
+  unfenced; all three are knowingly not covered and are documented as such: ffmpeg's captured stderr, which is legitimately multi-line and needs
+  a block fence rather than a line fence, and which reaches the agent by two routes
+  rather than one because `moviola.py`'s `except SystemExit` handler re-prints it; yt-dlp's output, which reaches stderr through an
+  inherited file descriptor and never passes through this process at all; and `md_fence`
+  on stdout, which escapes backtick runs correctly but applies no bidi balancing, so an
+  override opened inside a hostile transcript still reorders display past the closing
+  fence. All three are filed in `TODOS.md`.
+
+- **The fence added above had a denial of service inside it, and the gate caught it.**
+  `balance_bidi` matched a closer by scanning the open-scope stack from the top, so a
+  closer that matched NOTHING walked the whole stack and deleted nothing: N openers of one
+  kind followed by N closers of the other cost N squared. Measured, 32,000 characters —
+  nothing for an HTTP response body — took eleven seconds of a synchronous process, and
+  the growth does not stop there. It now keeps one index stack per closer kind, so
+  matching is a pop and the cost is linear in the length of the value. Linear is not
+  bounded, though, so the one call site with no bound of its own got one: the local
+  backend's failure line embeds a `huggingface_hub` exception whose message carries the
+  hub's entire response body, and it is now sliced to the same 400 characters
+  `_read_error_body` uses before it is fenced. `whisper.py`'s `HTTPError` sites were never
+  reachable this way — `http.client` decodes the status line latin-1, and no bidi control
+  is representable below U+0100. The bound is each caller's responsibility at every site,
+  and nothing enforces that, which is filed in `TODOS.md`.
+
 - **An ambient API key is no longer consent to upload audio.** An unpinned run used to
   fall through to whatever `GROQ_API_KEY` or `OPENAI_API_KEY` it could see — including
   one exported for a different tool entirely — and send the audio. It now reads API keys

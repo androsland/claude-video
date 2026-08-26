@@ -28,6 +28,14 @@ import uuid
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+# This module has a __main__ block, so it has to find its siblings when run
+# directly as well as when moviola.py imports it. Same guarded insert setup.py
+# uses.
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from untrusted import stderr_line  # noqa: E402
+
 
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions"
 GROQ_MODEL = "whisper-large-v3"
@@ -551,17 +559,24 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
             with urlopen(request, timeout=300, context=context) as response:
                 payload = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
+            # An HTTP response has two remote halves and both reach stderr from
+            # here. `detail` is the body, fenced once inside _read_error_body.
+            # `str(exc)` is `HTTP Error {code}: {reason}`, and that reason is the
+            # status-line phrase the server chose — http.client decodes it
+            # latin-1 and strips only the edges, so 7 of the 10 terminators in
+            # LINE_BREAKS survive into it. Fencing the body and interpolating
+            # the phrase raw beside it closes one half of one response.
             detail = _read_error_body(exc)
             last_exc, last_detail = exc, detail
 
             # 4xx other than 429 are client errors — no retry will fix them.
             if 400 <= exc.code < 500 and exc.code != 429:
-                raise SystemExit(f"Whisper request failed: {exc}{detail}")
+                raise SystemExit(f"Whisper request failed: {stderr_line(exc)}{detail}")
 
             if exc.code == 429:
                 rate_limit_hits += 1
                 if rate_limit_hits >= MAX_429_RETRIES:
-                    raise SystemExit(f"Whisper request failed: {exc}{detail}")
+                    raise SystemExit(f"Whisper request failed: {stderr_line(exc)}{detail}")
                 delay = _bounded_delay(
                     _retry_after(exc) or RETRY_BASE_DELAY * (2 ** attempt) + 1
                 )
@@ -581,7 +596,10 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
             if attempt < MAX_ATTEMPTS - 1:
                 delay = _bounded_delay(RETRY_BASE_DELAY * (attempt + 1))
                 print(
-                    f"[moviola] whisper network error ({type(exc).__name__}: {exc}) — "
+                    # URLError's str is its reason, which for a TLS failure is
+                    # text the far end chose. The class name beside it is ours.
+                    f"[moviola] whisper network error "
+                    f"({type(exc).__name__}: {stderr_line(exc)}) — "
                     f"retrying in {delay:.1f}s (attempt {attempt + 2}/{MAX_ATTEMPTS})",
                     file=sys.stderr,
                 )
@@ -591,14 +609,37 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
         try:
             return json.loads(payload)
         except json.JSONDecodeError as exc:
-            raise SystemExit(f"Whisper returned non-JSON response: {exc}: {payload[:200]}")
+            # payload is whatever a 200 carried. It is not an error body, so
+            # _read_error_body never sees it and it needs its own fence.
+            raise SystemExit(
+                f"Whisper returned non-JSON response: {exc}: "
+                f"{stderr_line(payload[:200])}"
+            )
 
     raise SystemExit(
-        f"Whisper request failed after {MAX_ATTEMPTS} attempts: {last_exc}{last_detail}"
+        # `last_detail` is fenced by _read_error_body; `last_exc` is the other
+        # remote half of the same response and needs its own fence. It is the
+        # very object fenced in the retry notice above — that notice only prints
+        # while attempts remain, and this exit is the one that always fires.
+        f"Whisper request failed after {MAX_ATTEMPTS} attempts: "
+        f"{stderr_line(last_exc)}{last_detail}"
     )
 
 
 def _read_error_body(exc: urllib.error.HTTPError) -> str:
+    """Up to 400 characters of what the server said, as one line.
+
+    This is the single place an error body is decoded, and every exit that
+    reports one gets it from here: both `Whisper request failed` raises, the
+    after-N-attempts raise, and `transcribe_chunks`, which catches one of those
+    and prints it again. Fencing here covers all four; fencing at the four print
+    sites would have missed whichever one was added next.
+
+    The fence is `stderr_line`, and it goes AFTER the truncation on purpose — a
+    body cut at 400 characters can lose the terminator for a bidi scope opened
+    inside the first 400, and closing what the truncated text opens is exactly
+    what `balance_bidi` is for.
+    """
     try:
         body = exc.read()
     except Exception:
@@ -606,7 +647,7 @@ def _read_error_body(exc: urllib.error.HTTPError) -> str:
     if not body:
         return ""
     try:
-        return f" — {body.decode('utf-8', errors='replace')[:400]}"
+        return f" — {stderr_line(body.decode('utf-8', errors='replace')[:400])}"
     except Exception:
         return ""
 
