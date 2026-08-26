@@ -13,7 +13,9 @@ so it runs several times faster at the same accuracy, has no torch dependency
 laptop CPU. Model weights download on first use to the Hugging Face cache; later loads
 still make a revision check against huggingface.co unless HF_HUB_OFFLINE=1.
 
-Nothing leaves the machine: no network call at transcription time, no key, no upload.
+Your audio never leaves the machine: no key, no upload, and nothing about the
+content of the video is ever sent anywhere. The one thing that does go out is
+the model fetch described above — weights in, never audio out.
 """
 from __future__ import annotations
 

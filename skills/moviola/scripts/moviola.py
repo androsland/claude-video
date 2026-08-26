@@ -399,9 +399,11 @@ def main() -> int:
         setup_py = SCRIPT_DIR / "setup.py"
         print(
             "_No transcript available — proceed with frames only. "
-            "Captions were missing and the Whisper fallback was unavailable "
-            "(no API key set, or `--no-whisper` was used). "
-            f"Run `python3 {setup_py}` to enable Whisper, then re-run._"
+            "Captions were missing and no Whisper backend ran: either "
+            "`--no-whisper` was used, or faster-whisper is not installed and no "
+            "API key is set, or `MOVIOLA_WHISPER` pins a backend that is not "
+            "usable here. "
+            f"Run `python3 {setup_py}` to see which, and to enable Whisper._"
         )
 
     print()

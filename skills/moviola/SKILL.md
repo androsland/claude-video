@@ -63,7 +63,7 @@ On follow-up `/moviola` calls in the same session, use the silent check:
 python3 "${SKILL_DIR}/scripts/setup.py" --check
 ```
 
-This is a <100ms lookup. Exit 0 means /moviola can run — this **includes a user who finished setup with no Whisper backend at all** (that is allowed). On exit 0 the script emits **nothing** — proceed to Step 1 without comment. **Do NOT announce "setup is complete" to the user** — they don't need a status message on every turn. The only acceptable user-visible output from Step 0 is when remediation is required.
+This costs about 50 ms on a machine without faster-whisper and about 250–300 ms with it, because the check does a real import rather than a path lookup — a package that is present but broken has to read as absent here, or the run fails later with no fallback. Exit 0 means /moviola can run — this **includes a user who finished setup with no Whisper backend at all** (that is allowed). On exit 0 the script emits **nothing** — proceed to Step 1 without comment. **Do NOT announce "setup is complete" to the user** — they don't need a status message on every turn. The only acceptable user-visible output from Step 0 is when remediation is required.
 
 On non-zero exit, follow the table:
 
@@ -71,7 +71,7 @@ On non-zero exit, follow the table:
 |------|---------|--------|
 | `2` | Missing binaries (`ffmpeg` / `ffprobe` / `yt-dlp`) | Run installer |
 | `3` | Genuine first run with no Whisper backend | Run installer to scaffold `.env`, then encourage either faster-whisper or a key (the user may decline — proceed with `--no-whisper`) |
-| `4` | Both missing | Run installer, then encourage a key |
+| `4` | Both missing | Run installer, then encourage either faster-whisper or a key |
 
 Exit `3` only fires before the user has completed setup. Once `SETUP_COMPLETE=true` is written, a keyless install returns exit 0 and is never nagged again.
 
@@ -83,7 +83,7 @@ python3 "${SKILL_DIR}/scripts/setup.py"
 
 On macOS with Homebrew, it auto-installs `ffmpeg` and `yt-dlp`. On Linux/Windows, it prints the exact install commands for the user to run. It scaffolds `~/.config/moviola/.env` with commented placeholders and default moviola settings at `0600` perms.
 
-**If no transcription backend is present after install** (`has_transcription: false`): use `AskUserQuestion` to offer the three options — run Whisper locally (`pip install "faster-whisper>=1.0"`; no account, no upload, slower, model downloaded on first use), a Groq key (fast and cheap), or an OpenAI key. For a key, write it into `~/.config/moviola/.env` on the matching `GROQ_API_KEY=` / `OPENAI_API_KEY=` line. If they don't want Whisper at all, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
+**If no transcription backend is present after install** (`has_transcription: false`): use `AskUserQuestion` to offer the three options — run Whisper locally (`pip install "faster-whisper>=1.0"`; no account, no upload, slower, model downloaded on first use and revision-checked on later loads — see **Security & Permissions**), a Groq key (fast and cheap), or an OpenAI key. For a key, write it into `~/.config/moviola/.env` on the matching `GROQ_API_KEY=` / `OPENAI_API_KEY=` line. If they don't want Whisper at all, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
 
 **First-run moviola preference:** after the installer has scaffolded `~/.config/moviola/.env`, use `AskUserQuestion` to ask one question:
 
@@ -101,7 +101,7 @@ MOVIOLA_DETAIL=balanced
 
 Use the user's selected value. If they skip the question, keep the recommended default. Once dependencies, the API-key choice, and this preference are handled, write or update `SETUP_COMPLETE=true` in the same file. Do not ask this preference question again when `SETUP_COMPLETE=true`.
 
-**Structured mode (optional):** `python3 "${SKILL_DIR}/scripts/setup.py" --json` emits `{status, can_proceed, first_run, setup_complete, missing_binaries, whisper_backend, has_api_key, has_local_whisper, has_transcription, config_file, moviola_detail, whisper_setting, platform}` where `status` is one of `ready | needs_install | needs_key | needs_install_and_key`. `status` describes the *ideal* state (a backend is encouraged, so a first run with none reads `needs_key`); `can_proceed` is the operational gate (binaries present AND a backend is available OR setup was already completed). `whisper_backend` names what would actually run — `local` when faster-whisper is installed and no key is set. Branch on `can_proceed`/`first_run` to decide whether to run; use `status` and `has_transcription` to decide what to encourage.
+**Structured mode (optional):** `python3 "${SKILL_DIR}/scripts/setup.py" --json` emits `{status, can_proceed, first_run, setup_complete, missing_binaries, whisper_backend, has_api_key, has_local_whisper, has_transcription, config_file, moviola_detail, whisper_setting, platform}` where `status` is one of `ready | needs_install | needs_key | needs_install_and_key`. `status` describes the *ideal* state (a backend is encouraged, so a first run with none reads `needs_key`); `can_proceed` is the operational gate (binaries present AND a backend is available OR setup was already completed). `whisper_backend` names what would actually run, which is not the same question as `has_transcription`: an explicit `MOVIOLA_WHISPER` pin wins outright, and an unpinned machine resolves local-first, so `local` is reported whenever faster-whisper is importable even if a key is also set. It is `null` when nothing would run — including when a pin names a backend that is not usable here, which is also the one case where `status` is `needs_key` while `has_transcription` is true. Branch on `can_proceed`/`first_run` to decide whether to run; use `status` and `has_transcription` to decide what to encourage.
 
 Within a single session, you can skip Step 0 on follow-up `/moviola` calls — once `--check` returned 0, nothing about the environment changes between turns.
 
@@ -254,9 +254,9 @@ The script gets a timestamped transcript in one of two ways:
 ## Token efficiency
 
 This skill burns tokens primarily on frames. Order of magnitude:
-- 80 frames at 512px wide is roughly 50-80k image tokens depending on aspect ratio.
+- 80 frames at 512px wide is roughly 17k image tokens for 16:9 (512×288) and 21k for 4:3 (512×384). Anthropic charges `ceil(width / 28) × ceil(height / 28)` per image, which is 209 and 266 tokens per frame respectively.
 - The transcript is cheap (a few thousand tokens at most for a 10-minute video).
-- Bumping `--resolution` to 1024 roughly quadruples the image tokens per frame. Only do it when necessary.
+- Bumping `--resolution` to 1024 costs about 3.7× the image tokens per frame (1024×576 → 777). Only do it when necessary.
 
 If you already watched a video this session and the user asks a follow-up, do **not** re-run the script — you already have the frames and transcript in context. Just answer from what you have.
 
