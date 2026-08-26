@@ -30,6 +30,15 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 - **Nothing establishes that the upload notice is ever seen.** `tests/test_upload_is_announced.py` proves the sentence is written to stderr before the first request and in the right order, which is the half that was missing. Whether an agent harness surfaces stderr to the human, buffers it until after the run, or discards it entirely is invisible from inside this repo, and no test here can see it. A notice that is printed and swallowed is not consent. (consent-chain branch, 2026-08-26)
 
+- **The consent this program asks for is the operator's, not the recorded speakers'.**
+  (forgeward privacy review, 2026-08-26) Every consent surface here answers "may this
+  machine send YOUR audio to a third party". A video's audio carries other people's
+  voices, and in some jurisdictions a voiceprint is biometric data with its own basis
+  requirement — which the person running moviola cannot give on their behalf. Nothing
+  in code fixes this; it is a note for whoever decides how the tool is used and, if it
+  is ever used at scale, for counsel. Recorded so a green privacy review is not read as
+  a statement about the speakers.
+
 ## Report as an untrusted document
 
 - **stderr reaches the agent's context and nothing fences it.** (report-injection
@@ -163,6 +172,15 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   4K, on a flag whose entire point is to stay small. It is a fallback that silently
   inverts the intent of the two selectors before it.
 
+- **A pinned API backend never falls back to the other one.** (forgeward ai-output
+  review, 2026-08-26) When `--whisper groq` exhausts its retry ladder the run stops with
+  a named error and the documented remedy is for the user to re-run with
+  `--whisper openai`. That is deliberate — silently spending money at a provider the
+  user did not name is exactly the consent boundary the rest of this work draws — but it
+  means a provider outage costs a whole run rather than a slower one. If it is ever
+  changed, the failover has to announce the second provider before the first byte goes
+  out, the same way `_announce_upload` does today.
+
 ## Documentation as a checked claim
 
 - **The README-to-parser direction is not checked, and cannot be.** (docs-are-checked
@@ -219,11 +237,39 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   the value is not ours. Fencing it is cheap; deciding whether the `rm -rf` instruction
   should exist at all is the larger question and belongs with it.
 
-- **The work directory is created with the default umask.** (docs-are-checked review,
-  2026-08-26) `~/.config/moviola/.env` is written 0600 and checked for it. The work
-  directory holds the extracted audio, the downloaded video and every frame, and is
-  created with whatever umask the shell had — world-readable on a default Linux setup,
-  in a shared `/tmp` by default.
+- **A `--out-dir` work directory is created with the default umask.** (docs-are-checked
+  review, 2026-08-26; corrected after the forgeward privacy review, 2026-08-26)
+  `~/.config/moviola/.env` is written 0600 and checked for it. The work directory holds
+  the extracted audio, the downloaded video and every frame. **The default path is not
+  affected**: `moviola.py:259` uses `tempfile.mkdtemp`, which hardcodes 0700 regardless
+  of umask — verified directly under `umask 000` (`mkdtemp` → 0700, plain `mkdir` →
+  0777). Only the explicit `--out-dir` branch at `moviola.py:257` calls `Path.mkdir()`
+  and so inherits the shell's umask. This entry originally claimed the exposure for
+  every run; that was wrong, and it is recorded here rather than silently rewritten
+  because the overclaim is the sort of thing that sends someone to harden a path that
+  was already private.
+
+- **An invalid `MOVIOLA_WHISPER` is described two different ways.** (forgeward privacy
+  review, 2026-08-26) `config.py:85-87` normalizes an unrecognised value to `auto`
+  silently; `hooks/scripts/check-setup.sh:158` prints that the backend "is pinned but
+  that backend is not usable here" for the same input. Both then resolve identically, so
+  this is message drift and not a consent-boundary bug — but it is the third surface
+  that re-derives the same precedence in its own words, which is the drift `## Quiet
+  failures` already warns about. A typo'd backend name should say "not a backend name"
+  in both places.
+
+## Housekeeping
+
+- **This file has crossed the ~50KB archive threshold and the split is currently a
+  no-op.** (2026-08-26) Measured today: 52,384 bytes total, of which `## Completed` is
+  27,595 — 53%, which is a genuine mass and not a rounding error. But the archive rule
+  keeps the 5 most recent completions in place, and there are only **4** entries, all
+  written on 2026-08-26 from one body of work. So moving them to `TODOS-DONE.md` would
+  move nothing. The split starts doing real work at the sixth completion; until then the
+  file is over the threshold for a reason that archiving cannot fix. When it does run,
+  the entries here carry reversed decisions worth lifting into `AGENTS.md` as
+  constraints rather than leaving as narrative — the `find_spec` rejection and the
+  ambient-key rule are both in that class.
 
 ## Completed
 
