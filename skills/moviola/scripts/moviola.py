@@ -26,7 +26,7 @@ from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 # channel and not the other. Its only reader through this name is the test that
 # pins the two callers to one definition, so the re-export is test-facing rather
 # than API; `LINE_BREAKS` was re-exported alongside it and had no reader at all.
-from untrusted import balance_bidi, stderr_line  # noqa: E402,F401
+from untrusted import balance_bidi, finite_float, stderr_line  # noqa: E402,F401
 from whisper import (  # noqa: E402
     LOCAL_BACKEND,
     env_key_backend,
@@ -47,6 +47,29 @@ def resolve_whisper_choice(flag: str | None, configured: str) -> str | None:
     if flag:
         return None if flag == "auto" else flag
     return configured if configured and configured != "auto" else None
+
+
+def metadata_from_info(info: dict | None) -> dict:
+    """Stand-in metadata for the path with no video to probe.
+
+    `--detail transcript` on a captioned URL never downloads the video, so there
+    is nothing for ffprobe to look at and yt-dlp's `info.json` is the only thing
+    that knows how long it is. Everything ffprobe would have answered is None
+    here, deliberately: the report says "unknown", it does not guess.
+
+    The duration goes through `finite_float` for the same reason the probe's
+    does — it is a number an extractor put in a JSON file, not one this program
+    computed, and a bare `float()` on it turned an odd `info.json` into a dead
+    run. Extracted from the expression it used to be so it can be tested without
+    driving a download.
+    """
+    return {
+        "duration_seconds": finite_float((info or {}).get("duration"), 0.0),
+        "width": None,
+        "height": None,
+        "codec": None,
+        "has_audio": False,
+    }
 
 
 def _longest_backtick_run(text: str) -> int:
@@ -255,13 +278,7 @@ def main() -> int:
             dl = download(args.source, work / "download")
         video_path = dl["video_path"]
 
-    meta = get_metadata(video_path) if video_path else {
-        "duration_seconds": float((dl.get("info") or {}).get("duration") or 0),
-        "width": None,
-        "height": None,
-        "codec": None,
-        "has_audio": False,
-    }
+    meta = get_metadata(video_path) if video_path else metadata_from_info(dl.get("info"))
     full_duration = meta["duration_seconds"]
 
     start_sec = parse_time(args.start)

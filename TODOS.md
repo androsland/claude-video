@@ -363,11 +363,23 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `MAX_RETRY_DELAY` — and this one is not. A cap needs a decision about what to drop
   (middle, tail, or by speaker turn), which is why it is here rather than fixed.
 
-- **`duration_seconds` raises ValueError on non-numeric metadata.** (bounded-failures
-  review, 2026-08-26) ffprobe's `format.duration` is parsed with a bare `float()`. A
-  container that reports `N/A` — some live captures and malformed remuxes do — takes down
-  the whole run with a ValueError about a string, rather than falling back to "duration
-  unknown" and carrying on with the frames it can extract.
+- **An unknown duration is 0.0, and the report states it as a fact.** (bounded-failures
+  review, 2026-08-26) `get_metadata` answers `duration_seconds: 0.0` when ffprobe cannot
+  tell it how long the video is, and `moviola.py` prints that as
+  `- **Duration:** 00:00 (0.0s)` — indistinguishable in the report from a genuinely
+  empty file. `auto_fps(0)` then budgets exactly one frame for the whole video. Neither
+  is new: an ABSENT `duration` key has always produced them, and `finite_float` only
+  routes one more input to the same place. The fix is a sentinel the report can render
+  as "unknown" rather than a number, which is a report change and wants the same owner
+  as the `--detail transcript` cap. Non-goal: this is not the ValueError entry that
+  `finite_float` closed, and it does not reopen it.
+
+- **`finite_float` is caller-side, and nothing enforces that a new parse uses it.**
+  (bounded-failures review, 2026-08-26) Two producers call it today — ffprobe via
+  `frames.get_metadata`, yt-dlp via `moviola.metadata_from_info` — and they are the only
+  two. A third site that ever parses a number out of somebody else's output is guarded
+  only if whoever writes it remembers, which is exactly the limitation the `stderr_line`
+  entry above already records for the same reason. Filed so the next one knows the rule.
 
 - **The video format fallback has no height cap.** (bounded-failures review, 2026-08-26)
   `bv*[height<=720]+ba/b[height<=720]/bv+ba/b` ends in two unrestricted selectors, so a
@@ -624,19 +636,21 @@ riding along behind prose.
 
 - **This file is over the ~50KB archive threshold, and the split is deferred on a
   judgement, not on arithmetic.** (2026-08-26) Measured with
-  `awk '/^## Completed/{f=1} f' TODOS.md | wc -c`: 65,185 bytes total, of which
-  `## Completed` is 27,595 — 42%, a genuine mass and not a rounding error. (At the merge
-  base it was 53,933 / 51.2%; the live sections grew, the completed section did not.)
+  `awk '/^## Completed/{f=1} f' TODOS.md | wc -c`: 90,454 bytes total, of which
+  `## Completed` is 34,465 — 38%, a genuine mass and not a rounding error. (At the merge
+  base for the stderr branch it was 53,933 / 51.2%; both halves have grown since, the
+  live sections faster than the completed one.)
   **The previous version of this entry said the split would "move nothing" because there
   are "only 4 entries". That was an eyeballed count and it decided the outcome.**
-  `## Completed` holds 4 `###` subsections *and* 26 bulleted findings, and the archive
+  `## Completed` holds 6 `###` subsections *and* 26 bulleted findings, and the archive
   rule — keep the 5 most recent — never says which of those is an entry. Counted by
   subsection, one moves and the file barely shrinks. Counted by bullet, 21 of 26 move
   and roughly 21KB with them, so "moving them would move nothing" is false by very
   nearly the entire payoff of the split. The ambiguity is the finding; the arithmetic was never the
-  reason.
-  The actual reason to defer: all 26 came from one investigation on one day, and 20,181
-  of the 27,595 bytes are a single subsection. Archiving by bullet would cut that
+  reason. (The count was 4 subsections when this was written and is 6 now; nothing
+  re-measures it, which is why it is stated with its date.)
+  The actual reason to defer: all 26 came from one investigation on one day, and 20,097
+  of the 34,465 bytes are still a single subsection. Archiving by bullet would cut that
   investigation in half across two files and leave the surviving five as orphans of an
   argument that lives elsewhere. Cut at the next *distinct* body of work, when there is
   a seam to cut along. Until then the file stays over the threshold for a reason
@@ -647,6 +661,48 @@ riding along behind prose.
   extraction step, so a pass that archives without lifting them is a silent regression.
 
 ## Completed
+
+### A second pass over the bounded-failures review
+
+(bounded-failures review, 2026-08-26 — `fix/bounded-failures-ii`)
+
+**`duration_seconds` no longer raises on a non-numeric field — and the finding's premise
+was wrong.** The entry said a container reporting `N/A` takes down the whole run. `N/A`
+is real, but it belongs to ffprobe's **default** writer, not to the JSON writer moviola
+actually asks for. Proved on one real file with one real ffprobe: the default writer
+prints `duration=N/A`, `start_time=N/A`, `bit_rate=N/A`; `-print_format json` omits those
+keys entirely, and an absent key was already handled by the `or 0` chain. So the
+`ValueError` was **not reachable** through moviola's own command line. Two tests pin both
+halves of that contrast, so if ffprobe ever starts emitting the string into JSON the
+suite says so rather than the guard silently becoming load-bearing.
+
+The guard shipped anyway, as disclosed defence in depth rather than a fix for a live
+crash: moviola pins no ffprobe version and no yt-dlp version, `-show_optional_fields
+always` (ffmpeg >= 5.1) is a documented way to put `N/A` *into* the JSON, and the yt-dlp
+half — `info.json`'s `duration`, read on the transcript-only path where there is no video
+to probe — has no writer guarantee behind it at all. `untrusted.finite_float` is the one
+definition both callers share; it lives in the leaf module because `frames.py` and
+`moviola.py` are on opposite sides of an import edge and a second copy is the failure
+mode this repo has already been bitten by.
+
+Non-finite is rejected as well as non-numeric, and that is not pedantry: `float()`
+accepts `"nan"` and `"inf"` and returns them happily, so leaving them through moves the
+crash two functions downstream into `_clamp_fps`, where `int(round(nan))` raises
+`ValueError: cannot convert float NaN to integer` and `int(round(inf))` raises
+`OverflowError` — both naming a frame-budget helper the user never heard of instead of
+the metadata that was bad.
+
+The replacement is also strictly better than the `or` chain it replaces, which is a
+separate defect the entry did not name. `fmt["duration"] or video_stream["duration"]`
+takes `"N/A"` — a truthy string — and never consults the stream that knew the answer.
+Nesting the two `finite_float` calls makes "could not parse" fall through to the
+fallback, which is what the fallback was for. The same guard was widened to
+`size_bytes`, parsed with a bare `int()` two lines below, on the same argument.
+
+Five mutations, five killed: the finding's own (`float()` restored, 3 tests), the bare
+`int()` on size (1), the bare `float()` on yt-dlp's duration (1), the finiteness check
+dropped (7, across both the guard's own tests and the frame-budget one), and the nesting
+flattened back to an `or` chain (1 — the fall-through). 651 tests green.
 
 ### stderr was a second document into the agent's context, and nothing fenced it
 

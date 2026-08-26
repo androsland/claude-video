@@ -1,4 +1,4 @@
-"""Structural edits for values this program did not write.
+"""Structural edits and guarded parses for values this program did not write.
 
 Both of moviola's output channels are documents an agent reads. stdout is the
 markdown report; stderr is the running commentary next to it. Neither carries a
@@ -11,6 +11,13 @@ paths share these definitions rather than each keeping a copy: the copies drift,
 and the drift is silent. `md_inline` gained U+2028 handling once because a title
 carrying it reached the report as two lines; a second implementation on the
 stderr side would have kept the bug.
+
+The same "did not write it" test is why `finite_float` lives here rather than
+beside either of its callers. ffprobe's JSON and yt-dlp's `info.json` are both
+somebody else's idea of a number arriving as a string, and both are read by
+modules that cannot import each other — `frames.py` probes the video, `moviola.py`
+covers the transcript-only path where there is no video to probe. A leaf module
+is the only place one definition can serve both.
 
 NON-GOALS, stated here because an unstated limit reads as a claim of coverage:
 
@@ -49,6 +56,8 @@ NON-GOALS, stated here because an unstated limit reads as a claim of coverage:
 """
 from __future__ import annotations
 
+import math
+
 # Every character Python's own splitlines() treats as a terminator. A value
 # carrying any one of them ends the line it was interpolated into, and
 # everything after it reads as text this program wrote. Two of these were
@@ -69,6 +78,34 @@ _BIDI_OPENERS = {
     "\u2068": "\u2069",  # FSI
 }
 _BIDI_CLOSERS = ("\u202c", "\u2069")
+
+
+def finite_float(value: object, default: float = 0.0) -> float:
+    """`value` as a finite float, or `default` if it is not one.
+
+    Numbers that arrive from a subprocess arrive as strings a stranger's file
+    caused to be written, and a bare `float()` on one of them turns bad metadata
+    into a dead run. ffprobe reports what it can determine and nothing more, so
+    a container with no timing information — a raw elementary stream, an
+    interrupted capture — leaves the field absent or unparseable; yt-dlp's
+    `duration` comes out of an extractor and carries no writer guarantee at all.
+
+    Non-finite is rejected along with non-numeric, and that is the part worth
+    stating: `float()` accepts `"nan"` and `"inf"` and hands them on happily.
+    They then survive every comparison in `auto_fps` and raise inside
+    `_clamp_fps`, where `int(round(nan))` is a ValueError and `int(round(inf))`
+    an OverflowError — a crash naming a frame-budget helper rather than the
+    metadata that was wrong.
+
+    NON-GOAL: this is a coercion, not a validation. It cannot tell a wrong
+    number from a right one — ffprobe answering `3.0` for a thirty-second video
+    passes straight through, here and everywhere downstream.
+    """
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
 
 
 def balance_bidi(text: str) -> str:

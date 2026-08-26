@@ -7,7 +7,7 @@ Agent Skills package that gives an agent a video input. Installable across Claud
 - `skills/moviola/SKILL.md` — canonical skill contract the model reads when `/moviola` fires. Source of truth for behavior across every host.
 - `skills/moviola/scripts/moviola.py` — entry point; orchestrates download → frames → transcript.
 - `skills/moviola/scripts/{download,frames,transcribe,whisper,local_whisper,setup,config}.py` — yt-dlp wrapper, ffmpeg frame extraction + auto-fps, caption/Whisper transcription, on-device faster-whisper backend, preflight/installer, shared config.
-- `skills/moviola/scripts/untrusted.py` — leaf module holding the structural edits applied to values this program did not write (`LINE_BREAKS`, `balance_bidi`, `stderr_line`). Imported by `moviola.py`, `whisper.py` and `local_whisper.py`; it imports nothing of theirs, which is what keeps it out of an import cycle. New fences belong here, not in a caller.
+- `skills/moviola/scripts/untrusted.py` — leaf module holding the structural edits and guarded parses applied to values this program did not write (`LINE_BREAKS`, `balance_bidi`, `stderr_line`, `finite_float`). Imported by `moviola.py`, `whisper.py`, `local_whisper.py` and `frames.py`; it imports nothing of theirs, which is what keeps it out of an import cycle. New fences and new parses of somebody else's output belong here, not in a caller.
 - `skills/moviola/scripts/build-skill.sh` — builds `dist/moviola.skill` for claude.ai upload (dev-only).
 - `hooks/` — Claude Code SessionStart setup-status hook (Claude Code only).
 - `.claude-plugin/` — `plugin.json` + `marketplace.json` (Claude Code plugin + local marketplace).

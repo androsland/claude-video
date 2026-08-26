@@ -15,6 +15,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+# This module has a __main__ block, so it has to find its siblings when run
+# directly as well as when moviola.py imports it. Same guarded insert whisper.py
+# and setup.py use.
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from untrusted import finite_float  # noqa: E402
+
 
 MAX_FPS = 2.0
 SCENE_THRESHOLD = 0.20
@@ -141,13 +149,22 @@ def get_metadata(video_path: str) -> dict:
     video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})
     audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
-    duration = float(fmt.get("duration") or video_stream.get("duration") or 0)
+    # Nested rather than chained with `or`: an unparseable value is truthy, so
+    # `fmt["duration"] or video_stream["duration"]` took "N/A" and never asked
+    # the stream that knew. Falling through on "could not parse" is what the
+    # fallback was for.
+    duration = finite_float(
+        fmt.get("duration"), finite_float(video_stream.get("duration"), 0.0)
+    )
     return {
         "duration_seconds": duration,
         "width": video_stream.get("width"),
         "height": video_stream.get("height"),
         "codec": video_stream.get("codec_name"),
-        "size_bytes": int(fmt.get("size") or 0),
+        # Same guard, same reason. A file size is never large enough for the
+        # float round-trip to lose a byte: the first integer a float cannot
+        # represent exactly is 9 petabytes.
+        "size_bytes": int(finite_float(fmt.get("size"), 0.0)),
         "has_audio": audio_stream is not None,
     }
 

@@ -92,6 +92,23 @@ All notable changes to `/moviola` are documented here.
 
 ### Fixed
 
+- **A number out of a subprocess is now parsed as a string a stranger wrote.** ffprobe's
+  `format.duration` and `format.size`, and yt-dlp's `info.json` `duration` on the path
+  with no video to probe, were all handed to a bare `float()` / `int()`. A new
+  `untrusted.finite_float` gives all three one guard: anything that is not a finite
+  number becomes the caller's default, so an unparseable field degrades to "duration
+  unknown" instead of ending a run that could have carried on with the frames it can
+  still extract. Non-finite is rejected as well as non-numeric, because `float()` accepts
+  `"nan"` and `"inf"` and the crash then lands two functions downstream in the frame-budget
+  helper. **The reported trigger for this was wrong and is corrected here:** `N/A` is what
+  ffprobe's *default* writer prints, while the JSON writer moviola actually asks for omits
+  the key entirely — which the old code already handled — so the `ValueError` was not
+  reachable through moviola's own command line. The guard ships as defence in depth
+  (`-show_optional_fields always` puts the string into JSON, and the yt-dlp half has no
+  writer guarantee at all), and two tests pin both halves of that contrast so the suite
+  says so if it ever stops holding. The `or` chain it replaces had a second defect the
+  report did not name: `"N/A"` is truthy, so an unparseable format duration was taken and
+  the stream that knew the answer was never asked.
 - **A failed download could report on the previous run's video.** `--out-dir` is documented
   and reused, so "a file named `video.*` is in this directory" never meant "this run
   downloaded it". Right filename, wrong film, no error anywhere.
