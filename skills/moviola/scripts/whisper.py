@@ -41,6 +41,11 @@ LOCAL_BACKEND = "local"
 # margin under that so multipart framing overhead never pushes a chunk over.
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024
 
+# Floor for "this file actually contains audio". mp3 at 64 kbps mono is ~8 kB per
+# second; a header-only file ffmpeg writes for an out-of-range seek measured 333
+# bytes. See extract_audio().
+MIN_AUDIO_BYTES = 2048
+
 
 def plan_chunks(
     total_seconds: float,
@@ -190,9 +195,26 @@ def extract_audio(
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise SystemExit(f"ffmpeg audio extraction failed: {result.stderr.strip()}")
-    if not out_path.exists() or out_path.stat().st_size == 0:
+    # Not `== 0`: an -ss past the end of the video exits 0 and writes a valid but
+    # empty mp3 — measured at 333 bytes for a header-only file — which sails past
+    # a zero-byte check and reaches Whisper as silence. At 64 kbps mono one second
+    # is ~8 kB, so anything under 2 kB carries no audio worth transcribing.
+    size = out_path.stat().st_size if out_path.exists() else 0
+    if size < MIN_AUDIO_BYTES:
+        if seek:
+            raise SystemExit(
+                "ffmpeg produced no audio for the requested range "
+                f"({_range_text(start_seconds, end_seconds)}) — the range is "
+                "probably past the end of the video, or the video has no audio track"
+            )
         raise SystemExit("ffmpeg produced no audio — video may have no audio track")
     return out_path
+
+
+def _range_text(start_seconds: float | None, end_seconds: float | None) -> str:
+    start = "start" if not start_seconds else f"{start_seconds:.1f}s"
+    end = "end" if end_seconds is None else f"{end_seconds:.1f}s"
+    return f"{start}–{end}"
 
 
 def audio_duration(audio_path: Path) -> float:
@@ -203,7 +225,10 @@ def audio_duration(audio_path: Path) -> float:
     result = subprocess.run(
         [
             "ffprobe",
-            "-v", "quiet",
+            # -v error, not -v quiet: quiet silences ffprobe's stderr, so the
+            # `result.stderr` reported below on a non-zero exit was always empty
+            # and the failure message said nothing at all.
+            "-v", "error",
             "-print_format", "json",
             "-show_format",
             str(audio_path.resolve()),
