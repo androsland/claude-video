@@ -16,6 +16,16 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   exit 1
 fi
 
+# Neither `git diff` nor `git diff --cached` sees untracked files, and the archive
+# below reads HEAD — so a new-but-uncommitted runtime module produced a silently
+# incomplete bundle under a success message. Scoped to the subtree that ships.
+UNTRACKED=$(git ls-files --others --exclude-standard -- skills/moviola)
+if [ -n "$UNTRACKED" ]; then
+  echo "error: untracked files under skills/moviola would be absent from the bundle:" >&2
+  echo "$UNTRACKED" | sed 's/^/       /' >&2
+  exit 1
+fi
+
 mkdir -p dist
 OUT="dist/moviola.skill"
 git archive --format=zip --prefix=moviola/ --output="$OUT" HEAD:skills/moviola
