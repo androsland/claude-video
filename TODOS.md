@@ -30,7 +30,77 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 - **Nothing establishes that the upload notice is ever seen.** `tests/test_upload_is_announced.py` proves the sentence is written to stderr before the first request and in the right order, which is the half that was missing. Whether an agent harness surfaces stderr to the human, buffers it until after the run, or discards it entirely is invisible from inside this repo, and no test here can see it. A notice that is printed and swallowed is not consent. (consent-chain branch, 2026-08-26)
 
+## Report as an untrusted document
+
+- **stderr reaches the agent's context and nothing fences it.** (report-injection
+  review, 2026-08-26) `md_inline` and `md_fence` govern stdout, which is the report.
+  Everything on stderr — moviola's own progress lines, yt-dlp's output passed through
+  verbatim, ffmpeg's complaints, and up to 400 bytes of a provider's HTTP response body
+  on an API failure — lands in the same agent context with no fencing at all, and three
+  of those four are remote-controlled. A hostile video's yt-dlp warning can carry a
+  markdown heading today. The fix is not "fence stderr too": stderr is a log, the human
+  reads it, and fencing every line would make it unreadable. The shape worth building is
+  a single `stderr_line()` that collapses line breaks in interpolated remote values, the
+  same edit `md_inline` makes and no more.
+
+- **The report interpolates ffprobe's `width` and `height` raw, and that is a decision
+  rather than an oversight.** (report-injection review, 2026-08-26) Every other
+  attacker-reachable value in the report is fenced; these two are not, because ffprobe
+  emits them as JSON numbers for a video stream and there is no evidence they can carry
+  text. Fencing them would render as ``` `1920`x`1080` ```, which is worse to read for a
+  risk nobody has demonstrated. Recorded so the next reader knows it was weighed. If
+  ffprobe is ever seen emitting a string there, fence them and take the ugly line.
+
+- **`balance_bidi` approximates UAX#9 rather than implementing it.** (report-injection
+  review, 2026-08-26) It matches a closer to the nearest open scope of the same kind,
+  where the real algorithm resolves matching within an isolating run sequence. On a
+  pathological interleaving it appends a terminator that was not strictly needed, which
+  is harmless, and the tests pin the direction rather than the exact count. A real
+  implementation is a dependency and a lot of code for a report generator; this is
+  deliberately the cheap version.
+
+- **Nothing checks the report end-to-end against a markdown parser.** (report-injection
+  review, 2026-08-26) The invariants in `test_report_structure.py` are stated over the
+  fenced value — one line, a delimiter that does not occur inside, balanced bidi — and
+  two of them are checked against the real report. What is NOT checked is that the
+  assembled document PARSES the way this program intends: no CommonMark parser is a test
+  dependency, so a structural bug in the report's own scaffolding (an unclosed fence in
+  the transcript block, say) would not be caught by anything here. Adding `markdown-it-py`
+  as a dev dependency and asserting the heading tree is the shape.
+
 ## Completed
+
+### The report's fencing was built from the exploit, not from the boundary
+
+`md_inline` closed the structural channel against the two characters somebody had
+demonstrated — `\n` and `\r` — and stopped there. Three ways past it survived, and all
+three are the same mistake in different clothes: the fix was scoped to the sample rather
+than to the property.
+
+`str.splitlines()` breaks on ten characters, not two. A title carrying U+2028 was one
+line to `md_inline` and two lines to every renderer, pager and terminal downstream, so
+the "no line break can escape the list item" guarantee held only against the two that
+had been tried. `md_inline("")` returned two adjacent backticks, which is not an empty
+code span at all — it is an unpaired backtick run that pairs with the NEXT one in the
+document and swallows every line between them. And a bidi override opened inside a value
+was never closed, so it kept reordering the display of the report's own headings for the
+rest of the document; fencing the value as code does not help, because the control
+characters are still in the character stream.
+
+The replacement states the boundary instead of listing exploits: whatever goes in, what
+comes out is one line, opened and closed by a backtick run that does not occur inside it,
+with every bidi scope it opens closed again before it ends. `test_report_structure.py`
+runs a 24-value hostile corpus through all five clauses, and separately drives the real
+`moviola.main()` with a hostile title and a hostile uploader, which is the test that
+fails if a call site ever stops fencing. Each fix was re-checked by restoring the bug:
+unfencing Title and Uploader fails 3, the three-character collapse fails 10, dropping the
+bidi balance fails 9, dropping the empty-value guard fails 1.
+
+Deliberately still open, and written into the code and into `## Report as an untrusted
+document` above rather than left implied: stderr is unfenced and carries yt-dlp's output
+verbatim; ffprobe's width and height are interpolated raw on the evidence that ffprobe
+emits them as numbers; `balance_bidi` is an approximation of UAX#9; and no markdown
+parser checks the assembled document.
 
 - **The three consent oracles now give one answer, and the fourth question got an owner.** moviola answers "will this upload my audio?" in three places and two languages — `whisper.resolve_backend()` (the runtime, and the only one that actually uploads), `setup.py --json` (what the agent parses), and `hooks/scripts/check-setup.sh` (the line the human reads at SessionStart) — and they disagreed. `$PWD/.env` was a key source for the runtime alone; both preflights read the config file only, so a key sitting in the working directory's `.env` uploaded audio underneath a "no backend configured" notice. That file is the checkout the user happens to be standing in, which for a Claude Code plugin may have been committed by someone they have never met, so it was dropped outright rather than taught to the preflights: reading it is the ambient-environment mistake wearing a different hat, taking a credential's presence for its owner's permission. A second, unreported bug surfaced while fixing the first, in mirror image — `setup.py::_have_api_key` re-derived the rule as "does a string named GROQ_API_KEY exist anywhere I can see", so an **ambient environment** key made `has_api_key: true`, `has_transcription: true`, `status: ready` while an unpinned run refused that same key and did frames only; `status` and `can_proceed` are both downstream of that one boolean. Both halves are the failure `_effective_backend`'s own docstring already warns about — do not re-derive precedence — never applied to `has_api_key`, and `cmd_install` had reintroduced it a third time one function away (`backend or 'local'` reported "groq" for an unpinned machine that would run local). The preflight now routes through `whisper.load_api_key` under the runtime's own rule, and reads the pin before the key question, because whether a key counts at all depends on the pin. `tests/test_consent_oracles.py` drives all three surfaces through their own front doors — two Python subprocesses and the real bash script, no monkeypatching of the thing under test — over a 12-row matrix, three tests per row so a failure names WHICH surface drifted; it went in RED at 11 failures, and every hook case passed, which is what identified the runtime rather than the preflights as the thing to change. **The fourth oracle** — "can anyone else read my key file?" — had drifted the same way: `setup.py` tested `mode & 0o044` (READ only) and stayed silent on a group-writable file, which is the worse case since another user can replace the key and bill their uploads to you; the bash hook tested `perms != "600" && perms != "400"`, a string comparison that warned about `700`, where nobody else has any access; and `whisper.py`, the surface that actually reads the key, never asked at all. One predicate now, `mode & 0o077`, owned by `whisper.warn_if_key_file_is_exposed` and called by all three, with the bash copy rewritten as the same arithmetic rather than a string match. Separately, `_announce_upload` was already unit-tested five ways and **all five passed with both of its call sites deleted** — it was proven correct and never proven to be called, so `tests/test_upload_is_announced.py` drives the real `transcribe_video` and snapshots stderr at the moment the first request is entered, making it an ordering assertion as well as a presence one. 72 new tests (281 -> 353). Six mutations each fail the suite: restoring `$PWD/.env` as a key source, re-opening the environment inside the preflight, both permission predicates reverted one at a time, and the two announcement call sites removed. **Non-goals, written into the code and the tests:** the oracle tests compare the three surfaces to each other and to a table, so a change moving all three the same wrong way passes; the permission check reads mode bits and is blind to directory modes, ACLs and mode-less filesystems including `/mnt/c` under WSL; consent is judged from where the key SITS, which cannot distinguish a config file the user wrote from one an installer wrote for them; and nothing here can tell whether the announcement is ever surfaced to a human. (consent-chain branch, 2026-08-26)
 

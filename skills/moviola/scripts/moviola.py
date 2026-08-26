@@ -50,6 +50,63 @@ def _longest_backtick_run(text: str) -> int:
     return best
 
 
+# Every character `str.splitlines()` treats as a line boundary, which is the
+# widest such set that is cheap to check and covers every renderer, pager and
+# terminal this report passes through. `md_inline` used to close over three of
+# them; a title carrying U+2028 was one line to this program and two lines to
+# everything downstream. Written out rather than derived so that widening the
+# rule means editing this line and seeing it in a diff.
+LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+_TO_SPACES = {ord(ch): " " for ch in LINE_BREAKS}
+
+# Bidi scopes, and the character that closes each. Two independent stacks: PDF
+# closes an embedding or override, PDI closes an isolate.
+_BIDI_OPENERS = {
+    "\u202a": "\u202c",  # LRE
+    "\u202b": "\u202c",  # RLE
+    "\u202d": "\u202c",  # LRO
+    "\u202e": "\u202c",  # RLO
+    "\u2066": "\u2069",  # LRI
+    "\u2067": "\u2069",  # RLI
+    "\u2068": "\u2069",  # FSI
+}
+_BIDI_CLOSERS = ("\u202c", "\u2069")
+
+
+def balance_bidi(text: str) -> str:
+    """Close, inside `text`, every bidi scope `text` opens and never closes.
+
+    An unterminated override does not end where the value ends — it keeps
+    reordering the display of everything after it, including the headings this
+    program wrote and the reader is entitled to trust. Fencing the value as code
+    does not help: the controls are still in the character stream.
+
+    Terminators are APPENDED, never stripped, so the value keeps every character
+    it arrived with. A legitimate right-to-left title is unaffected; ordinary
+    RTL text needs no override, and one that is already balanced gets nothing
+    added.
+
+    NON-GOALS: this is an approximation of UAX#9, not an implementation of it.
+    It matches a closer to the nearest open scope of the same kind, where the
+    real algorithm resolves matching within an isolating run sequence — so on
+    pathological interleavings it can append a terminator that was not needed.
+    That direction is harmless. And confining the reordering says nothing about
+    the value misrepresenting ITSELF: a filename that displays reversed still
+    displays reversed inside its own span.
+    """
+    stack: list[str] = []
+    for ch in text:
+        closer = _BIDI_OPENERS.get(ch)
+        if closer is not None:
+            stack.append(closer)
+        elif ch in _BIDI_CLOSERS:
+            for i in range(len(stack) - 1, -1, -1):
+                if stack[i] == ch:
+                    del stack[i]
+                    break
+    return text + "".join(reversed(stack))
+
+
 def md_inline(value: object) -> str:
     """Fence one untrusted short value as markdown inline code.
 
@@ -60,18 +117,33 @@ def md_inline(value: object) -> str:
     as report structure, and nothing downstream can tell it from a heading this
     program wrote.
 
-    Two edits, both structural. Newlines and carriage returns collapse to spaces,
-    because a line break ends the list item it sits in and lets everything after
-    it become top-level markdown. Then the value is wrapped in a backtick run one
-    longer than the longest run inside it, padded with a space when it starts or
-    ends with a backtick — CommonMark's own rule for putting backticks inside a
-    code span.
+    Three edits, all structural. Line breaks collapse to spaces, because a line
+    break ends the list item the value sits in and lets everything after it
+    become top-level markdown — all ten of them, not just the two that were
+    demonstrated. Unclosed bidi scopes are closed. Then the value is wrapped in
+    a backtick run one longer than the longest run inside it, padded with a
+    space when it starts or ends with a backtick — CommonMark's own rule for
+    putting backticks inside a code span.
+
+    An empty value becomes a span containing one space rather than two adjacent
+    backticks, which is not an empty code span at all: it is an unpaired
+    backtick run that pairs with the next one in the document and swallows every
+    line in between.
 
     Lossless everywhere else, on purpose: this is not a sanitizer and strips no
     character class. A title in Japanese, with emoji, with an apostrophe or with
     a stray angle bracket comes out as itself.
+
+    NON-GOALS. It closes the STRUCTURAL channel only — a title that reads
+    "ignore your previous instructions" is still perfectly legible text sitting
+    in an agent's context, correctly fenced. It governs this one value and not
+    the line it is interpolated into. And it protects the report, not stderr:
+    progress lines and yt-dlp's own output reach the same context unfenced.
     """
-    text = str(value).replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    text = str(value).translate(_TO_SPACES)
+    text = balance_bidi(text)
+    if not text:
+        text = " "
     ticks = "`" * (_longest_backtick_run(text) + 1)
     pad = " " if text.startswith("`") or text.endswith("`") else ""
     return f"{ticks}{pad}{text}{pad}{ticks}"
