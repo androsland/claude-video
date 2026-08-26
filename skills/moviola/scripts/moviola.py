@@ -19,14 +19,19 @@ from config import DETAILS, WHISPER_BACKENDS, frame_cap, get_config  # noqa: E40
 from download import download, fetch_captions, is_url  # noqa: E402
 from frames import MAX_FPS, auto_fps, auto_fps_focus, extract_at_timestamps, extract_keyframes, extract_scene_or_uniform, format_time, get_metadata, merge_frames, parse_time, parse_timestamps  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
-# `stderr_line` is used below, by md_inline. `balance_bidi` is re-exported and
+# Three names, three different reasons, and this comment did not account for the
+# third until a review read it as the complete list it presents itself as.
+# `stderr_line` is used below, by md_inline. `finite_float` is used below too, by
+# `metadata_from_info` — the transcript-only path has no video to probe, so
+# yt-dlp's `info.json` is the only thing that knows the duration, and it needs
+# the same guard `frames.get_metadata` puts on ffprobe's. `balance_bidi` is re-exported and
 # not used here: it was defined in this module until stderr needed it too, and
 # `whisper` importing `moviola` would be a cycle, so it moved to a leaf module
 # both sides import — a second copy is how the U+2028 fix reached one output
 # channel and not the other. Its only reader through this name is the test that
 # pins the two callers to one definition, so the re-export is test-facing rather
 # than API; `LINE_BREAKS` was re-exported alongside it and had no reader at all.
-from untrusted import balance_bidi, stderr_line  # noqa: E402,F401
+from untrusted import balance_bidi, finite_float, stderr_line  # noqa: E402,F401
 from whisper import (  # noqa: E402
     LOCAL_BACKEND,
     env_key_backend,
@@ -47,6 +52,50 @@ def resolve_whisper_choice(flag: str | None, configured: str) -> str | None:
     if flag:
         return None if flag == "auto" else flag
     return configured if configured and configured != "auto" else None
+
+
+def metadata_from_info(info: dict | None) -> dict:
+    """Stand-in metadata for the path with no video to probe.
+
+    `--detail transcript` on a captioned URL never downloads the video, so there
+    is nothing for ffprobe to look at and yt-dlp's `info.json` is the only thing
+    that knows how long it is.
+
+    The duration goes through `finite_float` for the same reason the probe's
+    does — it is a number an extractor put in a JSON file, not one this program
+    computed, and a bare `float()` on it turned an odd `info.json` into a dead
+    run. Extracted from the expression it used to be so it can be tested without
+    driving a download.
+
+    This docstring used to say "everything ffprobe would have answered is None
+    here, deliberately: the report says 'unknown', it does not guess." That is
+    the intent and it is wrong about the code in three places, each of which a
+    review found by reading the dict below against it:
+
+      * `has_audio` is `False`, not None, and False is an assertion rather than
+        an absence. A captioned URL whose video has audio is reported as having
+        none. Nothing consumes the field on this path today, which is why it is
+        a latent wrong answer rather than a live one.
+
+      * `size_bytes` is not here at all. `frames.get_metadata` returns six keys
+        and this returns five, so the two producers of `meta` do not agree on
+        their shape — the divergence is pinned by
+        `test_the_shape_matches_what_the_probe_returns` rather than left for a
+        future consumer to discover as a KeyError.
+
+      * An unknown duration is `0.0`, and `format_time` renders that as a
+        confident `00:00`. The report does not say "unknown"; it says the video
+        is zero seconds long, and `auto_fps(0)` then budgets exactly one frame.
+        Filed in TODOS.md — the sentinel needs a value the formatter can tell
+        apart from a real zero, which is a change to both sides.
+    """
+    return {
+        "duration_seconds": finite_float((info or {}).get("duration"), 0.0),
+        "width": None,
+        "height": None,
+        "codec": None,
+        "has_audio": False,
+    }
 
 
 def _longest_backtick_run(text: str) -> int:
@@ -255,13 +304,7 @@ def main() -> int:
             dl = download(args.source, work / "download")
         video_path = dl["video_path"]
 
-    meta = get_metadata(video_path) if video_path else {
-        "duration_seconds": float((dl.get("info") or {}).get("duration") or 0),
-        "width": None,
-        "height": None,
-        "codec": None,
-        "has_audio": False,
-    }
+    meta = get_metadata(video_path) if video_path else metadata_from_info(dl.get("info"))
     full_duration = meta["duration_seconds"]
 
     start_sec = parse_time(args.start)

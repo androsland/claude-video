@@ -353,8 +353,22 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 - **The parser and the config are proven to AGREE, not to be right.**
   (bounded-failures review, 2026-08-26) `build_parser()` reads `config.DETAILS` and
   `config.WHISPER_BACKENDS`, and the tests compare the two. A value that is wrong in the
-  config is now wrong in the flag as well, consistently, and invisibly from here. Nothing
-  checks that every name in `WHISPER_BACKENDS` has a working implementation behind it.
+  config is now wrong in the flag as well, consistently, and invisibly from here. The
+  `WHISPER_BACKENDS` half of this is closed — `test_every_backend_has_an_implementation`
+  now requires every offered name to reach a dispatch branch, a key lookup, a host entry
+  and an endpoint on that host — but `config.DETAILS` has no equivalent check, and
+  neither half says the sets are the ones moviola OUGHT to offer. A provider it should
+  support and does not is still invisible from every test in the suite.
+
+- **A backend can be routed to the right host by the wrong path or model.**
+  (bounded-failures review, 2026-08-26) `test_each_branch_posts_to_its_own_host` ties
+  the dispatch branch, the endpoint constant and `API_HOSTS` together, so a branch
+  copy-pasted from the other provider's fails. It compares hosts only:
+  `https://api.openai.com/v1/chat/completions` and a `model` id the provider retired
+  both satisfy it. Those are discoverable against the live API and nowhere else, which
+  is why this is filed rather than fixed — a network-free suite structurally cannot see
+  them. Non-goal: this is not an argument for a live-API test in the suite; it is a note
+  that green here is not a claim either endpoint still answers.
 
 - **`--detail transcript` still prints the whole transcript with no cap.**
   (bounded-failures review, 2026-08-26) A three-hour video's transcript goes to stdout in
@@ -363,17 +377,90 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `MAX_RETRY_DELAY` — and this one is not. A cap needs a decision about what to drop
   (middle, tail, or by speaker turn), which is why it is here rather than fixed.
 
-- **`duration_seconds` raises ValueError on non-numeric metadata.** (bounded-failures
-  review, 2026-08-26) ffprobe's `format.duration` is parsed with a bare `float()`. A
-  container that reports `N/A` — some live captures and malformed remuxes do — takes down
-  the whole run with a ValueError about a string, rather than falling back to "duration
-  unknown" and carrying on with the frames it can extract.
+- **An unknown duration is 0.0, and the report states it as a fact.** (bounded-failures
+  review, 2026-08-26) `get_metadata` answers `duration_seconds: 0.0` when ffprobe cannot
+  tell it how long the video is, and `moviola.py` prints that as
+  `- **Duration:** 00:00 (0.0s)` — indistinguishable in the report from a genuinely
+  empty file. `auto_fps(0)` then budgets exactly one frame for the whole video. Neither
+  is new: an ABSENT `duration` key has always produced them, and `finite_float` only
+  routes one more input to the same place. The fix is a sentinel the report can render
+  as "unknown" rather than a number, which is a report change and wants the same owner
+  as the `--detail transcript` cap. Non-goal: this is not the ValueError entry that
+  `finite_float` closed, and it does not reopen it.
 
-- **The video format fallback has no height cap.** (bounded-failures review, 2026-08-26)
-  `bv*[height<=720]+ba/b[height<=720]/bv+ba/b` ends in two unrestricted selectors, so a
-  video with no 720p-or-below variant downloads at whatever the highest rendition is —
-  4K, on a flag whose entire point is to stay small. It is a fallback that silently
-  inverts the intent of the two selectors before it.
+- **`finite_float` is caller-side, and nothing enforces that a new parse uses it.**
+  (bounded-failures review, 2026-08-26) Two producers call it today — ffprobe via
+  `frames.get_metadata`, yt-dlp via `moviola.metadata_from_info` — and they are the only
+  two. A third site that ever parses a number out of somebody else's output is guarded
+  only if whoever writes it remembers, which is exactly the limitation the `stderr_line`
+  entry above already records for the same reason. Filed so the next one knows the rule.
+
+- **The fallback is monotonic, not capped: a 4K-only upload still downloads at 4K.**
+  (bounded-failures review, 2026-08-26) `download.VIDEO_FORMAT`'s tail is `wv*+ba/w`,
+  which takes the SMALLEST rendition a ladder offers rather than the largest, so a ladder
+  offering 4K and 1080 now takes the 1080. A ladder whose only rendition is 4K still
+  takes the 4K, because there is nothing else to fetch, and that is deliberate: bounding
+  the tail at 1080 makes it match nothing on such a ladder, and a yt-dlp selector that
+  matches nothing fails the download outright rather than falling back. The only
+  remaining lever is transcoding after the fact, which spends CPU to save disk and is a
+  different trade from the one this flag makes. Non-goal: this is not the
+  unbounded-best-selector entry that `test_the_fallback_stays_small` closed and does not
+  reopen it.
+
+- **A source whose renditions carry no height is rescued to its BEST, never bounded.**
+  (review of the bounded-failures review, 2026-08-26) `[height<=720]` drops a format
+  whose height is unknown, so the tolerant `[height<=?720]` pair was added to stop such
+  sources — HLS with no `RESOLUTION`, the generic extractor — falling to the floorless
+  tail and downgrading 6000 kbps to 150. Those rungs are `bv*`/`b`, so they take the
+  LARGEST unknown-height rendition: the download returns to exactly what it was before
+  any of this work, which is the point (unknown is not the same as small, and a bound
+  would exclude every one of them and hit the tail again). What is unfixed is that
+  moviola still cannot bound a rendition whose size the manifest never states. The lever
+  would be a `filesize`/`tbr` ceiling on the tolerant rungs, which trades a hard download
+  failure on sources that state neither for a bound on the ones that do. Non-goals: this
+  does not reopen the monotonic-not-capped entry above; and a MIXED ladder (one heightless
+  rendition beside bounded oversized ones) deliberately picks the heightless one, because
+  it is the only candidate that could be under the bound — `test_a_heightless_rendition_
+  is_preferred_over_a_bounded_oversized_one` pins that and it is a guess, not a guarantee.
+
+- **"Worst" is yt-dlp's definition, and moviola pins it only by passing no sort order.**
+  (bounded-failures review, 2026-08-26; corrected 2026-08-26 by the review of that
+  review) `wv*`/`w` mean worst *by the active `--format-sort`*. This entry previously
+  said that default "leads on `res`"; measured against yt-dlp 2026.06.09 it does not.
+  `FormatSorter.default` is `(hidden, aud_or_vid, hasvid, ie_pref, lang, quality, res,
+  …)` — `res` is seventh, `ie_pref` third and `quality` sixth both outrank it, and `size`
+  and `br` are twelfth and thirteenth. So "worst" is the *extractor's* preference order
+  before it is resolution, and on an extractor that assigns a per-rendition `quality` the
+  tail can pick something LARGER than the old selector did. moviola passes no
+  `--format-sort`, and `test_no_format_sort_is_passed` is the whole of what keeps that
+  true; a future flag adding one would silently redefine what the fallback selects. Same
+  caller-side shape as the `stderr_line` and `finite_float` entries above.
+  Non-goals: the synthetic ladders the behavioural tests drive assume yt-dlp's worst-first
+  ordering convention, and nothing in a network-free suite drives a real extractor, so an
+  extractor emitting a differently-ordered format list would be invisible to them — and
+  so would an extractor-side `quality`, which `test_no_format_sort_is_passed` cannot see
+  because it only checks moviola's own argv.
+
+- **A muxed-only video ladder that DOES offer separate audio still loses the good audio.**
+  (review of the bounded-failures review, 2026-08-26) `wv*` matches a muxed format, and
+  yt-dlp's default `--no-audio-multistreams` then drops the `+ba` beside it. Executed
+  against yt-dlp 2026.06.09 on `[a64, a256, m1080/96k, m2160/192k]`: the ladder yields
+  m1080's embedded 96 kbps where the old tail's video-only `bv` could not reach the case
+  at all and fell through to `b` → m2160 at 192 kbps. Byte-wise it remains a saving — no
+  second audio stream is fetched and no merge pass runs — so the cost is transcript
+  quality alone, and the only lever is `--audio-multistreams`, which spends both to buy
+  it back. Non-goals: this is NOT the muxed entry below, which is about a ladder with no
+  separate audio to keep; and `test_best_audio_survives_the_shrink` runs only the
+  split-stream ladder, so the suite does not see this shape.
+
+- **The muxed fallback shrinks the transcript's source along with the picture.**
+  (bounded-failures review, 2026-08-26) The last rung, `w`, selects a whole file, so on a
+  ladder with no separate audio stream the smaller video brings its own smaller audio,
+  and that audio is what Whisper is handed. The split-stream rungs keep `ba` and
+  `test_best_audio_survives_the_shrink` pins it; the muxed case has no way to keep the
+  good audio and drop the big video short of two downloads. Filed because it is a quality
+  trade made silently — nothing in the report says the transcript came from the ladder's
+  worst audio.
 
 - **A pinned API backend never falls back to the other one.** (forgeward ai-output
   review, 2026-08-26) When `--whisper groq` exhausts its retry ladder the run stops with
@@ -383,6 +470,86 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   means a provider outage costs a whole run rather than a slower one. If it is ever
   changed, the failover has to announce the second provider before the first byte goes
   out, the same way `_announce_upload` does today.
+
+- **`finite_float` guards its input and not its `default`.** (review of the bounded-failures
+  review, 2026-08-26) Both exit paths return `default` unexamined, so
+  `finite_float(x, float("inf"))` returns inf out of a function named for finiteness. It is
+  latent rather than live — every call site in the tree passes `0.0`, and the two that pass
+  a computed value (`frames.py:156` nests one call as the other's default) pass a value the
+  same guard already vetted. Filed because the name is the promise a future caller will read,
+  and nothing enforces it. Non-goal: this is not the magnitude entry below; a checked
+  `default` still would not bound `1e300`.
+
+- **Finiteness is not magnitude, and past 1,000,000 seconds the run dies inside ffmpeg.**
+  (review of the bounded-failures review, 2026-08-26) `finite_float` rejects nan and inf and
+  has no ceiling below them, so a large duration passes intact — and `auto_fps` turns it into
+  a very small fps rather than clamping. Measured: `auto_fps` holds the frame budget at 100
+  for every magnitude, so the budget is not the problem; the fps is. At a duration of exactly
+  1e6 the fps is `0.0001` and Python reprs it plainly, and at 1,000,001 it is
+  `9.99999000001e-05`, which `extract` interpolates into `-vf fps=...` verbatim. Real ffmpeg
+  answers `Unable to parse option value "1e-05" as video rate` and exits 1, so `extract`
+  raises `SystemExit: ffmpeg frame extraction failed: ...` — named and diagnosable, but a
+  dead run, and the message points at ffmpeg rather than at the duration that caused it.
+  1,000,000 seconds is 11.6 days, which a 24/7 archive stream can genuinely reach, so this is
+  not purely theoretical. Two fixes are separable and only the first is a bound: format the
+  fps as a decimal (`f"fps={fps:.6f}"`, or a rational `100/{duration}`) so ffmpeg can parse
+  whatever `auto_fps` produces; and separately decide a maximum duration, which is a product
+  number nobody has picked. Non-goals: this is not the negative-duration entry below, and it
+  is not the `0.0` sentinel — both are about values ffmpeg would accept. It also says nothing
+  about the report, which prints a 303-character `format_time(1e300)` quite happily; that is
+  cosmetic beside the failure above.
+
+- **A negative duration passes the guard and renders as a negative clock.**
+  (review of the bounded-failures review, 2026-08-26) `-1.0` is finite, so `finite_float`
+  returns it and `format_time(-1.0)` produces `-1:59:59` — Python's `divmod` on a negative
+  float, not a bug in the formatter's arithmetic. Neither producer has been seen to emit one:
+  ffprobe would have to report a negative container duration and yt-dlp a negative extractor
+  duration. Rejecting negatives is a one-line change to the guard, but it is a semantic
+  decision — a duration of exactly `0.0` is already the unknown sentinel, so a rejected
+  negative would land on the same value and be indistinguishable from an absent key. Filed
+  with the sentinel entry it depends on rather than fixed alongside it.
+
+- **`get_metadata` parses ffprobe's stdout with an unguarded `json.loads`.** (review of the
+  bounded-failures review, 2026-08-26) `frames.py:146` is
+  `json.loads(result.stdout or "{}")` and nothing catches `JSONDecodeError`. The `or "{}"`
+  handles empty output and nothing else, so a returncode of 0 with non-JSON on stdout takes
+  the run down with a traceback naming the json module. It is the same class as the
+  `finite_float` findings — a value this program did not write, parsed as though it had —
+  but one level up: the guards protect the FIELDS inside a document that was already assumed
+  to be a document. Reachability is low and is the reason this is filed rather than fixed:
+  the real ffprobe under `-v quiet -print_format json` either emits JSON or exits non-zero,
+  so it takes a shim or a wrapper on PATH answering to the name `ffprobe`. Non-goal: this is
+  not the `_read_info` half — `download.py:178` reads a file yt-dlp wrote and has the same
+  shape with its own reachability story.
+
+- **The reachability evidence reads `format` only, so a stream-level `N/A` is invisible to
+  it.** (review of the bounded-failures review, 2026-08-26) `test_the_json_writer_omits_the_key_instead`
+  is the test carrying the whole "the ValueError is not reachable" correction, and its
+  `_probe` helper runs `ffprobe -v quiet -print_format json -show_format` — no
+  `-show_streams`. Production asks for both and falls back to the video stream's duration
+  when the format has none, so the one path the evidence does not cover is exactly the
+  fallback the nested `finite_float` call exists to serve. The fix is to add `-show_streams`
+  to the helper and assert over both objects. Filed rather than done because widening it
+  changes what the correction claims, and the correction is load-bearing in three files.
+
+- **The yt-dlp producer has no end-to-end non-finite case.** (review of the
+  bounded-failures review, 2026-08-26) `TestYtDlpMetadata` drives `metadata_from_info` with
+  `"N/A"`, a missing block, a real float and a real numeric string; `"nan"` and `"inf"` are
+  tested against `finite_float` directly and never through this caller. The guard is shared,
+  so the coverage gap is narrow — and it is real: a mutation replacing this call site with a
+  bare `float(... or 0)` is caught only because the oversized-int case happens to go through
+  it. Three lines to close. Non-goal: this says nothing about the ffprobe producer, which has
+  its own non-finite cases through `_stub_ffprobe`.
+
+- **`FILLER` is redeclared in seven test modules.** (review of the bounded-failures review,
+  2026-08-26) Every one is the same
+  `FILLER = "placeholder-value-not-a-credential"`, and the convention it encodes — no test
+  reads a real credential — is enforced by nothing but repetition. `tests/conftest.py`
+  already exists and already holds shared fixtures, so a single definition there is the
+  obvious home. Deliberately not done in the same pass as a behaviour fix: it touches every
+  test file at once, which is the diff shape that hides a real change. Non-goal: moving it
+  does not enforce the convention either — a module that declares its own string still
+  passes; only a review catches that.
 
 ## Documentation as a checked claim
 
@@ -624,19 +791,24 @@ riding along behind prose.
 
 - **This file is over the ~50KB archive threshold, and the split is deferred on a
   judgement, not on arithmetic.** (2026-08-26) Measured with
-  `awk '/^## Completed/{f=1} f' TODOS.md | wc -c`: 65,185 bytes total, of which
-  `## Completed` is 27,595 — 42%, a genuine mass and not a rounding error. (At the merge
-  base it was 53,933 / 51.2%; the live sections grew, the completed section did not.)
+  `awk '/^## Completed/{f=1} f' TODOS.md | wc -c`: 98,552 bytes total, of which
+  `## Completed` is 39,314 — 40%, a genuine mass and not a rounding error. (At the merge
+  base for the stderr branch it was 53,933 / 51.2%; both halves have grown since, the
+  live sections faster than the completed one.)
   **The previous version of this entry said the split would "move nothing" because there
   are "only 4 entries". That was an eyeballed count and it decided the outcome.**
-  `## Completed` holds 4 `###` subsections *and* 26 bulleted findings, and the archive
+  `## Completed` holds 6 `###` subsections *and* 26 bulleted findings, and the archive
   rule — keep the 5 most recent — never says which of those is an entry. Counted by
   subsection, one moves and the file barely shrinks. Counted by bullet, 21 of 26 move
   and roughly 21KB with them, so "moving them would move nothing" is false by very
   nearly the entire payoff of the split. The ambiguity is the finding; the arithmetic was never the
-  reason.
-  The actual reason to defer: all 26 came from one investigation on one day, and 20,181
-  of the 27,595 bytes are a single subsection. Archiving by bullet would cut that
+  reason. (The count was 4 subsections when this was written and is 6 now; nothing
+  re-measures it, which is why it is stated with its date.)
+  The actual reason to defer: all 26 came from one investigation on one day, and 20,185
+  of the 39,314 bytes are still a single subsection. (That figure read 20,097 when this
+  entry was last written and nothing has edited that subsection since, so the two
+  measurements used different boundaries; this one is the bytes from its `###` heading to
+  the next one.) Archiving by bullet would cut that
   investigation in half across two files and leave the surviving five as orphans of an
   argument that lives elsewhere. Cut at the next *distinct* body of work, when there is
   a seam to cut along. Until then the file stays over the threshold for a reason
@@ -647,6 +819,114 @@ riding along behind prose.
   extraction step, so a pass that archives without lifting them is a silent regression.
 
 ## Completed
+
+### A second pass over the bounded-failures review
+
+(bounded-failures review, 2026-08-26 — `fix/bounded-failures-ii`)
+
+**Every name a user may pin now has to reach an implementation.**
+`config.WHISPER_BACKENDS` is what argparse renders as `--whisper`'s choices and what
+`get_config` validates `MOVIOLA_WHISPER` against, and the suite already proved the
+parser and the config reader agree with it — which proves the three restate one literal,
+not that the literal is right. A name added to the tuple and nowhere else would be
+offered in `--help`, accepted by argparse, preserved by `get_config`, and then die at
+`Unknown whisper backend:` *after* the video was downloaded, the frames extracted and
+the audio encoded.
+
+The new test drives the whole of `transcribe_video` once per name, with the names taken
+from the tuple rather than written into the test, and reads the dispatch branches out of
+`_transcribe_file`'s AST rather than restating the same list a second time. `auto` is
+asserted to have NO implementation, because it is a sentinel `resolve_whisper_choice`
+converts to `None` and a dispatch branch for it would be the defect. Each API name is
+required to reach four things, not one: an `API_CANDIDATES` entry so its key can be
+found, a dispatch branch so the upload happens, an `API_HOSTS` entry so
+`_announce_upload` names a hostname rather than falling through `.get(backend, backend)`
+and printing the backend's own name, and an endpoint on that host.
+
+**It could not be written RED and says so in its own docstring.** All four names have
+implementations today, so every assertion passed on first run; its only evidence is the
+KILL, which is weaker than a normal RED->GREEN and is the strongest available for a
+finding whose subject is a missing check rather than a broken behaviour. Six mutations,
+six killed: a `deepgram` in the table and nowhere else (six tests), `openai` dropped
+from `API_HOSTS` (three), its dispatch branch removed (three), its branch copy-pasted
+from Groq's so the right name posts to the wrong provider (two), `openai` dropped from
+`API_CANDIDATES` (one), and the sentinel given a dispatch branch (two). The
+copy-paste mutation survived the first version of the test and the gap was written up
+as a NON-GOAL before it was closed; closing it took tying three separately-maintained
+tables together, and the NON-GOAL now records the narrower blind spot that remains.
+
+**`duration_seconds` no longer raises on a non-numeric field — and the finding's premise
+was wrong.** The entry said a container reporting `N/A` takes down the whole run. `N/A`
+is real, but it belongs to ffprobe's **default** writer, not to the JSON writer moviola
+actually asks for. Proved on one real file with one real ffprobe: the default writer
+prints `duration=N/A`, `start_time=N/A`, `bit_rate=N/A`; `-print_format json` omits those
+keys entirely, and an absent key was already handled by the `or 0` chain. So the
+`ValueError` was **not reachable** through moviola's own command line. Two tests pin both
+halves of that contrast, so if ffprobe ever starts emitting the string into JSON the
+suite says so rather than the guard silently becoming load-bearing.
+
+The guard shipped anyway, as disclosed defence in depth rather than a fix for a live
+crash: moviola pins no ffprobe version and no yt-dlp version, `-show_optional_fields
+always` (ffmpeg >= 5.1) is a documented way to put `N/A` *into* the JSON, and the yt-dlp
+half — `info.json`'s `duration`, read on the transcript-only path where there is no video
+to probe — has no writer guarantee behind it at all. `untrusted.finite_float` is the one
+definition both callers share; it lives in the leaf module because `frames.py` and
+`moviola.py` are on opposite sides of an import edge and a second copy is the failure
+mode this repo has already been bitten by.
+
+Non-finite is rejected as well as non-numeric, and that is not pedantry: `float()`
+accepts `"nan"` and `"inf"` and returns them happily, so leaving them through moves the
+crash two functions downstream into `_clamp_fps`, where `int(round(nan))` raises
+`ValueError: cannot convert float NaN to integer` and `int(round(inf))` raises
+`OverflowError` — both naming a frame-budget helper the user never heard of instead of
+the metadata that was bad.
+
+The replacement is also strictly better than the `or` chain it replaces, which is a
+separate defect the entry did not name. `fmt["duration"] or video_stream["duration"]`
+takes `"N/A"` — a truthy string — and never consults the stream that knew the answer.
+Nesting the two `finite_float` calls makes "could not parse" fall through to the
+fallback, which is what the fallback was for. The same guard was widened to
+`size_bytes`, parsed with a bare `int()` two lines below, on the same argument.
+
+Five mutations, five killed: the finding's own (`float()` restored, 3 tests), the bare
+`int()` on size (1), the bare `float()` on yt-dlp's duration (1), the finiteness check
+dropped (7, across both the guard's own tests and the frame-budget one), and the nesting
+flattened back to an `or` chain (1 — the fall-through). 651 tests green.
+
+**The format ladder's fallback can no longer download something bigger than the rung
+above it.** `bv*[height<=720]+ba/b[height<=720]/bv+ba/b` bounded its first two rungs and
+not its tail, and `bv*`/`b` select the BEST rendition yt-dlp can find — so a 4K-only
+upload fell through both bounds and downloaded at 4K, on the flag whose whole purpose is
+staying small. The tail is now `wv*+ba/w`, which takes the smallest.
+
+**The finding asked for a property the fix deliberately does not have, and the difference
+is written into the test's docstring.** It framed this as "every selector in the chain
+carries a height bound". A bounded tail — `wv*[height<=1080]+ba/w[height<=1080]` — matches
+nothing at all on a ladder whose smallest rendition is 4K, and a yt-dlp selector that
+matches nothing fails the download outright: it would convert a working, oversized
+download into no download. `wv*`/`w` carry no bound and need none, because they match
+everything the old tail matched. So what is pinned is the weaker true property — no rung
+can select a larger rendition than the rung above it, i.e. no unbounded *best*-video
+selector remains anywhere in the chain.
+
+The two selectors were lifted out of `download_url` into module-level `VIDEO_FORMAT` and
+`AUDIO_FORMAT` first, as a pure refactor with the suite unchanged at 675, so the test
+compares a named policy rather than an AST-extracted local. The behavioural half drives
+yt-dlp's own `build_format_selector` over eight synthetic ladders with no network, and
+runs the previous string beside the current one so the before/after is executed rather
+than asserted — with a vacuity guard that fails if the two ever converge again. Ladder
+ORDER is load-bearing there and cost a wrong answer to learn: `build_format_selector`
+sorts nothing, `bv*` takes the last matching entry and `wv*` the first, so a list written
+best-first inverts every expectation in the file.
+
+Seven mutations, seven killed: the finding's own tail restored (4 tests), a leading
+`[height<=720]` dropped (5), the rejected 1080-bounded tail (3), the shrink taken out of
+the audio as well (2), `--audio-only` downgraded to worst audio (1), the constant
+bypassed by hardcoding the old string at the call site (1), and a `--format-sort` that
+redefines what "worst" means (1). Three limits the fix does not reach are filed above
+rather than left implied: it is monotonic and not a cap, "worst" is yt-dlp's definition
+and only a caller-side rule keeps it meaning resolution, and the muxed rung takes the
+audio down with the video. 700 tests green.
 
 ### stderr was a second document into the agent's context, and nothing fenced it
 
