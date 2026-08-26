@@ -356,6 +356,17 @@ def main() -> int:
                 transcript_source = f"whisper ({used_backend})"
             except SystemExit as exc:
                 print(f"[moviola] whisper fallback failed: {exc}", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001
+                # The transcript is optional; the report is not. Frames are
+                # already extracted and written by the time this runs, and an
+                # unexpected exception here used to take them down with it —
+                # a raw traceback and nothing on stdout at all. KeyboardInterrupt
+                # is not an Exception, so Ctrl-C still ends the run.
+                print(
+                    f"[moviola] whisper fallback failed "
+                    f"({type(exc).__name__}: {exc}) — continuing without a transcript",
+                    file=sys.stderr,
+                )
         else:
             setup_py = SCRIPT_DIR / "setup.py"
             if whisper_choice == LOCAL_BACKEND:

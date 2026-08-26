@@ -369,6 +369,53 @@ def _build_multipart(fields: dict[str, str], file_path: Path) -> tuple[bytes, st
     return buf.getvalue(), boundary
 
 
+# extract_audio pins 64 kbps mono, so bytes convert to minutes without an
+# ffprobe spawn. An estimate on purpose — see _announce_upload.
+AUDIO_BYTES_PER_MINUTE = 64_000 / 8 * 60
+COST_WARN_MINUTES = 60
+
+API_HOSTS = {"groq": "api.groq.com", "openai": "api.openai.com"}
+
+
+def _announce_upload(backend: str, audio_bytes: int) -> None:
+    """Say what is about to be sent, and where, before the first paid request.
+
+    The frame path already warns before it spends: moviola.py prints a
+    token-burner notice above 250 frames and a coverage notice on videos over
+    ten minutes. The audio path had no equivalent. plan_chunks splits at the
+    24 MB upload cap with no ceiling on the number of chunks that produces, and
+    each chunk is one billed request, so a long video became an unannounced
+    sequence of them.
+
+    This deliberately does NOT cap anything. A cap would break the long-video
+    case it exists to protect, and picking a ceiling for someone else's budget
+    is not this script's call. What was missing is that the spend was invisible
+    until after it happened.
+
+    Minutes are ESTIMATED from the byte count at extract_audio's fixed bitrate
+    rather than probed: this runs before every upload and a subprocess for one
+    stderr line is not worth it. The number is an order of magnitude, not a
+    billing statement, and it says nothing about what either provider charges.
+    """
+    minutes = audio_bytes / AUDIO_BYTES_PER_MINUTE
+    requests = max(1, math.ceil(audio_bytes / MAX_UPLOAD_BYTES))
+    host = API_HOSTS.get(backend, backend)
+    print(
+        f"[moviola] audio: {audio_bytes / (1024 * 1024):.1f} MB (~{minutes:.0f} min) — "
+        f"uploading to {host} in {requests} request{'' if requests == 1 else 's'}…",
+        file=sys.stderr,
+    )
+    if minutes >= COST_WARN_MINUTES:
+        print(
+            f"[moviola] Warning: that is roughly {minutes / 60:.1f} hours of audio and "
+            f"the {backend} API bills per minute of it. Narrow the job with "
+            "`--start HH:MM:SS --end HH:MM:SS`, skip transcription with "
+            "`--no-whisper`, or `pip install \"faster-whisper>=1.0\"` to run it on "
+            "this machine for nothing.",
+            file=sys.stderr,
+        )
+
+
 MAX_ATTEMPTS = 4       # initial + 3 retries
 MAX_429_RETRIES = 2
 RETRY_BASE_DELAY = 2.0
@@ -492,23 +539,67 @@ def shift_segments(segments: list[dict], offset_seconds: float) -> list[dict]:
     ]
 
 
-def _segments_from_response(data: dict) -> list[dict]:
-    """Convert Whisper verbose_json into our {start, end, text} segment format."""
+def _as_seconds(value: object) -> float:
+    """Coerce a response timestamp to a rounded float; 0.0 when it is unusable.
+
+    A segment whose timestamp is garbled is still worth its text. Losing the
+    transcript over one bad float would be the wrong trade, and float(None)
+    raising TypeError inside a list comprehension is how that used to happen.
+
+    NaN and the infinities are the cases that do not announce themselves:
+    json.loads admits the non-standard `NaN`/`Infinity`/`-Infinity` tokens by
+    default, and float() and round() both accept them without complaint. They
+    survive this function only to blow up later at int(seg["start"]) in
+    format_transcript, which runs over the WHOLE concatenated transcript — so
+    one bad timestamp from one chunk would discard every segment, which is the
+    exact trade this is here to avoid. isfinite is the check that sees them.
+    """
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return round(seconds, 2) if math.isfinite(seconds) else 0.0
+
+
+def _segments_from_response(data: object) -> list[dict]:
+    """Convert Whisper verbose_json into our {start, end, text} segment format.
+
+    Deliberately defensive about shape, because `data` is whatever a 200
+    response body happened to parse to and nothing between here and the provider
+    guarantees the documented object: a proxy or gateway can answer 200 with a
+    JSON array or a bare string, and a schema change can put non-dicts inside
+    "segments". Each of those reached .get() or .strip() on the wrong type and
+    raised AttributeError or TypeError — neither of which any caller caught, so
+    a malformed payload took down the whole report, frames included, when the
+    frames were already extracted and cost nothing to keep.
+
+    It is NOT a schema validator and does not try to be: a well-formed object
+    carrying nonsense text passes straight through, which is correct — judging
+    transcript content is not this function's job.
+    """
+    if not isinstance(data, dict):
+        raise SystemExit(
+            f"Whisper returned a JSON {type(data).__name__}, expected an object"
+        )
+
     out: list[dict] = []
-    for seg in data.get("segments") or []:
-        text = (seg.get("text") or "").strip()
-        if not text:
+    raw = data.get("segments")
+    for seg in raw if isinstance(raw, list) else []:
+        if not isinstance(seg, dict):
+            continue
+        text = seg.get("text")
+        if not isinstance(text, str) or not text.strip():
             continue
         out.append({
-            "start": round(float(seg.get("start") or 0.0), 2),
-            "end": round(float(seg.get("end") or 0.0), 2),
-            "text": text,
+            "start": _as_seconds(seg.get("start")),
+            "end": _as_seconds(seg.get("end")),
+            "text": text.strip(),
         })
 
     if not out:
-        full = (data.get("text") or "").strip()
-        if full:
-            out.append({"start": 0.0, "end": 0.0, "text": full})
+        full = data.get("text")
+        if isinstance(full, str) and full.strip():
+            out.append({"start": 0.0, "end": 0.0, "text": full.strip()})
 
     return out
 
@@ -647,17 +738,15 @@ def transcribe_video(
         )
         segments = _transcribe_local(audio_path, options)
     elif audio_bytes <= MAX_UPLOAD_BYTES:
-        print(
-            f"[moviola] audio: {audio_bytes / 1024:.0f} kB — uploading to {backend} Whisper…",
-            file=sys.stderr,
-        )
+        _announce_upload(backend, audio_bytes)
         segments = transcribe_one(audio_path)
     else:
+        _announce_upload(backend, audio_bytes)
         duration = audio_duration(audio_path)
         plan = plan_chunks(duration, audio_bytes, MAX_UPLOAD_BYTES)
         print(
-            f"[moviola] audio: {audio_bytes / (1024 * 1024):.0f} MB exceeds "
-            f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB — splitting into {len(plan)} chunks…",
+            f"[moviola] splitting into {len(plan)} chunks to stay under the "
+            f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload cap…",
             file=sys.stderr,
         )
         chunks = split_audio(audio_path, audio_out.parent / "chunks", plan)

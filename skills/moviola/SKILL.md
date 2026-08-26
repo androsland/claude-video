@@ -242,6 +242,8 @@ The script gets a timestamped transcript in one of two ways:
 
 **Speed.** Local transcription is compute, not a network round-trip, so it is the slow backend: expect roughly real-time or better on a GPU and several times slower than real-time on CPU with `large-v3`. If a long video on CPU is too slow, set `MOVIOLA_WHISPER_MODEL=small` or narrow the request with `--start`/`--end` — a focused run only transcribes the range you asked for.
 
+**Cost, on the API backends only.** Groq and OpenAI bill per minute of audio, and a long video is a lot of minutes. Before the first request moviola prints the audio size, the host it is about to upload to, and how many requests that will take; past an hour of audio it also says so plainly and names the three ways out (`--start`/`--end`, `--no-whisper`, or the local backend). It does **not** cap or refuse anything — picking a ceiling for someone else's budget is not this script's call, and the minutes are estimated from the encoded size rather than probed, so treat the number as an order of magnitude. The enforcement boundary for a tool running under your own key is the key itself: both Groq and OpenAI support a per-key spend limit, and that is the thing that actually stops a runaway. The local backend is free and prints nothing of the sort.
+
 ## Failure modes and handling
 
 - **Setup preflight failed** → run `python3 "${SKILL_DIR}/scripts/setup.py"` (auto-installs ffmpeg/yt-dlp via brew on macOS, scaffolds the `.env`). For a transcription backend, offer both options: `pip install "faster-whisper>=1.0"` (no account) or an API key written to `~/.config/moviola/.env`.
