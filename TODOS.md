@@ -395,11 +395,37 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   only if whoever writes it remembers, which is exactly the limitation the `stderr_line`
   entry above already records for the same reason. Filed so the next one knows the rule.
 
-- **The video format fallback has no height cap.** (bounded-failures review, 2026-08-26)
-  `bv*[height<=720]+ba/b[height<=720]/bv+ba/b` ends in two unrestricted selectors, so a
-  video with no 720p-or-below variant downloads at whatever the highest rendition is —
-  4K, on a flag whose entire point is to stay small. It is a fallback that silently
-  inverts the intent of the two selectors before it.
+- **The fallback is monotonic, not capped: a 4K-only upload still downloads at 4K.**
+  (bounded-failures review, 2026-08-26) `download.VIDEO_FORMAT`'s tail is `wv*+ba/w`,
+  which takes the SMALLEST rendition a ladder offers rather than the largest, so a ladder
+  offering 4K and 1080 now takes the 1080. A ladder whose only rendition is 4K still
+  takes the 4K, because there is nothing else to fetch, and that is deliberate: bounding
+  the tail at 1080 makes it match nothing on such a ladder, and a yt-dlp selector that
+  matches nothing fails the download outright rather than falling back. The only
+  remaining lever is transcoding after the fact, which spends CPU to save disk and is a
+  different trade from the one this flag makes. Non-goal: this is not the
+  unbounded-best-selector entry that `test_the_fallback_stays_small` closed and does not
+  reopen it.
+
+- **"Worst" is yt-dlp's definition, and moviola pins it only by passing no sort order.**
+  (bounded-failures review, 2026-08-26) `wv*`/`w` mean worst *by the active
+  `--format-sort`*, whose default leads on `res` — which is the only reason the fallback
+  shrinks the picture rather than, say, the bitrate. moviola passes no `--format-sort`,
+  and `test_no_format_sort_is_passed` is the whole of what keeps that true; a future flag
+  that added one would silently redefine what the fallback selects. Same caller-side
+  shape as the `stderr_line` and `finite_float` entries above, filed for the same reason.
+  Non-goal: the synthetic ladders the behavioural tests drive assume yt-dlp's worst-first
+  ordering convention, and nothing in a network-free suite drives a real extractor, so an
+  extractor emitting a differently-ordered format list would be invisible to them.
+
+- **The muxed fallback shrinks the transcript's source along with the picture.**
+  (bounded-failures review, 2026-08-26) The last rung, `w`, selects a whole file, so on a
+  ladder with no separate audio stream the smaller video brings its own smaller audio,
+  and that audio is what Whisper is handed. The split-stream rungs keep `ba` and
+  `test_best_audio_survives_the_shrink` pins it; the muxed case has no way to keep the
+  good audio and drop the big video short of two downloads. Filed because it is a quality
+  trade made silently — nothing in the report says the transcript came from the ladder's
+  worst audio.
 
 - **A pinned API backend never falls back to the other one.** (forgeward ai-output
   review, 2026-08-26) When `--whisper groq` exhausts its retry ladder the run stops with
@@ -650,8 +676,8 @@ riding along behind prose.
 
 - **This file is over the ~50KB archive threshold, and the split is deferred on a
   judgement, not on arithmetic.** (2026-08-26) Measured with
-  `awk '/^## Completed/{f=1} f' TODOS.md | wc -c`: 93,804 bytes total, of which
-  `## Completed` is 36,750 — 39%, a genuine mass and not a rounding error. (At the merge
+  `awk '/^## Completed/{f=1} f' TODOS.md | wc -c`: 98,552 bytes total, of which
+  `## Completed` is 39,314 — 40%, a genuine mass and not a rounding error. (At the merge
   base for the stderr branch it was 53,933 / 51.2%; both halves have grown since, the
   live sections faster than the completed one.)
   **The previous version of this entry said the split would "move nothing" because there
@@ -663,8 +689,11 @@ riding along behind prose.
   nearly the entire payoff of the split. The ambiguity is the finding; the arithmetic was never the
   reason. (The count was 4 subsections when this was written and is 6 now; nothing
   re-measures it, which is why it is stated with its date.)
-  The actual reason to defer: all 26 came from one investigation on one day, and 20,097
-  of the 36,750 bytes are still a single subsection. Archiving by bullet would cut that
+  The actual reason to defer: all 26 came from one investigation on one day, and 20,185
+  of the 39,314 bytes are still a single subsection. (That figure read 20,097 when this
+  entry was last written and nothing has edited that subsection since, so the two
+  measurements used different boundaries; this one is the bytes from its `###` heading to
+  the next one.) Archiving by bullet would cut that
   investigation in half across two files and leave the surviving five as orphans of an
   argument that lives elsewhere. Cut at the next *distinct* body of work, when there is
   a seam to cut along. Until then the file stays over the threshold for a reason
@@ -748,6 +777,41 @@ Five mutations, five killed: the finding's own (`float()` restored, 3 tests), th
 `int()` on size (1), the bare `float()` on yt-dlp's duration (1), the finiteness check
 dropped (7, across both the guard's own tests and the frame-budget one), and the nesting
 flattened back to an `or` chain (1 — the fall-through). 651 tests green.
+
+**The format ladder's fallback can no longer download something bigger than the rung
+above it.** `bv*[height<=720]+ba/b[height<=720]/bv+ba/b` bounded its first two rungs and
+not its tail, and `bv*`/`b` select the BEST rendition yt-dlp can find — so a 4K-only
+upload fell through both bounds and downloaded at 4K, on the flag whose whole purpose is
+staying small. The tail is now `wv*+ba/w`, which takes the smallest.
+
+**The finding asked for a property the fix deliberately does not have, and the difference
+is written into the test's docstring.** It framed this as "every selector in the chain
+carries a height bound". A bounded tail — `wv*[height<=1080]+ba/w[height<=1080]` — matches
+nothing at all on a ladder whose smallest rendition is 4K, and a yt-dlp selector that
+matches nothing fails the download outright: it would convert a working, oversized
+download into no download. `wv*`/`w` carry no bound and need none, because they match
+everything the old tail matched. So what is pinned is the weaker true property — no rung
+can select a larger rendition than the rung above it, i.e. no unbounded *best*-video
+selector remains anywhere in the chain.
+
+The two selectors were lifted out of `download_url` into module-level `VIDEO_FORMAT` and
+`AUDIO_FORMAT` first, as a pure refactor with the suite unchanged at 675, so the test
+compares a named policy rather than an AST-extracted local. The behavioural half drives
+yt-dlp's own `build_format_selector` over eight synthetic ladders with no network, and
+runs the previous string beside the current one so the before/after is executed rather
+than asserted — with a vacuity guard that fails if the two ever converge again. Ladder
+ORDER is load-bearing there and cost a wrong answer to learn: `build_format_selector`
+sorts nothing, `bv*` takes the last matching entry and `wv*` the first, so a list written
+best-first inverts every expectation in the file.
+
+Seven mutations, seven killed: the finding's own tail restored (4 tests), a leading
+`[height<=720]` dropped (5), the rejected 1080-bounded tail (3), the shrink taken out of
+the audio as well (2), `--audio-only` downgraded to worst audio (1), the constant
+bypassed by hardcoding the old string at the call site (1), and a `--format-sort` that
+redefines what "worst" means (1). Three limits the fix does not reach are filed above
+rather than left implied: it is monotonic and not a cap, "worst" is yt-dlp's definition
+and only a caller-side rule keeps it meaning resolution, and the muxed rung takes the
+audio down with the video. 700 tests green.
 
 ### stderr was a second document into the agent's context, and nothing fenced it
 

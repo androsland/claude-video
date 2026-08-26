@@ -93,6 +93,28 @@ All notable changes to `/moviola` are documented here.
 
 ### Fixed
 
+- **The download's size limit no longer inverts itself on the fallback.** The video
+  format selector bounded its first two rungs at 720p and then fell back to
+  `bv*+ba/b` — *best* video, no bound — so an upload with no 720p-or-below rendition
+  downloaded at whatever the maximum was, 4K included, on the flag whose whole purpose is
+  staying small. The tail is now `wv*+ba/w`, which takes the smallest rendition a ladder
+  offers instead of the largest. It carries no height bound and deliberately so: a
+  bounded tail matches *nothing* on a ladder whose smallest rendition is 4K, and a yt-dlp
+  selector that matches nothing fails the download outright rather than falling back, so
+  the bounded version would have turned an oversized download into no download at all.
+  The guarantee is therefore monotonic rather than absolute — no rung can pick something
+  larger than the rung above it, and a 4K-only upload is still 4K because there is
+  nothing else to fetch. A ladder that *does* offer 720p selects exactly what it always
+  did, and best audio is kept wherever audio is a separate stream, since the transcript
+  is made from it.
+- `tests/test_the_fallback_stays_small.py` — the selectors are now module-level
+  `VIDEO_FORMAT` / `AUDIO_FORMAT` constants, and the test reads the ladder structurally
+  (no unbounded best-video selector survives anywhere in it) as well as behaviourally,
+  driving yt-dlp's own format selector over eight synthetic ladders with no network and
+  running the previous string beside the current one so the before/after is executed
+  rather than asserted. Seven mutations fail it, including the finding's own tail, the
+  rejected 1080-bounded tail, a shrink that took the audio down with the video, and a
+  `--format-sort` that would redefine what "worst" means.
 - **A number out of a subprocess is now parsed as a string a stranger wrote.** ffprobe's
   `format.duration` and `format.size`, and yt-dlp's `info.json` `duration` on the path
   with no video to probe, were all handed to a bare `float()` / `int()`. A new

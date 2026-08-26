@@ -16,6 +16,24 @@ from urllib.parse import urlparse
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".flv", ".wmv"}
 
+# The two yt-dlp format selectors, named because they are a policy rather than
+# an implementation detail: a slash-separated fallback ladder, tried left to
+# right, that decides how big a download is allowed to get.
+#
+# The tail used to be `bv*+ba/b` — BEST video, no bound — so a 4K-only upload
+# fell through both bounded rungs and downloaded at 4K, on the branch whose
+# whole purpose is staying small. `wv*`/`w` ask for the worst rendition
+# instead, which is the smallest one the ladder offers.
+#
+# They carry no height bound of their own, and deliberately so: a bounded tail
+# matches NOTHING on a ladder whose smallest rendition is above the bound, and
+# a yt-dlp selector that matches nothing fails the download outright rather
+# than falling back. `wv*`/`w` match everything the old tail matched. Audio
+# stays `ba` wherever it is selected separately — the transcript is made from
+# it, and it is not the expensive half.
+VIDEO_FORMAT = "bv*[height<=720]+ba/b[height<=720]/wv*+ba/w"
+AUDIO_FORMAT = "ba/bestaudio"
+
 
 def is_url(source: str) -> bool:
     if source.startswith("-"):
@@ -182,7 +200,7 @@ def download_url(
     before = snapshot_dir(out_dir)
     output_template = str(out_dir / "video.%(ext)s")
 
-    fmt = "ba/bestaudio" if audio_only else "bv*[height<=720]+ba/b[height<=720]/bv+ba/b"
+    fmt = AUDIO_FORMAT if audio_only else VIDEO_FORMAT
     cmd = [
         "yt-dlp",
         "-N", "8",
