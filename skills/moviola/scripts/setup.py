@@ -59,7 +59,7 @@ ENV_TEMPLATE = """# /moviola configuration
 GROQ_API_KEY=
 OPENAI_API_KEY=
 
-# Which backend to use. auto = an API key if one is set, else local.
+# Which backend to use. auto = local when faster-whisper is importable, else an API key.
 # Allowed values: auto | local | groq | openai
 # MOVIOLA_WHISPER=auto
 

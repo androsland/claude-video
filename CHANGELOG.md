@@ -14,7 +14,7 @@ All notable changes to `/moviola` are documented here.
 ### Changed
 - **`--start` / `--end` now clip the audio before transcription.** `extract_audio` seeks on the input side (`-ss`/`-to` before `-i`) and segment timestamps are shifted back into source time, so a focused run transcribes ~30 seconds of audio instead of the whole video.
 - **Setup treats local Whisper as a first-class way to satisfy the check.** `setup.py --check`, `--json`, and the `SessionStart` hook are now satisfied by *either* an API key or an importable `faster_whisper`, and the install path offers `pip install "faster-whisper>=1.0"` before the key placeholders.
-- Backend resolution is API-first when unpinned, so an existing key holder never silently trades a five-second API call for a multi-minute local transcode. Local is the fallback; `MOVIOLA_WHISPER=local` makes it the default outright.
+- Backend resolution is local-first when unpinned: if faster-whisper is importable the audio never leaves the machine. `MOVIOLA_WHISPER=groq` or `openai` trades that for speed.
 - The `SessionStart` hook no longer reads API key *values* into shell variables — it only tests for presence.
 
 ## [0.2.0] — 2026-06-29

@@ -147,7 +147,7 @@ Optional flags:
 - `--resolution W` — change frame width in px (default 512; bump to 1024 only if the user needs to read on-screen text)
 - `--fps F` — override auto-fps (clamped to 2 fps max)
 - `--out-dir DIR` — keep working files somewhere specific (default: an auto-generated tmp dir)
-- `--whisper local|groq|openai` — force a specific Whisper backend (default: an API key if one is set, else `local`)
+- `--whisper local|groq|openai` — force a specific Whisper backend (default: `local` when faster-whisper is importable, else an API key)
 - `--no-whisper` — disable the Whisper fallback entirely (frames-only if no captions)
 - `--no-dedup` — keep near-duplicate frames. By default a frame-delta pass drops frames that are visually near-identical to the previous kept one (held slides, static screen recordings, paused video) so the frame budget goes to distinct content; the report's **Frames** line notes how many were dropped. Pass this only if the user needs every sampled frame (e.g. judging subtle frame-to-frame motion).
 
@@ -229,7 +229,7 @@ The script gets a timestamped transcript in one of two ways:
    - **`groq`** — `whisper-large-v3`. Cheaper and faster than OpenAI. Get a key at console.groq.com/keys.
    - **`openai`** — `whisper-1`. The compatible fallback. Get a key at platform.openai.com/api-keys.
 
-**Which one runs.** `--whisper <backend>` wins, then `MOVIOLA_WHISPER` in `~/.config/moviola/.env`, then `auto`. Under `auto` an API key is used if one is set (Groq before OpenAI) and `local` is the fallback — so adding faster-whisper never silently changes what an existing key-holder gets. Set `MOVIOLA_WHISPER=local` to make on-device the default even with a key present. `--no-whisper` skips the fallback entirely.
+**Which one runs.** `--whisper <backend>` wins, then `MOVIOLA_WHISPER` in `~/.config/moviola/.env`, then `auto`. Under `auto` the order is local-first: `local` runs whenever faster-whisper is importable — even with a key set — and an API backend runs only when it is not. So on a machine where faster-whisper is installed, a key sitting around for some unrelated tool does not cause an upload; without it, `auto` still falls back to that key. The cost is real: a CPU transcode takes minutes where an API call takes seconds. Set `MOVIOLA_WHISPER=groq` or `openai` (or pass `--whisper`) to trade the other way. `--no-whisper` skips the fallback entirely.
 
 **Local backend settings** (all optional, in `~/.config/moviola/.env`):
 
@@ -271,7 +271,7 @@ If you already watched a video this session and the user asks a follow-up, do **
 - Writes the downloaded video, frames, audio, and an intermediate transcript to a working directory under the system temp dir (or `--out-dir` if specified) so Claude can `Read` them
 - Reads / creates `~/.config/moviola/.env` (mode `0600`) to store the Whisper API key(s), backend settings, and a `SETUP_COMPLETE` marker. As a fallback, also reads `.env` in the current working directory
 
-Under the default `auto`, the backend that runs is an API one if a key is configured, and `local` otherwise — so **whether audio leaves the machine depends on your configuration**. `MOVIOLA_WHISPER=local` or `--whisper local` makes that unconditional; `--no-whisper` skips transcription entirely. The report's transcript header names the backend that actually ran.
+Under the default `auto`, the backend that runs is `local` when faster-whisper is importable, and an API one only when it is not — so with the local backend installed, a key present in the environment for some other tool does not cause an upload. Without it, `auto` does fall back to that key. `MOVIOLA_WHISPER=groq` or `openai` (or `--whisper groq|openai`) opts into one deliberately; `--no-whisper` skips transcription entirely. The report's transcript header names the backend that actually ran.
 
 **What this skill does NOT do:**
 - Does not upload the video itself to any API — only the extracted audio ever goes out, and only to an API backend, and only when native captions are missing AND Whisper is not disabled with `--no-whisper`

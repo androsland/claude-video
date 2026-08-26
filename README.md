@@ -175,7 +175,7 @@ Captions cover the majority of public videos for free. The Whisper fallback only
 
 **The local backend needs no account and never uploads your audio.** The only thing it sends over the network is a request for model weights from Hugging Face — a full download on first use (2.9 GB for the `large-v3` default, 464 MB with `MOVIOLA_WHISPER_MODEL=small`, 75 MB with `tiny`, cached in `~/.cache/huggingface`), then a revision check on later loads, since faster-whisper resolves the model with `local_files_only=False` and falls back to the cache only when that check fails. Set `HF_HUB_OFFLINE=1` to suppress the check once the weights are cached. Your audio is never part of any of these requests. It uses the GPU when one is usable and falls back to CPU otherwise, so it is also the slow backend: roughly real-time or better on a GPU, several times slower than real-time on CPU with `large-v3`. Drop to `small` or `distil-large-v3` if that matters more than accuracy.
 
-**Which backend runs:** `--whisper <backend>` wins, then `MOVIOLA_WHISPER` in `~/.config/moviola/.env`, then `auto` — which uses an API key if one is set and falls back to `local`. Installing faster-whisper therefore never changes what an existing key-holder gets; set `MOVIOLA_WHISPER=local` to make on-device the default outright.
+**Which backend runs:** `--whisper <backend>` wins, then `MOVIOLA_WHISPER` in `~/.config/moviola/.env`, then `auto` — which uses `local` when faster-whisper is importable and falls back to an API key. With faster-whisper installed nothing is uploaded; without it, `auto` falls back to whichever API key it finds. Set `MOVIOLA_WHISPER=groq` or `openai` to trade privacy for speed deliberately.
 
 ```bash
 # ~/.config/moviola/.env

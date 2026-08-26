@@ -115,16 +115,17 @@ class TestBackendResolution:
         # actionable hint instead of failing part-way through a transcode.
         assert whisper.resolve_backend("local") == (None, None)
 
-    def test_api_key_wins_over_local_when_unpinned(self, monkeypatch):
+    def test_local_wins_over_an_api_key_when_unpinned(self, monkeypatch):
         monkeypatch.setattr(whisper, "load_api_key", lambda pref=None: ("groq", "k"))
         monkeypatch.setattr(whisper, "local_available", lambda: True)
-        # Adding a local backend must not change what an existing key-holder gets.
-        assert whisper.resolve_backend() == ("groq", "k")
-
-    def test_local_is_the_fallback_when_no_key(self, monkeypatch):
-        monkeypatch.setattr(whisper, "load_api_key", lambda pref=None: (None, None))
-        monkeypatch.setattr(whisper, "local_available", lambda: True)
+        # A key present in the environment for some unrelated tool must not
+        # cause an upload. Local-first is the reason this fork exists.
         assert whisper.resolve_backend() == ("local", None)
+
+    def test_an_api_key_is_the_fallback_when_local_is_absent(self, monkeypatch):
+        monkeypatch.setattr(whisper, "load_api_key", lambda pref=None: ("groq", "k"))
+        monkeypatch.setattr(whisper, "local_available", lambda: False)
+        assert whisper.resolve_backend() == ("groq", "k")
 
     def test_nothing_available_returns_none(self, monkeypatch):
         monkeypatch.setattr(whisper, "load_api_key", lambda pref=None: (None, None))

@@ -59,8 +59,8 @@ def main() -> int:
         choices=["local", "groq", "openai"],
         default=None,
         help="Force a specific Whisper backend. 'local' runs faster-whisper on "
-             "this machine and needs no API key. Default: use an API key if one "
-             "is set, else fall back to local.",
+             "this machine and needs no API key. Default: local when "
+             "faster-whisper is importable, else an API key.",
     )
     ap.add_argument(
         "--no-dedup",

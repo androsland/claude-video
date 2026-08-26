@@ -129,13 +129,14 @@ def local_available() -> bool:
 def resolve_backend(preferred: str | None = None) -> tuple[str | None, str | None]:
     """Return (backend, api_key). api_key is None for "local", which needs none.
 
-    Precedence when nothing is pinned is deliberately API-first: adding a local
-    backend must not silently change what an existing user with a key already
-    gets — faster-whisper may be installed on their machine for unrelated
-    reasons, and swapping a 5-second API call for a multi-minute CPU transcode
-    without being asked is a regression, not a feature. Local is the fallback
-    that makes the no-key case work at all; pin MOVIOLA_WHISPER=local (or pass
-    --whisper local) to make it the primary.
+    Precedence when nothing is pinned is deliberately local-first: if
+    faster-whisper is importable, the audio does not leave the machine. That
+    ordering is the point of this fork — a key that happens to be present in the
+    environment for some unrelated tool should not silently cause an upload. The
+    cost is real and is the reason the ordering is stated everywhere it is
+    observable: a CPU transcode can take minutes where an API call takes
+    seconds. Pin MOVIOLA_WHISPER=groq/openai (or pass --whisper) to trade the
+    other way.
 
     Returns (None, None) when no backend is usable — when `preferred` names an
     API backend whose key is missing, or "local" without faster-whisper — so the
@@ -146,12 +147,9 @@ def resolve_backend(preferred: str | None = None) -> tuple[str | None, str | Non
     if preferred:
         return load_api_key(preferred)
 
-    backend, api_key = load_api_key()
-    if backend:
-        return backend, api_key
     if local_available():
         return LOCAL_BACKEND, None
-    return None, None
+    return load_api_key()
 
 def extract_audio(
     video_path: str,

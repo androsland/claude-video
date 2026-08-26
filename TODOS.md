@@ -26,5 +26,5 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Completed
 
-- **On-device Whisper backend via faster-whisper.** No API key, no audio upload; CUDA with automatic CPU fallback around the full transcription (not just model load, since CTranslate2 resolves CUDA libraries lazily); pip CUDA wheels preloaded so `libcublas` resolves. Backend precedence is API-first when unpinned so existing key holders are unaffected. (local-whisper branch, 2026-08-26)
+- **On-device Whisper backend via faster-whisper.** No API key, no audio upload; CUDA with automatic CPU fallback around the full transcription (not just model load, since CTranslate2 resolves CUDA libraries lazily); pip CUDA wheels preloaded so `libcublas` resolves. Backend precedence is local-first when unpinned so audio never leaves the machine by accident. (local-whisper branch, 2026-08-26)
 - **`--start` / `--end` now clip the audio before transcription.** Input-side ffmpeg seeking plus a timestamp shift back into source time, so a focused run transcribes the range instead of the whole video. (local-whisper branch, 2026-08-26)
