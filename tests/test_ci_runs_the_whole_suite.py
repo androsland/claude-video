@@ -1047,10 +1047,13 @@ class TestTheWholeSuiteRunsInCI:
     @pytest.mark.parametrize("doc", ["README.md", "AGENTS.md"], ids=["readme", "agents"])
     def test_the_documented_interpreters_are_the_ones_the_matrix_runs(self, doc):
         # Both files state which interpreters CI runs, in prose, and until this
-        # test nothing read either. The workflow comment goes further and
-        # asserts a result per rung — "1041 passed on CPython 3.10.21 and 1041
-        # on CPython 3.13.15" — so dropping a rung leaves three separate places
-        # claiming a run that no longer happens.
+        # test nothing read either. The workflow comment goes further and states a
+        # pass count per rung, so dropping a rung leaves three separate places
+        # claiming a run that no longer happens. That sentence is deliberately NOT
+        # quoted here: nothing below reads it, so a copy of it in this file could
+        # only ever go stale — which is the rule stated at
+        # `test_exactly_one_workflow_runs_the_suite`, that restating something is
+        # how two copies of it drift apart.
         #
         # This test reads the VERSIONS out of that sentence's neighbourhood and
         # deliberately not the counts. A rung is a lasting claim; a pass count is

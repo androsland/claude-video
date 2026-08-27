@@ -71,8 +71,11 @@ jobs:
         # sentence measured 1021 on 3.10.12 and 1021 on 3.13.13 and additionally
         # checked that the 3.13 install resolved six packages — `exceptiongroup`,
         # `tomli` and `typing-extensions` correctly excluded by their markers.
-        # That resolution check has not been repeated in CI and nothing here
-        # re-verifies it.
+        # CI does repeat that: the same run's 3.13 rung logged `Successfully
+        # installed` with those six, and the 3.10 rung with those three added,
+        # which is the marker exclusion. What is missing is not the measurement
+        # but an ASSERTION — nothing reads an install log, so the exclusion holds
+        # only for as long as somebody looks.
         #
         # That count is a SNAPSHOT of this branch, not an invariant, and it went
         # stale TWICE inside the branch that introduced it. First at 993: the
