@@ -1457,11 +1457,18 @@ entry itself recorded, which is why it gets its own note rather than a one-line 
   states both. What changed is which number is presented as moviola's behaviour.
 
 - **What this does NOT establish.** It is not a general licence to rewrite shipped
-  release notes. The test that governs this — `test_the_docs_are_checked.py` — reads the
-  NEWEST heading only, so an older entry rewritten after the fact passes either way, and
-  it stayed green on both sides of this edit. Nothing in the suite noticed; a human
-  reviewer did. The rule that survives is narrower than the edit: correct an entry that
-  was false when written, leave one that has merely been overtaken.
+  release notes. The suite stayed green on both sides of this edit — nothing in it
+  noticed; a human reviewer did. The reason is worth stating at the right scope, because
+  an earlier draft of this bullet got it wrong: it is *not* that
+  `test_the_docs_are_checked.py` reads the newest heading only. That is true of
+  `TestTheChangelogDescribesTheVersionBeingShipped`, which pins the manifests to the
+  topmost `## [x.y.z]`; two other classes in the same file read the CHANGELOG **whole** —
+  `TestTheChangelogsTestCountsAreReal` scans every heading for `` `tests/x.py` — N tests ``
+  and collects each one, and the heading-backtick check walks every heading in every doc.
+  Both cover the whole file and neither can see a prose number like 25 MB, so the edit was
+  invisible for want of a pattern that matches it, not for being under an older heading.
+  The rule that survives is narrower than the edit: correct an entry that was false when
+  written, leave one that has merely been overtaken.
 
 ### CI's ffmpeg major version, and the pass counts that named it
 
