@@ -776,6 +776,21 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Documentation as a checked claim
 
+- **The marker-gating of the three 3.10-only packages is checkable and is checked by
+  nobody.** (docs/release-notes-and-stale-claims, 2026-08-27, testing review)
+  `requirements-ci.txt` gates `exceptiongroup`, `tomli` and `typing-extensions` behind
+  `python_version < "3.11"`, so the 3.13 rung installs six packages and the 3.10 rung
+  nine. CI performs that resolution on every run and prints it, and no test reads an
+  install log — so the invariant holds only while a human looks at one, which is the
+  shape that goes stale unnoticed. It does not need a log reader to close: the markers
+  are parseable from `requirements-ci.txt` directly, and the matrix interpreters are
+  already read out of the YAML by `test_ci_runs_the_whole_suite.py`, so a test can assert
+  that every marker-gated requirement is gated for exactly the interpreters below its
+  floor. **Not** a claim that a passing such test proves the install succeeded — that is
+  the log's to say and this would still not read one; it would pin the intent, not the
+  outcome. The workflow comment and the Completed entry that describe this gap say it
+  "is nowhere asserted", which stays true until this is done.
+
 - **`MOVIOLA_WHISPER_CPU_THREADS` is read by the code and named in no shipped document.**
   (docs/release-notes-and-stale-claims, 2026-08-27) `local_whisper.py:159` reads it and
   `:165` raises a named error on a bad value, but `git grep` over `*.md` and `*.sh` finds
