@@ -269,7 +269,13 @@ def get_metadata(video_path: str) -> dict:
     result = subprocess.run(
         [
             "ffprobe",
-            "-v", "quiet",
+            # -v error, not -v quiet, for the same reason whisper.py:408 says
+            # so: quiet silences ffprobe's stderr along with its info, so the
+            # `result.stderr` fenced below on a non-zero exit was always empty
+            # and this site rendered "(ffprobe exited non-zero and wrote
+            # nothing to stderr)" no matter what actually went wrong. stdout
+            # stays JSON either way.
+            "-v", "error",
             "-print_format", "json",
             "-show_format",
             "-show_streams",
@@ -281,7 +287,7 @@ def get_metadata(video_path: str) -> dict:
     if result.returncode != 0:
         raise SystemExit(
             "ffprobe failed:\n"
-            + stderr_block(result.stderr.strip(), source="ffprobe")
+            + stderr_block(result.stderr, source="ffprobe")
         )
 
     data = json.loads(result.stdout or "{}")
@@ -392,7 +398,7 @@ def extract(
     if result.returncode != 0:
         raise SystemExit(
             "ffmpeg frame extraction failed:\n"
-            + stderr_block(result.stderr.strip(), source="ffmpeg")
+            + stderr_block(result.stderr, source="ffmpeg")
         )
 
     offset = start_seconds or 0.0
@@ -464,7 +470,7 @@ def extract_scene_candidates(
     if result.returncode != 0:
         raise SystemExit(
             "ffmpeg scene extraction failed:\n"
-            + stderr_block(result.stderr.strip(), source="ffmpeg")
+            + stderr_block(result.stderr, source="ffmpeg")
         )
 
     offset = start_seconds or 0.0
@@ -829,7 +835,7 @@ def extract_keyframes(
     if result.returncode != 0:
         raise SystemExit(
             "ffmpeg keyframe extraction failed:\n"
-            + stderr_block(result.stderr.strip(), source="ffmpeg")
+            + stderr_block(result.stderr, source="ffmpeg")
         )
 
     offset = start_seconds or 0.0

@@ -97,17 +97,30 @@ _BIDI_OPENERS = {
 }
 _BIDI_CLOSERS = ("\u202c", "\u2069")
 
-# The three constants a fenced block is built from. Public because the tests
-# assert against them rather than against literals \u2014 a bound nobody can name is
-# a bound nobody can check.
+# The constants a fenced block is built from. Public because the tests assert
+# against them rather than against literals — a bound nobody can name is a
+# bound nobody can check, and `MAX_BLOCK_WIDTH` was exactly that until the
+# review that added `test_one_line_of_a_bounded_block_is_still_bounded`'s
+# allowance: it had been pinned by `< 1000`, five times its own value.
 #
 # The prefix is the only structural part. It goes on every line of the capture,
 # so a reader's rule is "unprefixed means moviola wrote it", and no foreign line
 # can satisfy that rule no matter what it contains.
 BLOCK_PREFIX = "| "
 
+# `| ` is ON + WS — it holds no STRONG character, and UAX#9 P2/P3 take a line's
+# base direction from its first strong one. A capture line opening in Hebrew or
+# Arabic therefore resolves the whole rendered line to RTL, N1/N2 carry the
+# leading neutrals along with it, and `| ` is painted at the visual RIGHT edge
+# with the author's text at visual column zero. `balance_bidi` is powerless
+# there: nothing was ever opened, so there is nothing to close. One LRM after
+# the prefix fixes the line's base direction to LTR before any foreign
+# character is read. It is not an opener or a closer, so it composes with
+# `balance_bidi` untouched, and it is invisible.
+DIR_ANCHOR = "\u200e"
+
 # Both bounds are measured rather than picked. A real ffmpeg failure at
-# `-loglevel info` \u2014 a 1s synthesized clip into an unwritable directory \u2014 came
+# `-loglevel info` — a 1s synthesized clip into an unwritable directory — came
 # back as 48 lines, 90th-percentile width 113, widest line 1371 (that one is
 # `showinfo` dumping x264's SEI user data as hex). 40 lines and 200 columns keep
 # an ordinary diagnostic essentially whole while bounding a hostile one, and the
@@ -272,9 +285,11 @@ def stderr_block(
 ) -> str:
     """Render a captured subprocess stderr as an attributed, bounded block.
 
-    Seven sites in this program raise `SystemExit(f"...: {result.stderr}")`
-    after an ffmpeg or ffprobe run returns non-zero, and every one of those
-    captures is a document somebody else wrote. At `-loglevel info` it opens
+    Seven sites in this program USED to raise
+    `SystemExit(f"...: {result.stderr}")` after an ffmpeg or ffprobe run
+    returned non-zero — the shape the AST sweep in
+    `tests/test_stderr_blocks_are_fenced.py` now refuses an eighth of. Every
+    one of those captures is a document somebody else wrote. At `-loglevel info` it opens
     with the container's `Metadata:` block — `title`, `comment`, `artist`,
     chosen by whoever made the video — and it lands in the agent's context
     beside the report, with nothing marking where their text ends and this
@@ -287,9 +302,11 @@ def stderr_block(
     Applied to a forty-line diagnostic that produces one line of forty joined
     fragments and throws away the structure the diagnostic was printed for.
 
-    So: `source` names the writer (a caller-supplied literal — the one trusted
-    argument), every line of the capture is prefixed with `BLOCK_PREFIX`, and
-    the result is bounded in both dimensions, because the writer chose both.
+    So: `source` names the writer, every line of the capture is prefixed with
+    `BLOCK_PREFIX`, and the result is bounded in both dimensions, because the
+    writer chose both. `source` used to be documented as "the one trusted
+    argument" and trusted on that word alone; it is the only value here that
+    reaches column zero, so it now goes through `stderr_line` like any other.
 
     The line bound keeps the TAIL. That is the load-bearing half of it: ffmpeg
     prints what went wrong last (`Conversion failed!` was the final line of
@@ -313,9 +330,15 @@ def stderr_block(
         to — ANSI CSI, OSC 8/52, the implicit marks U+200E/U+200F/U+061C —
         passes through a prefixed line untouched.
 
-      * **Only the prefix is structural.** The header and the "not shown" line
-        sit at column zero because they are this program's, and a foreign line
-        structurally cannot reach column zero. It can, however, contain text
+      * **Only the prefix is structural, and only in the STRING.** The header
+        and the "not shown" line sit at column zero because they are this
+        program's, and a foreign line structurally cannot reach column zero of
+        the string an agent ingests. On a terminal it still can: the ANSI family
+        disclosed above includes column-addressing sequences — CHA (`ESC[G`),
+        CNL (`ESC[E`), and the two-character 7-bit NEL (`ESC E`, which
+        `splitlines` correctly does not treat as a break) — that repaint foreign
+        text at physical column zero with no `| ` in front of it. `DIR_ANCHOR`
+        closes the bidi half of this and nothing closes the ANSI half. It can, however, contain text
         that reads exactly like either of them, and the width marker sits
         inside foreign territory by construction. Treat all three as notices,
         never as arithmetic to trust.
@@ -325,23 +348,54 @@ def stderr_block(
         afterwards. The result is still bounded — a 200-character slice can
         open at most 200 scopes — just not bounded AT `max_width`.
 
+      * **The bound is on what is RENDERED, not on what is read.**
+        `splitlines()` materializes every line of the capture before
+        `max_lines` is applied, so peak memory is O(lines in the capture) rather
+        than O(`max_lines`) — measured at +51MB RSS for a 10MB, 5M-line capture.
+        It is an amplifier and not a new unbounded read: `subprocess.run` has
+        already buffered the whole capture before this function is called, and
+        this is a failure path about to raise. A single enormous LINE costs
+        nothing extra, because `len(line)` is O(1) and the slice happens before
+        `balance_bidi` sees it.
+
       * **It cannot see a capture that never reaches it.** A subprocess given
         an inherited descriptor writes past this module entirely, which is
         exactly what `download.py` does with yt-dlp, and that remains the
         largest volume of remote text on this program's stderr.
     """
     text = str(value)
+    # `source` is the only value in this function that reaches column zero, so
+    # it is the only one that could forge a line moviola never wrote. The
+    # docstring called it "a caller-supplied literal — the one trusted
+    # argument", which is a convention that nothing enforced: an eighth site
+    # passing `cmd[0]`, a tool path or a filename would land foreign text at
+    # column zero, and the AST sweep keys on the attribute name `stderr` so it
+    # would not see it. One call closes it for every caller there will ever be.
+    source = stderr_line(source)
     if not text.strip():
         # An empty capture rendered as an empty block reads as "no diagnostic
         # exists", when what happened is that the tool exited non-zero and said
         # nothing — a different and more interesting fact.
         return f"({source} exited non-zero and wrote nothing to stderr)"
 
-    lines = text.splitlines()
+    # Trimmed here rather than at each call site. All seven passed
+    # `result.stderr.strip()`, which also eats the FIRST line's indentation — so
+    # an ffmpeg banner opening with an indented line rendered de-indented while
+    # every line below it kept its own. What wants trimming is the blank margin,
+    # never the foreign text's own shape, and that is a decision this module
+    # owns rather than one seven callers each get right separately.
+    lines = text.strip("\r\n").splitlines()
     dropped = max(0, len(lines) - max_lines)
+    kept = len(lines) - dropped
+    # Both numbers, because the header used to name only the capture size while
+    # `dropped` lines were silently absent below it: a 500-line capture was
+    # announced as "500 line(s) ... follow" above forty. A hostile capture can
+    # imitate this line, which is why the NON-GOALS call it a notice — but that
+    # is a reason not to TRUST it, never a licence for moviola's own arithmetic
+    # to be wrong.
     out = [
-        f"-- {len(lines)} line(s) of {source} output follow; moviola wrote none "
-        f"of them, and marks each with {BLOCK_PREFIX!r} --"
+        f"-- {kept} of {len(lines)} line(s) of {source} output follow; moviola "
+        f"wrote none of them, and marks each with {BLOCK_PREFIX!r} --"
     ]
     if dropped:
         out.append(f"({dropped} earlier line(s) not shown)")
@@ -350,5 +404,5 @@ def stderr_block(
             body = balance_bidi(line[:max_width]) + f" ...(+{len(line) - max_width} char(s))"
         else:
             body = balance_bidi(line)
-        out.append(BLOCK_PREFIX + body)
+        out.append(BLOCK_PREFIX + DIR_ANCHOR + body)
     return "\n".join(out)

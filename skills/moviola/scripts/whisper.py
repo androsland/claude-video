@@ -373,7 +373,7 @@ def extract_audio(
     if result.returncode != 0:
         raise SystemExit(
             "ffmpeg audio extraction failed:\n"
-            + stderr_block(result.stderr.strip(), source="ffmpeg")
+            + stderr_block(result.stderr, source="ffmpeg")
         )
     # Not `== 0`: an -ss past the end of the video exits 0 and writes a valid but
     # empty mp3 — measured at 333 bytes for a header-only file — which sails past
@@ -419,7 +419,7 @@ def audio_duration(audio_path: Path) -> float:
     if result.returncode != 0:
         raise SystemExit(
             "ffprobe failed:\n"
-            + stderr_block(result.stderr.strip(), source="ffprobe")
+            + stderr_block(result.stderr, source="ffprobe")
         )
     fmt = json.loads(result.stdout or "{}").get("format", {})
     return float(fmt.get("duration") or 0.0)
@@ -487,7 +487,7 @@ def split_audio(
         if result.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
             raise SystemExit(
                 f"ffmpeg failed to split audio chunk {index + 1}:\n"
-                + stderr_block(result.stderr.strip(), source="ffmpeg")
+                + stderr_block(result.stderr, source="ffmpeg")
             )
         chunks.append(AudioChunk(out_path, offset, duration))
     return chunks

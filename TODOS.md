@@ -90,13 +90,24 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   means stripping or escaping, and `untrusted.py` is deliberately not a sanitizer: the
   value is reported in full because a caller debugging a failed request needs to read
   what the server actually said. Recorded as a known hole with a stated reason, not a
-  plan. Non-goal: none of these forge a LINE, which is the property the tests pin, so
-  this is not a gap in the fix that shipped.
+  plan. Non-goal: none of these forge a LINE **in the string**, which is the property the
+  tests pin. That scoping got sharper on 2026-08-27, because `stderr_block` makes a
+  column-zero claim `stderr_line` never did: the CSI family also holds column-ADDRESSING
+  sequences — CHA (`ESC[G`), CNL (`ESC[E`) and the two-character 7-bit NEL (`ESC E`, which
+  `splitlines` correctly does not treat as a break) — and on a terminal those repaint a
+  captured line at physical column zero with no `| ` in front of it. The string an agent
+  ingests is unaffected and that is the reader the fence is built for; a human at a
+  terminal is the reader it is not. The bidi half of the same hole WAS closed there:
+  `DIR_ANCHOR` (U+200E, written by moviola) pins each rendered line's base direction to
+  LTR, so a RTL capture can no longer move the prefix to the visual right edge. U+200F
+  and U+061C inside the capture still reorder the neutral run after them, which is why
+  this entry stays open.
 
 - **Four stderr sites interpolate an exception raised while handling remote data, and the
-  channel is latent rather than live.** (security gate, 2026-08-26) `download.py:168`
-  (`info.json parse failed`), `moviola.py:233` and `:371` (`subtitle parse failed`), and
-  `moviola.py:403` (`whisper fallback failed`, the `except Exception` arm) each print
+  channel is latent rather than live.** (security gate, 2026-08-26; anchors re-verified
+  2026-08-27) `download.py:208` (`info.json parse failed`), `moviola.py:369` and `:501`
+  (`subtitle parse failed`), and `moviola.py:534` (`whisper fallback failed`, the
+  `except Exception` arm at `:527`) each print
   `{exc}` raw. A gate reviewer first flagged three of these as already-itemized uncovered
   surfaces; they are itemized nowhere, so they were audited from scratch. Every exception
   class reachable at these four builds its message from fixed strings and numbers:
@@ -110,32 +121,59 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   second cited `whisper.py:706-708` as a live path, and the third scoped the invariant
   to that one site. Segment dicts are subscripted rather than `.get()`-ed at three
   places, not one, and they do not share a set of feeders: `shift_segments`
-  (`whisper.py:706-708`) sees only Whisper output; `_dedupe` (`transcribe.py:75-80`)
+  (`whisper.py:757-759`) sees only Whisper output; `_dedupe` (`transcribe.py:75-80`)
   sees only caption output, being called from inside `parse_vtt` at `:68`; and
   `filter_range` (`:96`) and `format_transcript` (`:102-104`) see BOTH, which is the
   whole point of the shape and is what `whisper.py`'s module docstring means by "the
   rest of the pipeline doesn't care where the transcript came from". Three producers feed
   those three sites, and every one of them constructs `start`, `end` and `text`
-  unconditionally: `_segments_from_response` (`whisper.py:766`, and the whole-text
-  fallback at `:774`), `local_whisper._collect` (`:392`), and `parse_vtt`
+  unconditionally: `_segments_from_response` (`whisper.py:817`, and the whole-text
+  fallback at `:825`), `local_whisper._collect` (`:392`), and `parse_vtt`
   (`transcribe.py:55`). So a key a server omitted is defaulted long before anything
   indexes it. That invariant is what makes the class unreachable, it has to hold across
   all three producers because two of the three indexing sites are shared, and it is
-  recorded here so whoever adds a fourth knows what it has to hold. `moviola.py:403` is
+  recorded here so whoever adds a fourth knows what it has to hold. `moviola.py:534` is
   structurally safe from the ffmpeg value above it, because `SystemExit` subclasses
   `BaseException` and cannot land in an `except Exception`. `transcribe.py:62`
   interpolates `Path(path).name`, safe for a different reason — the yt-dlp output
-  template is the fixed `video.%(ext)s` (`download.py:117`, `:183`), so the filename never
+  template is the fixed `video.%(ext)s` (`download.py:157`, `:223`), so the filename never
   carries the remote title. Nothing enforces any of this: one `raise ValueError(f"bad
   cue: {line}")` added inside `parse_vtt` opens the channel silently and no test would
   notice. Wrapping all four in `stderr_line` costs nothing on a message with no remote
   text in it and is the obvious cheap fix; it was NOT taken on the branch that added
   `stderr_line`, which was already at roughly 1,250 insertions when this was found.
-  Non-goals: this is not one of the three surfaces the CHANGELOG lists — those carry
-  remote text today and these do not, and conflating them overstates what shipped. It
+  Non-goals: this is not one of the surfaces the 0.3.0 CHANGELOG entry lists — it called
+  three, of which ffmpeg's captured stderr has since been fixed and moved to
+  `## Completed`, leaving yt-dlp's inherited descriptor and `md_fence` open above. Those
+  carry remote text today and these do not, and conflating them overstates what shipped.
+  It
   covers sites that interpolate an *exception* and says nothing about a future site
   interpolating remote data directly. And the audit is a snapshot of third-party message
   formats reachable today, not a guarantee about them.
+
+- **`stderr_block` bounds what it RENDERS, not what it reads.** (performance review,
+  2026-08-27) `splitlines()` materializes every line of the capture before `max_lines`
+  is applied, so peak memory is O(lines in the capture) rather than O(`max_lines`) —
+  measured at +51MB RSS for a 10MB, 5M-line capture. Deliberately not fixed: it is an
+  amplifier, not a new unbounded read, because `subprocess.run(capture_output=True)` has
+  already buffered the whole capture into one string before this function is called, and
+  the path is about to raise anyway. A streaming rewrite would move the bound to the
+  right place and buy nothing until the capture itself is streamed, which is the fix that
+  would actually matter and is much larger. Non-goals: a single enormous LINE costs
+  nothing extra here (`len(line)` is O(1) and the slice precedes `balance_bidi`), and
+  this says nothing about the descriptor yt-dlp inherits, where no buffer of ours exists
+  at all.
+
+- **Two tests in `test_stderr_blocks_are_fenced.py` can skip themselves into silence.**
+  (testing review, 2026-08-27) The live-vector class shells out to a real ffmpeg and a
+  real ffprobe and skips where neither is installed; one of its tests also skips under a
+  euid of 0, because root can write to the unwritable directory the vector depends on. A
+  green run is therefore not by itself evidence the live vector was exercised. CI must
+  keep ffmpeg present and must not run as root for these to mean anything, and nothing
+  asserts either condition — `-rs` is the only way to see which happened. The clean fix
+  is a CI assertion that the two never skip, which belongs with the CI work rather than
+  here. Non-goal: this is about visibility, not about the skips themselves — both are
+  correct, and a test that silently passed as root would be worse than one that skips.
 
 - **Nothing stops a literal bidi control from being committed again.** (security gate,
   2026-08-26) Eighteen were removed from `untrusted.py` and fourteen more from
