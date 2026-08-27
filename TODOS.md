@@ -255,6 +255,95 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   of the silence it replaces was a paid API upload for a transcript already on disk. Worth
   revisiting only if the line turns out to be common enough to train people to ignore it.
 
+- **`pair_with_timestamps` joins showinfo lines to files BY POSITION, and the two lists
+  are produced by stages that can legitimately disagree.** (quiet-failures review,
+  2026-08-27) Verified against ffmpeg 4.4.2 in this environment, not reasoned about:
+  `ffmpeg -i src.mp4 -vf "setpts=PTS-0.5/TB,scale=64:-2,showinfo" -vsync vfr -q:v 4
+  out/frame_%04d.jpg` reports **10** `pts_time:` lines, writes **9** files, and
+  `SHOWINFO_TS_RE = pts_time:([0-9.]+)` extracts **7** — it silently drops `-0.5`,
+  `-0.3`, `-0.1`, because the pattern cannot match a leading minus. Nine files against
+  seven timestamps is a HEAD hole, the worst case for a positional join: every surviving
+  frame wears a later frame's timestamp and the two frames that *did* have extractable
+  times are the ones deleted. The fix landed on `fix/quiet-failures-ii` converts an
+  invented `offset` into a drop and hedges honestly on stderr, so nothing here is a
+  regression against `main` — but its subject line, *a frame never wears another frame's
+  timestamp*, is broader than what it delivers, and that is the gap. Note the NOPTS case
+  is NOT this bug: `setpts='if(eq(N,2),NAN,PTS)'` makes showinfo print `pts_time:NOPTS`
+  and the muxer refuse the frame, so the regex's skip and ffmpeg's skip cancel and the
+  lists stay aligned. Widening the pattern to `-?[0-9.]+` alone would therefore make
+  things WORSE, turning today's 9-vs-7 shortfall into a 10-vs-9 surplus — which the
+  function treats as an ordinary capped run and ignores in silence. A real fix has to
+  stop joining on position: pair on the frame number ffmpeg reports (`n:` in the same
+  showinfo line) rather than on list index. Filed for `fix/quiet-failures-iii`.
+
+- **A timestamp SURPLUS is documented as ordinary, and through `moviola.py` it is not.**
+  (quiet-failures review, 2026-08-27) `pair_with_timestamps`'s docstring justifies
+  ignoring a surplus because `-frames:v` caps the files written while showinfo keeps
+  reporting. True for the public API, where `extract_scene_candidates(max_frames=100)`
+  emits `-frames:v` at `frames.py:367`. Not true on the product path:
+  `extract_scene_or_uniform` calls it with `max_frames=None`, so no cap is emitted and a
+  surplus there means the muxer refused frames showinfo had already reported. That is the
+  same class of evidence as a shortfall and it is discarded without a word. Same fix as
+  the entry above — pairing on the reported frame number makes the distinction fall out
+  instead of needing a rule.
+
+- **A chunk that returns HTTP 200 with zero segments is not counted as a gap.**
+  (quiet-failures review, 2026-08-27) `transcribe_chunks` records a gap only in its
+  `except SystemExit` arm, and `_segments_from_response` (`whisper.py:801-820`) returns
+  `[]` for a well-formed response carrying no segments rather than raising. So two chunks
+  where the second transcribes to nothing yield `TranscriptGaps(ranges=[], failed=0,
+  total=2)` and the report says the transcript is complete. This is the branch's own
+  proposition — *a partial transcript says it is partial* — surviving in a second form,
+  and `whisper.py:831-839` already states it as the reason the ranges exist. Not fixed on
+  `fix/quiet-failures-ii` because it is a behaviour change needing its own RED test and
+  the branch was at its size ceiling. The judgement call it needs first: an empty chunk is
+  also what silence sounds like, so counting every one as a failure would fire on a
+  legitimately quiet passage. Distinguishing them probably means asking whether the whole
+  chunk was empty versus whether the response carried no `segments` key at all.
+
+- **`TranscriptGaps.shifted(0.0)` returns `self`, aliasing the mutable `ranges` list.**
+  (quiet-failures review, 2026-08-27) The early return at `whisper.py:86-92` is a correct
+  optimisation for an immutable value and `TranscriptGaps` is not one — `ranges` is a
+  plain `list`. No caller mutates it today, so this is a hazard note rather than a live
+  bug; `_replace` on every path, or a tuple, would close it before somebody appends.
+
+- **`test_quiet_failures_ii.py` pins less than its test names claim — seven mutations
+  survive, each independently confirmed.** (testing review, 2026-08-27) Re-run here
+  against `test_quiet_failures_ii.py`, `test_whisper.py` and `test_moviola.py`; a
+  parallel review reports the same seven against the full suite. In severity order:
+
+  * **Only the first missing span is ever rendered.** Slicing `gaps.ranges[:1]` in
+    EITHER `format_missing_ranges` or `gap_warning` passes. `test_several_failures_are_
+    all_named` proves `transcribe_chunks` COLLECTS several ranges; nothing proves the
+    report PRINTS more than one. Chunks 1 and 7 of 10 failing would name one hole and
+    leave the reader treating the other span as covered — the exact misreading the file
+    exists to prevent.
+  * **The summary bullet's ratio and spans are unpinned.** Swapping `{gaps.failed}` and
+    `{gaps.total}` passes, and so does dropping `, missing {spans}` entirely — every
+    assertion in `test_the_report_names_the_missing_span` is satisfied by the
+    block-quote alone. Rendering raw seconds instead of `format_time` also passes,
+    despite that test's own comment claiming to check exactly it. The fix is the shape
+    `TestTheFallbackReportsItsOwnFrames` already uses: a `_transcript_line` helper that
+    isolates the bullet, so an assertion cannot be satisfied by a different line.
+  * **The warning's POSITION is unpinned.** `gap_warning`'s docstring says "the
+    block-quote above the transcript itself"; moving it below the closing fence passes.
+    Deleting it is caught, relocating it is not — and a warning under a long transcript
+    is one a summariser reaches last, if at all.
+  * **The `INCOMPLETE` stderr line in `transcribe_video` has no coverage at all.**
+    Replacing its condition with `False` passes.
+  * **`TranscriptGaps([], 0, 1)`'s `1` is unpinned.** Changing it to `0` passes, though
+    both the `transcribe_video` docstring and this file's NON-GOALS state it as an
+    invariant. No user-visible effect today because every renderer guards on `failed`,
+    but any consumer computing `failed / total` divides by zero.
+  * **The gap end's `round(..., 3)` is never exercised.** Every chunk duration in the
+    tests is an exact binary float, so removing the `round` passes; a plan with
+    0.1-granularity durations would print `200.00000000000003` into the report.
+
+  Not fixed on `fix/quiet-failures-ii`: the branch is at ~1,320 changed lines against a
+  ~800 ceiling, and none of these is a live defect — the shipped code renders every
+  span, the right ratio, formatted times, and the warning in the right place. They are
+  claims nothing holds. Queued for `fix/quiet-failures-iii`.
+
 ## Bounded failures
 
 - **`stderr_line` imposes no length bound of its own, and every caller is responsible for

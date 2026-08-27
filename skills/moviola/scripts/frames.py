@@ -671,10 +671,20 @@ def extract_scene_or_uniform(
         "deduped_count": n_dropped,
         "selected_count": len(frames),
         "fallback": True,
-        # The uniform path re-extracts from scratch, so any frame the scene pass
-        # could not time is already gone with the rest of its output. What the
-        # count still records is that the scene pass saw a shortfall at all.
-        "untimed_dropped": untimed,
+        "fallback_from": "scene",
+        # Deliberately NOT `untimed_dropped`. These frames came from `extract()`,
+        # which re-extracts the range and times what it writes as
+        # `offset + i / fps` — it never reads showinfo. So nothing the scene pass
+        # failed to place survives into this output, and the sentence the other
+        # key renders is false of every frame in it.
+        #
+        # The count still explains something, which is why it is carried rather
+        # than dropped: the floor below is compared against the count AFTER
+        # untimed frames are removed, so a pass that detected plenty of shots and
+        # could not time some of them lands here — and "uniform fallback"
+        # otherwise reads as "this video is static".
+        "untimed_before_fallback": untimed,
+        "untimed_caused_fallback": bool(untimed) and scene_count + untimed >= SCENE_MIN_FRAMES,
     }
 
 
@@ -763,10 +773,15 @@ def extract_keyframes(
             "deduped_count": n_dropped,
             "selected_count": len(frames_out),
             "fallback": True,
-            # Same as the scene engine's uniform fallback: the re-extract wiped
-            # the untimed frames along with everything else, and the count is
-            # kept because a shortfall HAPPENED, not because a file survived it.
-            "untimed_dropped": untimed,
+            "fallback_from": "keyframe",
+            # Same reasoning as the scene engine's uniform fallback above: the
+            # re-extract wiped the untimed frames along with everything else, so
+            # the count describes the pass that was discarded and not the output
+            # being reported. It is kept because it can explain the fallback.
+            "untimed_before_fallback": untimed,
+            "untimed_caused_fallback": (
+                bool(untimed) and len(candidates) + untimed >= KEYFRAME_MIN
+            ),
         }
 
     # Detect-all, drop near-duplicates, then even-sample down to the cap (first +

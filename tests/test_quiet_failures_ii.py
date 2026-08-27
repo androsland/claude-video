@@ -57,17 +57,19 @@ NON-GOALS, so a green run is not read as more than it is:
     what every capped run looks like;
     `test_more_timestamps_than_frames_is_not_a_shortfall` is the must-NOT-fire
     half of that pair.
-  * Nothing here reaches the uniform fallback's own frames. That path
-    re-extracts from scratch, so a scene-pass shortfall leaves no mislabelled
-    frame behind — the count survives to record that a shortfall HAPPENED, not
-    that a file did.
+  * The uniform fallback's own frames are a DIFFERENT claim, and stating it
+    here as a non-goal was how it went unchecked. That path re-extracts from
+    scratch, so a shortfall in the discarded pass leaves no mislabelled frame
+    behind and no sentence about the frames below can be true of it — while the
+    count still explains why the fallback fired at all. Both halves are pinned
+    by `TestTheFallbackReportsItsOwnFrames` at the bottom of this file.
   * One link of the chain is pinned NEXT DOOR, not here: that `split_audio`
     carries each chunk's duration at all is asserted in
     `test_whisper.py::TestSplitAudio::test_returns_plan_offsets`, where
     `split_audio`'s contract lives. Reverting it survives this file and dies
-    there. Said out loud because a KILL run over that finding's mutation set,
-    scoped to this module alone, reports 5 of 6 — and the missing one is a
-    scoping decision rather than a hole.
+    there. Said out loud because a KILL run scoped to this module alone will
+    show that mutation surviving, and it is a scoping decision rather than a
+    hole — run the suite, not this file, to see it die.
 """
 from __future__ import annotations
 
@@ -480,3 +482,250 @@ class TestTheDroppedFramesReachTheReport:
         monkeypatch.setattr(sys, "argv", ["moviola.py", str(cut_clip), "--no-whisper"])
         assert moviola.main() == 0
         assert "dropped without a timestamp" not in capsys.readouterr().out
+
+
+class TestTheFallbackReportsItsOwnFrames:
+    """A shortfall in a pass whose output was thrown away is not a shortfall here.
+
+    Both engines fall back to `extract()` when they find too few candidates, and
+    `extract()` re-extracts the range from scratch: it clears the directory, asks
+    for `fps=N`, and timestamps what comes back as `offset + i / fps`. It never
+    reads showinfo. So on a fallback run every frame in the report is evenly
+    spaced and exactly timed, and none of the frames the first pass could not
+    place survives into it.
+
+    The first fix carried `untimed_dropped` out of both fallback paths under the
+    same key the non-fallback paths use, and the report renders that key as
+    "N dropped without a timestamp from ffmpeg; remaining timestamps may be
+    misaligned". Over a uniform fallback both halves are false — nothing was
+    dropped from what you are reading, and the timestamps you are reading are
+    arithmetic. It is the branch's own failure shape one turn later: a sentence
+    that is true of a different run than the one it is printed under.
+
+    The count is still worth keeping, because it explains something the report
+    otherwise attributes to the video. `extract_scene_or_uniform` compares
+    `len(scene_frames)` — the count AFTER untimed frames are dropped — against
+    `SCENE_MIN_FRAMES`, so a pass that detected enough shots but could not time
+    some of them now falls under the floor and falls back. The bullet then says
+    "with uniform fallback", which this module's own docstring defines as "the
+    video is effectively static". Two different causes, one word.
+
+    So: a fallback keeps the count under its own key, says which pass produced
+    it, and says whether it is what pushed the pass under the floor — computable
+    exactly, since the floor and both counts are in scope.
+
+    NON-GOALS — what this cannot see, and what it must not fire on:
+
+      * It does not check that the fallback was the right CHOICE. Falling back
+        when a timestamp shortfall drops a cut-heavy video under the floor is a
+        judgement call that stands; this pins only that the report says which of
+        the two causes applied.
+      * `untimed_caused_fallback` is arithmetic on counts, not a claim about
+        ffmpeg. It answers "would this pass have cleared the floor with those
+        frames?" and nothing more — a pass that would have cleared the floor and
+        then been dedup'd back under it is not a case these counts can see.
+      * A fallback with NO shortfall must stay exactly as it reads today, silent
+        about timestamps. That is the ordinary static-video path and it is the
+        overwhelming majority of fallbacks; a test suite that only proved the
+        new sentence appears would say nothing about it.
+      * The non-fallback wording is not changed and is not re-pinned here —
+        `TestTheDroppedFramesReachTheReport` above owns it. What this adds is
+        that the two paths no longer share a key, so neither can render the
+        other's sentence.
+      * Nothing here touches the pairing itself. Whether position is a sound
+        join between showinfo lines and files is a separate question, filed in
+        TODOS.md against `fix/quiet-failures-iii`; these tests would pass under
+        either answer.
+    """
+
+    @staticmethod
+    def _report(monkeypatch, capsys, clip: Path, meta: dict) -> str:
+        """Render one summary with `meta` as the frame engine's verdict."""
+        def fake_extract(*a: object, **k: object) -> tuple:
+            return (
+                [{"index": 0, "timestamp_seconds": 0.0, "path": "f.jpg", "reason": "uniform"}],
+                meta,
+            )
+
+        monkeypatch.setattr(moviola, "extract_scene_or_uniform", fake_extract)
+        monkeypatch.setattr(sys, "argv", ["moviola.py", str(clip), "--no-whisper"])
+        assert moviola.main() == 0
+        return capsys.readouterr().out
+
+    @staticmethod
+    def _frames_line(out: str) -> str:
+        """The Frames bullet alone — a count elsewhere in the report is not it."""
+        for line in out.splitlines():
+            if line.startswith("- **Frames:**"):
+                return line
+        raise AssertionError("the report has no Frames bullet")
+
+    FALLBACK_META = {
+        "engine": "uniform", "candidate_count": 7, "deduped_count": 0,
+        "selected_count": 1, "fallback": True, "fallback_from": "scene",
+        "untimed_before_fallback": 3, "untimed_caused_fallback": True,
+    }
+
+    def test_the_fallback_bullet_does_not_call_its_own_timestamps_misaligned(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        cut_clip: Path,
+    ) -> None:
+        """The false half. Every frame in this report came from `extract()`."""
+        out = self._report(monkeypatch, capsys, cut_clip, dict(self.FALLBACK_META))
+
+        assert "misaligned" not in out
+        assert "dropped without a timestamp" not in out
+
+    def test_the_fallback_bullet_still_names_the_shortfall_and_its_pass(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        cut_clip: Path,
+    ) -> None:
+        """Dropping the false sentence must not drop the fact under it."""
+        line = self._frames_line(
+            self._report(monkeypatch, capsys, cut_clip, dict(self.FALLBACK_META))
+        )
+
+        assert "3" in line
+        assert "scene" in line.lower()
+
+    def test_a_shortfall_driven_fallback_says_the_video_is_not_why(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        cut_clip: Path,
+    ) -> None:
+        """"Uniform fallback" reads as "static video". Here it was not."""
+        line = self._frames_line(
+            self._report(monkeypatch, capsys, cut_clip, dict(self.FALLBACK_META))
+        )
+
+        assert "static" in line.lower()
+
+    def test_a_fallback_that_would_have_happened_anyway_does_not_claim_otherwise(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        cut_clip: Path,
+    ) -> None:
+        """Two candidates plus one untimed is still under any floor.
+
+        The shortfall is real and worth printing, but it did not cause this and
+        the report may not say it did — that would be the same confident wrong
+        answer pointing the other way.
+        """
+        meta = dict(self.FALLBACK_META)
+        meta.update(candidate_count=2, untimed_before_fallback=1,
+                    untimed_caused_fallback=False)
+        out = self._report(monkeypatch, capsys, cut_clip, meta)
+        line = self._frames_line(out)
+
+        assert "1" in line
+        assert "scene" in line.lower()
+        assert "static" not in line.lower()
+        assert "misaligned" not in out
+
+    def test_an_ordinary_static_fallback_says_nothing_about_timestamps(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        cut_clip: Path,
+    ) -> None:
+        """The must-NOT-fire half, and what nearly every fallback looks like."""
+        meta = dict(self.FALLBACK_META)
+        meta.update(candidate_count=2, untimed_before_fallback=0,
+                    untimed_caused_fallback=False)
+        line = self._frames_line(self._report(monkeypatch, capsys, cut_clip, meta))
+
+        assert "timestamp" not in line.lower()
+        assert "static" not in line.lower()
+
+    def test_the_renderer_refuses_the_claim_even_if_handed_the_old_key(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        cut_clip: Path,
+    ) -> None:
+        """The defect end to end, in the exact shape the engine used to hand over.
+
+        Renaming the key stops today's engines producing this. Guarding the
+        renderer as well is what stops a future one reintroducing it: the
+        sentence is a claim about the frames in THIS report, so `fallback: True`
+        is enough on its own to know it cannot be true, whatever key arrives.
+        """
+        meta = dict(self.FALLBACK_META)
+        del meta["untimed_before_fallback"]
+        del meta["untimed_caused_fallback"]
+        meta["untimed_dropped"] = 3
+        out = self._report(monkeypatch, capsys, cut_clip, meta)
+
+        assert "misaligned" not in out
+        assert "dropped without a timestamp" not in out
+
+    def test_the_scene_engine_hands_the_count_over_under_the_fallback_key(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The other half of the wire the renderer tests stub over.
+
+        Ten frames written, seven timed: three dropped leaves seven candidates,
+        one under `SCENE_MIN_FRAMES`, so the pass falls back — and it falls back
+        BECAUSE of the shortfall, since ten would have cleared the floor.
+        """
+        out_dir = tmp_path / "frames"
+        _stub_ffmpeg(monkeypatch, out_dir, frame_count=10, ts_count=7)
+
+        _frames_out, meta = frames.extract_scene_or_uniform(
+            "v.mp4", out_dir, fps=1.0, target_frames=9,
+            resolution=512, max_frames=None, dedup=False,
+        )
+
+        assert meta["fallback"] is True
+        assert "untimed_dropped" not in meta
+        assert meta["untimed_before_fallback"] == 3
+        assert meta["untimed_caused_fallback"] is True
+        assert meta["fallback_from"] == "scene"
+
+    def test_the_keyframe_engine_does_the_same(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Both engines carried the identical line. Fixing one is half a fix."""
+        out_dir = tmp_path / "frames"
+        _stub_ffmpeg(monkeypatch, out_dir, frame_count=6, ts_count=3)
+        monkeypatch.setattr(
+            frames, "get_metadata",
+            lambda *a, **k: {"duration_seconds": 60.0, "width": 64, "height": 64},
+        )
+
+        _frames_out, meta = frames.extract_keyframes(
+            "v.mp4", out_dir, resolution=512, max_frames=None, dedup=False
+        )
+
+        assert meta["fallback"] is True
+        assert "untimed_dropped" not in meta
+        assert meta["untimed_before_fallback"] == 3
+        assert meta["untimed_caused_fallback"] is True
+        assert meta["fallback_from"] == "keyframe"
+
+    def test_a_clean_scene_run_keeps_the_original_key(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The must-NOT-fire half of the split: the non-fallback path is intact.
+
+        Twelve frames, nine timed, nine still clears the floor — so this is a
+        scene run that dropped frames from the output the reader is holding, and
+        it must keep the key whose sentence is true of exactly that.
+        """
+        out_dir = tmp_path / "frames"
+        _stub_ffmpeg(monkeypatch, out_dir, frame_count=12, ts_count=9)
+
+        _frames_out, meta = frames.extract_scene_or_uniform(
+            "v.mp4", out_dir, fps=1.0, target_frames=9,
+            resolution=512, max_frames=None, dedup=False,
+        )
+
+        assert meta["fallback"] is False
+        assert meta["untimed_dropped"] == 3
+        assert "untimed_before_fallback" not in meta

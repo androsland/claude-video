@@ -53,6 +53,56 @@ def format_missing_ranges(gaps: TranscriptGaps | None) -> str:
     return f" — **INCOMPLETE: {gaps.failed} of {gaps.total} audio chunks failed**, missing {spans}"
 
 
+def untimed_note(frame_meta: dict) -> str:
+    """The Frames bullet's suffix when ffmpeg did not timestamp every frame.
+
+    Two sentences, because the count means two different things and the wrong
+    one is not a weaker claim — it is a false one.
+
+    On a normal run the untimed frames were dropped out of the output being
+    read, and the frames that remain are only as aligned as the reports that
+    arrived. Both halves are about the frames below.
+
+    On a uniform fallback neither half is. The output was re-extracted from
+    scratch by :func:`frames.extract`, whose timestamps are `offset + i / fps`
+    and never touch showinfo, so nothing below is missing and nothing below can
+    be misaligned. The count survives because it explains the FALLBACK: the
+    engine floors are compared against the candidate count after untimed frames
+    are dropped, so a shortfall can push a perfectly lively video under one, and
+    "with uniform fallback" otherwise reads as "this video is static".
+
+    `fallback` alone decides which sentence, whatever key the count arrives
+    under — a claim about the frames in this report cannot be true of a run
+    whose frames were all thrown away.
+    """
+    if frame_meta.get("fallback"):
+        untimed = frame_meta.get("untimed_before_fallback", 0)
+        if not untimed:
+            return ""
+        pass_name = frame_meta.get("fallback_from", "detection")
+        noun = "frame" if untimed == 1 else "frames"
+        if frame_meta.get("untimed_caused_fallback"):
+            return (
+                f" — **ffmpeg never timestamped {untimed} {noun} in the {pass_name} "
+                f"pass**, and dropping them put it under the floor: this fell back for "
+                "that reason, not because the video is static. The frames above are "
+                "evenly spaced and exactly timed"
+            )
+        return (
+            f" — ffmpeg never timestamped {untimed} {noun} in the {pass_name} pass, "
+            "which was under the floor either way. The frames above are evenly spaced "
+            "and exactly timed"
+        )
+
+    untimed = frame_meta.get("untimed_dropped", 0)
+    if not untimed:
+        return ""
+    return (
+        f" — **{untimed} dropped without a timestamp from ffmpeg**; "
+        "remaining timestamps may be misaligned"
+    )
+
+
 def gap_warning(gaps: TranscriptGaps) -> str:
     """The block-quote above the transcript itself.
 
@@ -533,20 +583,15 @@ def main() -> int:
         fallback = " with uniform fallback" if frame_meta.get("fallback") else ""
         deduped = frame_meta.get("deduped_count", 0)
         # Not a tuning note like the dedup count beside it: a shortfall here
-        # means ffmpeg told us about fewer frames than it wrote, so the frames
-        # it did not account for were discarded rather than mislabelled — and
-        # the ones that remain are only as aligned as the reports that arrived.
-        untimed = frame_meta.get("untimed_dropped", 0)
-        untimed_note = (
-            f" — **{untimed} dropped without a timestamp from ffmpeg**; "
-            "remaining timestamps may be misaligned"
-            if untimed else ""
-        )
+        # means ffmpeg told us about fewer frames than it wrote. What follows
+        # from that differs between a normal run and a fallback, so the sentence
+        # is chosen in one place rather than assembled here.
+        shortfall = untimed_note(frame_meta)
         dedup_note = f", {deduped} near-duplicate{'s' if deduped != 1 else ''} dropped" if deduped else ""
         print(
             f"- **Frames:** {detail_count} selected from {frame_meta.get('candidate_count', detail_count)} "
             f"candidates ({engine}{fallback}{dedup_note}, {range_mode} range, budget {target}, cap {cap_label})"
-            f"{untimed_note}"
+            f"{shortfall}"
         )
     elif not cue_frames:
         print("- **Frames:** skipped (transcript detail)")
