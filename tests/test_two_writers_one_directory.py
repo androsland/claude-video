@@ -1086,7 +1086,6 @@ class TestTheLockFileIsNotSomebodyElsesFile:
         assert "True" not in described
         assert "started now" in described
 
-
     def test_the_file_is_removed_before_the_lock_is_released(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -720,8 +720,7 @@ class TestNoDocstringIsWrittenWhereNothingReadsIt:
       * It exempts the PEP 258 attribute-docstring convention — a string
         directly after an assignment: `TIMEOUT = 30` followed by a bare
         string. That is a discarded expression too, but Sphinx reads it and it
-        is a
-        legitimate way to document a module constant. `scripts/` uses none
+        is a legitimate way to document a module constant. `scripts/` uses none
         today, so the exemption exists for code written later; without it this
         test would fire on correct work the first time someone reached for it.
       * It scans `scripts/` — what the skill ships. `tests/` and `hooks/` are
