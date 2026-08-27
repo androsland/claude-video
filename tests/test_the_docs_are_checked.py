@@ -596,6 +596,14 @@ class TestNoHeadingWasSplitThroughAnInlineCodeSpan:
         check this blunt is worth having.
       * **It does not check that headings are unique, ordered, or nested
         correctly.** Those are different properties with different owners.
+      * **It does not track fenced code blocks.** A line inside a fence that
+        begins with a hash and a space — a shell comment in a bash example — is
+        read as a heading here, so an unmatched backtick in one would be
+        reported as heading corruption. Measured across the tracked markdown:
+        nine such lines today, none of them odd, so this is dormant rather than
+        a live false positive. Named rather than fixed, because a fence tracker
+        is a second parser with its own edge cases and this check earns its
+        keep only while it stays blunt.
     """
 
     def test_no_tracked_heading_holds_an_unmatched_backtick(self) -> None:

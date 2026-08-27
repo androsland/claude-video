@@ -1374,7 +1374,8 @@ nothing successfully probed. The capture goes through `stderr_block(..., source=
 like every other foreign block, so a stdout line reading `ffprobe failed:` cannot reach
 column zero of a message moviola signs.
 
-31 new tests across two classes — one at the call site, one on the leaf — and one of them
+Two new classes, one at the call site and one on the leaf: 15 test functions, 32 collected
+cases once the parametrized ones are counted apart. One of them
 covers a seam the fix created rather than the finding: `.strip()` was added so that
 whitespace-only stdout stays on the "wrote nothing" side of `or "{}"`, and without a test
 its removal would have been an unkilled mutation. The KILL harness runs nine mutations,

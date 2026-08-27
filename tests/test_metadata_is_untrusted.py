@@ -590,14 +590,28 @@ class TestTheDocumentIsUntrustedAndNotOnlyItsFields:
     def test_the_failure_is_not_an_attribute_error(self, tmp_path: Path) -> None:
         # Pinned by name, because `AttributeError` is what a reader of the
         # original code would have to guess at from a traceback.
+        #
+        # `pytest.raises` rather than a `try` with a clause for `SystemExit` and
+        # a clause for `AttributeError`. That shape looks like it covers the
+        # same ground and has no branch for the third outcome — no exception at
+        # all — so it falls out of both clauses and passes with nothing
+        # asserted. Measured rather than reasoned: degrading the refusal in
+        # `get_metadata` to `data = {}` makes this input return a metadata dict,
+        # and under exactly that mutation the sibling above fired on all seven
+        # ids while this test stayed green.
+        #
+        # `raises` covers the missing branch and the named one together: no
+        # exception is `Failed`, and an `AttributeError` propagates out of the
+        # block as itself rather than being caught. The two assertions below
+        # cover the remaining shape — a `.get()` failure caught somewhere and
+        # re-raised as a `SystemExit`, which would satisfy `raises` while being
+        # the exact defect this is named for.
         with pytest.MonkeyPatch.context() as mp:
             _stub_stdout(mp, "[]")
-            try:
+            with pytest.raises(SystemExit) as caught:
                 frames.get_metadata(str(tmp_path / "video.mp4"))
-            except SystemExit:
-                pass
-            except AttributeError as exc:  # pragma: no cover - the defect
-                pytest.fail(f"the list reached `.get()`: {exc}")
+        assert not isinstance(caught.value.__cause__, AttributeError), caught.value
+        assert not isinstance(caught.value.__context__, AttributeError), caught.value
 
     def test_a_document_nested_past_the_interpreters_limit_is_refused(
         self, tmp_path: Path
