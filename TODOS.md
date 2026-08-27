@@ -230,15 +230,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Quiet failures
 
-- **`frames_in_order` sorts on the last run of digits in the name and cannot see a
-  directory that mixes two naming schemes.** (quiet-failures review, 2026-08-26) Every
-  caller writes `frame_%04d.jpg` into a directory it has just emptied of `frame_*.jpg`,
-  so today there is exactly one scheme and the sort is total. Nothing enforces that. If a
-  future extractor writes `frame_a_0001.jpg` alongside `frame_0001.jpg`, both parse to 1
-  and the tiebreak is the filename, which is the lexicographic bug again in a smaller
-  room. Naming the scheme in one constant that the writer and the sorter share would
-  close it.
-
 - **The stale-file guard compares (mtime, size) and cannot see a second run writing into
   the same `--out-dir`.** (quiet-failures review, 2026-08-26) `snapshot_dir` answers "did
   THIS run produce this file", which is the right question for a reused directory and the
@@ -1117,6 +1108,48 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   here.
 
 ## Completed
+
+### A frame filename's shape had four owners that happened to agree
+
+`frames_in_order` sorted on the LAST run of digits anywhere in the name, and three
+extractors plus the cue writer each spelled `frame_%04d.jpg` / `cue_%04d.jpg` for
+themselves. Both halves were correct only because every caller empties the directory of
+its own output first, so exactly one scheme is ever present — a property nothing enforced
+and nothing would have noticed losing. `frame_a_0001.jpg` beside `frame_0001.jpg` both
+parse to 1, the tiebreak is the filename, and since every caller pairs frames with
+timestamps BY POSITION, one foreign name shifts every frame after it onto somebody else's
+timestamp.
+
+`FrameScheme` now owns the glob, the printf template and the number parse, with
+`DETAIL_FRAMES` and `CUE_FRAMES` as the two named instances; all four writers read them.
+A name matching the glob but not the scheme is EXCLUDED and named on stderr rather than
+sorted into a plausible slot, because nothing anywhere says where `frame_a_0001.jpg`
+belongs in a `frame_%04d.jpg` sequence — the old behaviour of keeping it also handed
+`pair_with_timestamps` one more file than there were timestamps, which produced a
+"frames may be misaligned" warning about ffmpeg for a file ffmpeg never wrote.
+
+Three things the KILL harness caught that the fix or the tests had wrong:
+
+- **A Python default argument silently reintroduced the split.**
+  `def frames_in_order(out_dir, scheme=DETAIL_FRAMES)` binds the object at DEFINITION
+  time, so the writer read the constant by name and the sorter read a snapshot of it —
+  the exact disagreement being removed, restored by a language default. Resolved inside
+  the body instead.
+- **`assert not (out_dir / "shot_0009.jpg").exists()` was vacuous.**
+  `pair_with_timestamps` deletes any frame it cannot time, so the stale file is gone
+  whether the sweep found it or not, and a sweep mutated back to its own literal passed
+  it. The count is what changes: `untimed` is 1 with the literal and 0 with the shared
+  constant.
+- **The source-level invariant could not see the shape it was written to outlaw.** Its
+  pattern covered `%0Nd` and `*` but not `f"cue_{len(out):04d}.jpg"`, which is what the
+  cue writer literally said before this branch — so a mutation restoring that exact line
+  SURVIVED. Broadened to cover the f-string width; concatenation is still a stated
+  NON-GOAL.
+
+KILL: 10/10 mutations killed, 6/6 legitimate variations stay green. Three of the ten —
+the uniform sweep, the keyframe pattern and the cue filename — die ONLY to the source
+invariant, because no test drives those writers end to end. That is the whole reason it
+is there rather than being decoration.
 
 ### A partial transcript and a mislabelled frame both read as ordinary output
 

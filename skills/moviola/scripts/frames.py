@@ -21,7 +21,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-from untrusted import finite_float  # noqa: E402
+from untrusted import finite_float, stderr_line  # noqa: E402
 
 
 MAX_FPS = 2.0
@@ -46,38 +46,96 @@ DEDUP_THUMB = 16
 DEDUP_THRESHOLD = 2.0
 SHOWINFO_TS_RE = re.compile(r"pts_time:([0-9.]+)")
 
-# The trailing run of digits in a frame filename, which is the frame number
-# ffmpeg's `%04d` wrote.
-_FRAME_NUM_RE = re.compile(r"(\d+)")
+class FrameScheme:
+    """The one place a frame filename's shape is written down.
+
+    The writer and the sorter have to agree on this or a positional join
+    misaligns, and until this existed the agreement was three copies of the
+    literal `frame_%04d.jpg` and a regex that looked for digits anywhere. That
+    held only because every caller empties the directory of its own output
+    first, so there was exactly one scheme present — a property nothing
+    enforced and nothing would have noticed losing.
+
+    `%04d` sets a MINIMUM width, not a maximum: past frame 9999 ffmpeg writes
+    five digits, so the pattern has to accept any width while still requiring
+    that the digits are the WHOLE name after the prefix. `frame_a_0001.jpg`
+    matching is the failure this exists to stop.
+    """
+
+    def __init__(self, prefix: str) -> None:
+        self.prefix = prefix
+        self.glob = f"{prefix}*.jpg"
+        self.template = f"{prefix}%04d.jpg"
+        self._name_re = re.compile(rf"{re.escape(prefix)}(\d+)")
+
+    def number(self, path: Path) -> int | None:
+        """The frame number this scheme wrote into `path`, or None if it did not."""
+        match = self._name_re.fullmatch(path.stem)
+        return int(match.group(1)) if match else None
 
 
-def frames_in_order(out_dir: Path, pattern: str = "frame_*.jpg") -> list[Path]:
-    """The frames in `out_dir`, in the order ffmpeg wrote them.
+# The detail engines (uniform, scene, keyframe) all write one scheme, and the
+# transcript-cue extractor writes another so the two can share a directory
+# without either clobbering the other. They are separate constants rather than
+# one parameterised call precisely so that the non-overlap is a fact about two
+# named things instead of an argument passed correctly at four call sites.
+DETAIL_FRAMES = FrameScheme("frame_")
+CUE_FRAMES = FrameScheme("cue_")
 
-    `%04d` sets a MINIMUM width, not a maximum: past frame 9999 ffmpeg simply
-    writes more digits. Lexicographically `frame_10000.jpg` then lands between
+
+def frames_in_order(out_dir: Path, scheme: FrameScheme | None = None) -> list[Path]:
+    """The frames `scheme` wrote into `out_dir`, in the order ffmpeg wrote them.
+
+    Lexicographic order is wrong here: `frame_10000.jpg` sorts between
     `frame_1000.jpg` and `frame_1001.jpg` (`.` is 0x2E, `0` is 0x30), and since
-    every caller here pairs frames with timestamps BY POSITION, from that point
-    on each image carries somebody else's timestamp — silently, in a report that
+    every caller pairs frames with timestamps BY POSITION, from that point on
+    each image carries somebody else's timestamp — silently, in a report that
     looks exactly as correct as any other. Uncapped scene detection on a long
     video reaches four figures easily.
 
-    NON-GOALS. This fixes the ORDER; it says nothing about whether ffmpeg's own
-    showinfo timestamps are right, which is ffmpeg's business. It sorts on the
-    LAST digit run in the name, so a directory mixing two naming schemes is not
-    something it can see. Names carrying no digits at all sort last, in name
-    order, rather than raising: a stray file must not take down a run whose
-    frames are all fine. A frame this returns may still have NO timestamp
-    reported for it — that is `pair_with_timestamps`' problem, and it drops
-    such frames rather than inventing a time for them.
-    """
-    def key(path: Path) -> tuple[int, int, str]:
-        digits = _FRAME_NUM_RE.findall(path.stem)
-        if not digits:
-            return (1, 0, path.name)
-        return (0, int(digits[-1]), path.name)
+    A name that matches the glob but not the scheme is EXCLUDED and named on
+    stderr rather than sorted into a plausible slot. There is no information
+    anywhere that says where `frame_a_0001.jpg` belongs in a sequence of
+    `frame_%04d.jpg`, and a positional join given one more file than there are
+    timestamps does not fail — it shifts, and then reports a misalignment
+    warning about ffmpeg for a file ffmpeg never wrote.
 
-    return sorted(out_dir.glob(pattern), key=key)
+    NON-GOALS. This fixes the ORDER; it says nothing about whether ffmpeg's own
+    showinfo timestamps are right, which is ffmpeg's business. It cannot see a
+    collision INSIDE one scheme — `frame_1.jpg` and `frame_0001.jpg` both read
+    as frame 1, and the filename breaks the tie so the order stays stable rather
+    than reporting them. It never raises: a foreign file must not take down a
+    run whose frames are all fine. And a frame this returns may still have NO
+    timestamp reported for it — that is `pair_with_timestamps`' problem, and it
+    drops such frames rather than inventing a time for them.
+    """
+    # Resolved here rather than as a default argument, which would bind the
+    # object at DEFINITION time — the writer would read the name and the sorter
+    # a snapshot of it, which is the disagreement this whole change exists to
+    # remove, reintroduced by a Python default.
+    scheme = scheme or DETAIL_FRAMES
+    numbered: list[tuple[int, str, Path]] = []
+    foreign: list[str] = []
+    for path in out_dir.glob(scheme.glob):
+        number = scheme.number(path)
+        if number is None:
+            foreign.append(path.name)
+        else:
+            numbered.append((number, path.name, path))
+
+    if foreign:
+        # Named, not counted: the point of the line is to send someone to the
+        # specific file. The names come off a directory this program did not
+        # necessarily fill, so they are fenced like any other untrusted value.
+        listed = ", ".join(stderr_line(name) for name in sorted(foreign))
+        print(
+            f"[moviola] {len(foreign)} file(s) in {out_dir} match {scheme.glob} but not "
+            f"the {scheme.prefix}NNNN.jpg scheme this run writes — excluded from the frame "
+            f"order, because nothing says where they belong in it: {listed}",
+            file=sys.stderr,
+        )
+
+    return [path for _number, _name, path in sorted(numbered, key=lambda item: item[:2])]
 
 
 
@@ -275,10 +333,10 @@ def extract(
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    for existing in out_dir.glob("frame_*.jpg"):
+    for existing in out_dir.glob(DETAIL_FRAMES.glob):
         existing.unlink()
 
-    output_pattern = str(out_dir / "frame_%04d.jpg")
+    output_pattern = str(out_dir / DETAIL_FRAMES.template)
     cmd: list[str] = [
         "ffmpeg",
         "-hide_banner",
@@ -342,10 +400,10 @@ def extract_scene_candidates(
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    for existing in out_dir.glob("frame_*.jpg"):
+    for existing in out_dir.glob(DETAIL_FRAMES.glob):
         existing.unlink()
 
-    output_pattern = str(out_dir / "frame_%04d.jpg")
+    output_pattern = str(out_dir / DETAIL_FRAMES.template)
     cmd: list[str] = [
         "ffmpeg",
         "-hide_banner",
@@ -442,7 +500,7 @@ def extract_at_timestamps(
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    for existing in out_dir.glob("cue_*.jpg"):
+    for existing in out_dir.glob(CUE_FRAMES.glob):
         existing.unlink()
 
     lo = start_seconds or 0.0
@@ -458,7 +516,7 @@ def extract_at_timestamps(
 
     out: list[dict] = []
     for t in points:
-        path = out_dir / f"cue_{len(out):04d}.jpg"
+        path = out_dir / (CUE_FRAMES.template % len(out))
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -709,10 +767,10 @@ def extract_keyframes(
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    for existing in out_dir.glob("frame_*.jpg"):
+    for existing in out_dir.glob(DETAIL_FRAMES.glob):
         existing.unlink()
 
-    output_pattern = str(out_dir / "frame_%04d.jpg")
+    output_pattern = str(out_dir / DETAIL_FRAMES.template)
     cmd: list[str] = [
         "ffmpeg",
         "-hide_banner",
