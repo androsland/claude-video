@@ -97,6 +97,12 @@ End-to-end from a cold URL, `transcript` is the cheapest mode by far; the frame 
 
 ## Install
 
+**Requires Python 3.10+**, plus `ffmpeg` and `yt-dlp` on your PATH. The scripts
+themselves are pure stdlib and parse under 3.7 — 3.10 is where the *test*
+toolchain starts, and it is the floor the project supports rather than the floor
+the code technically needs. CI runs the suite on 3.10 and 3.13; 3.11 and 3.12
+are not tested.
+
 | Surface | Install |
 |---------|---------|
 | **Claude Code** | `/plugin marketplace add androsland/moviola` then `/plugin install moviola@moviola` |
@@ -249,7 +255,8 @@ Other knobs (passed to `scripts/moviola.py`):
 ## Develop
 
 ```bash
-# Run the test suite (stdlib + pytest; ffmpeg required for frame tests):
+# Run the test suite (stdlib + pytest; ffmpeg required for frame tests).
+# Python 3.10+; the pinned set CI uses is in requirements-ci.txt:
 python3 -m pytest -q
 
 # Build the claude.ai upload bundle:

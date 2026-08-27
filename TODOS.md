@@ -906,61 +906,28 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `README.md:136` still points at a 404. Nothing in the suite can tell the difference;
   see the new NON-GOALS bullet in `test_the_docs_are_checked.py` saying so directly.
 
-- **CI installs `yt-dlp` unpinned, so the behavioural ladder tests float.**
-  (ci/run-the-suite, 2026-08-26) `.github/workflows/tests.yml` runs
-  `pip install pytest yt-dlp` with no version, and the 24 tests in
-  `test_the_fallback_stays_small.py` drive yt-dlp's own `build_format_selector`.
-  So a yt-dlp release that changes selector semantics turns the suite red with
-  no change to this repository, and the failure will look like a moviola
-  regression. Pinning trades that for a version that silently rots — and a
-  wrong pin is worse here than none, because these tests exist to describe what
-  the *real* yt-dlp does. The shape, if it bites: pin in the workflow and add a
-  scheduled job that runs unpinned, so drift is reported separately from
-  breakage. Filed rather than fixed because nothing has drifted yet and the fix
-  is a second job, which the day-one config deliberately does not have.
+- **The pins cover PyPI and nothing else — `apt-get install ffmpeg` is still unpinned.**
+  (fix/ci-dependency-posture, 2026-08-27) `requirements-ci.txt` decides the two Python
+  packages at commit time, but the same job installs `ffmpeg` from Ubuntu's archive with
+  no version, and `conftest.py` synthesizes EVERY fixture clip by shelling out to it. So
+  the argument for hash-pinning pytest and yt-dlp — that what runs in CI should be decided
+  by this repository rather than by whatever resolves at job time — applies unchanged to a
+  dependency the fix does not touch, and the requirements file says so in its own
+  NON-GOALS. Not fixed here because apt has no equivalent of `--require-hashes` that is
+  worth the maintenance: `apt-get install ffmpeg=<exact>` breaks the moment the runner
+  image moves, and pinning the runner image (`ubuntu-24.04` rather than `ubuntu-latest`)
+  is the smaller, likelier remedy. Filed as the honest scope of what got pinned, not as
+  work that is owed today.
 
-- **Nothing declares which Python versions moviola supports, and CI now pins one.**
-  (ci/run-the-suite, 2026-08-26) There is no `python_requires`, no
-  `pyproject.toml`, and no statement in `AGENTS.md`, `README.md` or `SKILL.md`.
-  The workflow pins `3.10` — measured, not chosen: it is the only interpreter
-  this suite has been observed to pass on (726 tests on 3.10.12, the only
-  version installed on the development machine). The type hints are 3.9+ and
-  every module opens `from __future__ import annotations`, so the real floor is
-  probably 3.9, but *probably* is the point — nobody has run it there. Two
-  decisions are owed and neither is the loop's: what the supported range is,
-  and whether one job with one version is the right coverage for a tool that
-  installs into whatever Python a user's agent host happens to have. A matrix
-  is the obvious answer and it is N jobs, which the day-one config rules out
-  without a reason; this is that reason when somebody decides it is.
-
-- **The dependency set is now declared in a workflow, which no scanner reads.**
-  (ci/run-the-suite, 2026-08-26) This is the same finding as the manifest entry
-  under `## Local Whisper backend`, in a second location. `pip install pytest
-  yt-dlp` inside a `run:` step keeps the repository's deliberate no-manifest
-  posture — correct for a pure-stdlib runtime — but it means `trivy fs` and
-  `osv-scanner` still have nothing to point at, and now there is a real
-  dependency list they are not reading. Deliberately not fixed here: adding a
-  `requirements-dev.txt` would reverse a posture the repo took on purpose, and
-  `test_ci_runs_the_whole_suite.py` reads the workflow text, so the move would
-  also break that check until it is taught to follow the reference. (That last
-  clause is now enforced rather than asserted: with comments stripped, moving
-  the install to `-r requirements-dev.txt` fails the load-bearing test, and a
-  mutation proves it. Before the fix the step's comment kept the match alive and
-  the move would have passed silently — the NON-GOAL claimed a safety the file
-  did not have.)
-
-- **Unpinned CI dependencies fail in BOTH directions, and only one was filed.**
-  (security review of ci/run-the-suite, 2026-08-26) The entry above frames
-  `pip install pytest yt-dlp` with no version as a drift risk — a yt-dlp release
-  changing selector semantics turns the suite red with no change here, a false
-  RED. The opposite direction is unfiled and worse: a compromised or typosquatted
-  release installs into a job that then runs the repository's own test code, and
-  the failure mode is a false GREEN. The two want different remedies — the false
-  RED wants a scheduled unpinned job reporting drift separately, the false GREEN
-  wants a hash-pinned install — so filing only the first frames the whole problem
-  as a nuisance rather than as a supply-chain surface. Neither is urgent on a
-  public repo with `contents: read` and no secrets in this workflow; both should
-  be decided together when either is.
+- **The yt-dlp internal-API coupling is now deferred rather than reduced.**
+  (fix/ci-dependency-posture, 2026-08-27) The open entry below about
+  `build_format_selector` is unchanged by the pin, and the pin makes it quieter in a way
+  worth writing down: those 24 tests can no longer break on a yt-dlp release without
+  somebody bumping `requirements-ci.txt`, so the failure moves from "arrives one Tuesday"
+  to "arrives when we choose". `drift.yml` is what stops that becoming silence — it runs
+  the same suite unpinned every Monday, so a rename or reshape of that private function
+  still surfaces, on its own schedule, labelled as news about yt-dlp rather than as a
+  moviola regression. Nothing here reduces the coupling itself.
 
 - **The behavioural ladder tests depend on yt-dlp INTERNAL API.** (testing review
   of ci/run-the-suite, 2026-08-26) `test_the_fallback_stays_small.py` drives
@@ -1346,6 +1313,68 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   here.
 
 ## Completed
+
+### CI installs a hash-pinned test toolchain, on two interpreters, with drift reported separately
+
+(ci/run-the-suite + its security review, 2026-08-26; fixed 2026-08-27) Four entries, one
+decision. `pip install pytest yt-dlp` with no version failed in both directions at once
+and only one direction had been filed. The false RED: yt-dlp ships on its own cadence and
+the 24 behavioural tests in `test_the_fallback_stays_small.py` drive its real
+`build_format_selector`, so an upstream release turns the suite red with no change to this
+repository and the failure reads as a moviola regression. The false GREEN, unfiled and
+worse: a re-pointed tag or a typosquat installs into a job that then runs this
+repository's own test code. The two want opposite remedies, which is why filing only the
+first framed a supply-chain surface as a nuisance.
+
+`requirements-ci.txt` answers the second — nine specs, 63 hashes, every published hash per
+version listed pip-compile style so wheel selection is not a fact the file has to get
+right. `--require-hashes` is what makes them enforcement rather than documentation, and
+`test_the_gate_installs_a_pinned_set` is what stops that flag going missing quietly.
+`.github/workflows/drift.yml` answers the first: the same two packages installed
+UNPINNED, weekly, `workflow_dispatch` for asking deliberately, and no `pull_request` or
+`push` trigger at all — a red run there is news about PyPI, and wiring it into a merge
+decision would hand the merge button to whoever publishes upstream next.
+
+The Python range is now declared rather than inferred: **3.10+** in `README.md` and
+`AGENTS.md`, and a two-rung matrix on 3.10 and 3.13. 3.10 is the TOOLCHAIN floor, not the
+language floor — moviola's own scripts parse under 3.7; pytest 9.1.1 and yt-dlp 2026.8.19
+both declare `Requires-Python >= 3.10`. Both rungs were run locally before the workflow
+claimed them rather than published as a guess: 993 passed on 3.10.12 and 993 on CPython
+3.13.13, each against exactly the pinned set, and the 3.13 install was checked to resolve
+six packages with `exceptiongroup`, `tomli` and `typing-extensions` correctly excluded by
+their `python_version < "3.11"` markers. 3.11 and 3.12 are deliberately untested and the
+workflow says so. The day-one ONE-job rule is broken on purpose and the reason is in the
+file: that rule is about the meter, this repository is public so minutes are free, and the
+second rung buys COVERAGE, which is a different axis from parallelism.
+
+The scanner gap closes as a side effect rather than by reversing the no-manifest posture:
+`trivy fs` and `osv-scanner` now have a real file to read, while the runtime stays
+dependency-free — moviola shells out to `yt-dlp` and `ffmpeg` as binaries and imports
+neither.
+
+The load-bearing part is what did NOT happen. `test_ci_runs_the_whole_suite.py` predicted
+this exact move against itself — "if the install ever moves into a requirements file, this
+test fails even though CI would be correct, because it does not follow a reference out of
+the workflow; the fix is to teach it to follow, not to loosen it" — and that prediction
+was the item's RED: moving the install alone produced `1 failed, 37 passed`, the single
+failure naming `yt_dlp` and `test_the_fallback_stays_small.py`. `installed_by` and
+`workflow_claims` now expand `-r` references instead, following `-r F`, `--requirement F`
+and `--requirement=F`, resolving nested references against the referring file's directory
+as pip does, and raising rather than returning False when a referenced file is missing or
+circular — False there is byte-identical to a genuinely deleted install and the two need
+opposite fixes. References are read only from lines containing `pip install`, because
+`pytest -q -r fE` carries a separated `-r` that is token-for-token identical to
+`-r <file>`; inside a referenced file the restriction lifts, since there `-r` can mean
+nothing else.
+
+A 16-mutation harness drove it: nine mutations each failing a NAMED test, seven legitimate
+rewrites each staying fully green. The mutation half caught a defect in the new tests
+themselves — `test_a_dash_r_outside_an_install_is_not_a_reference` was driven with `-rs`,
+one attached token the tokenizer refuses a level earlier, so it stayed green with the
+restriction removed and named a rule it did not exercise. It now drives the separated
+spelling, asserts the negative half explicitly, and the attached case moved to a test of
+its own that says which mechanism refuses it. Three comments that had named `-rs` as the
+deciding case were wrong for the same reason and were corrected.
 
 ### ffprobe's stdout is checked for being a document before its fields are read
 

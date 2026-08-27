@@ -16,6 +16,11 @@ Agent Skills package that gives an agent a video input. Installable across Claud
 - `.agents/plugins/marketplace.json` — agents marketplace listing pointing at the repo-root plugin.
 - `CLAUDE.md` → `@AGENTS.md` — generic-agent entry point.
 - `tests/` — pytest suite (ffmpeg-synthesized clips; no network).
+- `requirements-ci.txt` — the hash-pinned test toolchain CI installs. Not a
+  package manifest: moviola has no runtime dependencies and shells out to
+  `yt-dlp`/`ffmpeg` as binaries. `.github/workflows/drift.yml` installs the same
+  packages unpinned on a weekly schedule, so upstream movement is reported
+  separately rather than landing in a pull request.
 
 ## Orientation
 
@@ -35,7 +40,10 @@ Agent Skills package that gives an agent a video input. Installable across Claud
 ## Commands
 
 ```bash
-# Tests (stdlib + pytest; ffmpeg required for frame tests)
+# Tests (stdlib + pytest; ffmpeg required for frame tests). Python 3.10+ —
+# the floor is the test toolchain (pytest and yt-dlp both declare
+# `Requires-Python >= 3.10`), not the scripts, which parse under 3.7.
+# CI runs 3.10 and 3.13 against the hash-pinned set in requirements-ci.txt.
 .venv/bin/pytest -q                # or: python3 -m pytest -q
 
 # Build the claude.ai upload bundle (archives skills/moviola/ as the bundle root)

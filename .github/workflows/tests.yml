@@ -8,8 +8,12 @@ name: Tests
 #   * One concurrency group per ref, cancelling superseded runs everywhere
 #     except the default branch — where each commit's result is a record worth
 #     keeping rather than a preview to be replaced.
-#   * ONE job. GitHub rounds billing per job, so a second job has to buy
-#     parallelism somebody actually feels. This suite is ~20s; it does not.
+#   * TWO jobs, from one matrix, which is a deliberate break of the ONE-job
+#     rule this comment used to state. That rule is about the METER — GitHub
+#     rounds billing per job, so splitting a ~20s suite for tidiness doubles a
+#     bill and buys nothing — and it was always scoped to parallelism. The
+#     second rung buys COVERAGE, a different axis: it is the only thing in this
+#     repository that has ever run the suite on an interpreter other than 3.10.
 #
 # This repository is public, so Actions minutes are free and none of the above
 # is about the meter. It is about the run being legible and the config being
@@ -29,8 +33,15 @@ permissions:
 
 jobs:
   suite:
-    name: pytest
+    name: pytest (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      # Both rungs run to completion. A failure on one interpreter and not the
+      # other is the interesting result, and cancelling the sibling throws away
+      # the half of the comparison that makes it readable.
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
     # The job is ~20s. GitHub's default is 360 MINUTES, which is what a
     # hung apt mirror or a wedged ffmpeg would actually consume before
     # anyone noticed; cancel-in-progress does not help, the group is
@@ -45,15 +56,25 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python
-        # 3.10 because it is the only version this suite has been observed to
-        # pass on — 726 tests green on 3.10.12, the interpreter the project is
-        # developed against. Nothing in the repository declares a supported
-        # range, so a higher pin here would be CI testing a version nobody has
-        # run and nobody has claimed. The floor and a version matrix are filed
-        # in TODOS.md; this is the honest single value until they are decided.
+        # 3.10 is the TOOLCHAIN floor, not the language floor. moviola's own
+        # scripts parse and run under 3.7; what sets the floor is the test
+        # toolchain — pytest 9.1.1 and yt-dlp 2026.8.19 both declare
+        # `Requires-Python: >=3.10`, so below it the suite's own dependencies
+        # will not install. AGENTS.md and README.md declare 3.10+ to match.
+        #
+        # Both rungs were run locally before this landed rather than published
+        # as a guess: 993 passed on 3.10.12 and 993 on CPython 3.13.13, each
+        # against exactly the hash-pinned set below, and the 3.13 install was
+        # checked to resolve six packages — `exceptiongroup`, `tomli` and
+        # `typing-extensions` correctly excluded by their markers.
+        #
+        # NON-GOAL: 3.11 and 3.12 are deliberately untested. These two are the
+        # floor and the ceiling; a version in between failing while both ends
+        # pass is possible and nothing here would catch it. Two rungs is what
+        # buys the most per run, not what buys everything.
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install ffmpeg
         # conftest.py synthesizes every fixture clip by shelling out to ffmpeg,
@@ -72,10 +93,22 @@ jobs:
         # build_format_selector to prove the format ladder is monotonic, and
         # guards that import. Without it those 24 tests skip and the run is
         # still green — which is the whole failure this workflow exists to
-        # stop. tests/test_ci_runs_the_whole_suite.py enforces the coupling.
+        # stop. tests/test_ci_runs_the_whole_suite.py enforces the coupling,
+        # and follows the `-r` out of this file to do it.
+        #
+        # Pinned by version AND by hash, so what runs here is decided by this
+        # repository at commit time rather than by whatever PyPI resolves to at
+        # job time. requirements-ci.txt carries the reasoning and the
+        # non-goals. Movement is not ignored, it is reported separately:
+        # drift.yml installs the same two packages unpinned, weekly.
+        #
+        # `--upgrade pip` is the one unpinned install in this job, deliberately:
+        # it is the tool that ENFORCES the hashes below, it never enters the
+        # environment the suite imports from, and pinning the checker with the
+        # checker is a knot rather than a guarantee.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest yt-dlp
+          python -m pip install --require-hashes -r requirements-ci.txt
           python -m pip list
 
       - name: Run the suite
