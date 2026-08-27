@@ -6,11 +6,20 @@ marker separating what this program wrote from what a stranger's video title,
 or a stranger's server, said back — so a remote value that ends its own line
 becomes a line the reader has no way to attribute.
 
-This module holds the two edits that answer that, and nothing else. Both output
+This module holds the edits that answer that, and nothing else. Both output
 paths share these definitions rather than each keeping a copy: the copies drift,
 and the drift is silent. `md_inline` gained U+2028 handling once because a title
 carrying it reached the report as two lines; a second implementation on the
 stderr side would have kept the bug.
+
+There are two shapes, because there are two kinds of foreign value. A short one
+— an API error body, a filename, a reason phrase — belongs INSIDE a line this
+program wrote, so `stderr_line` makes it incapable of ending that line. A
+captured subprocess stderr is a document of its own: it arrives as forty-odd
+lines whose structure is the entire reason anyone prints it, so `stderr_block`
+keeps the structure and attributes every line of it instead. Feeding the second
+kind to the first was the tempting mistake — it type-checks, it is one call,
+and it silently turns a diagnostic into one unreadable run-on.
 
 The same "did not write it" test is why `finite_float` lives here rather than
 beside either of its callers. ffprobe's JSON and yt-dlp's `info.json` are both
@@ -45,14 +54,23 @@ NON-GOALS, stated here because an unstated limit reads as a claim of coverage:
     `download.py` hands yt-dlp `stdout=sys.stderr, stderr=sys.stderr`, and not
     one of those bytes can be edited here.
 
-  * **It has no opinion about output format.** `stderr_line` is the plain form;
-    `md_inline` in `moviola.py` adds the markdown fence on top of it. Anything
-    needing a multi-line block — a captured ffmpeg banner, or the transcript
-    body `md_fence` writes — needs a different shape and does not belong here
-    yet. `md_fence` is the notable one: it closes the backtick-run escape and
+  * **It has no opinion about MARKDOWN.** `stderr_line` and `stderr_block` are
+    the plain forms; `md_inline` in `moviola.py` adds the markdown fence on top
+    of the first. The report's own multi-line shape, `md_fence`, is still not
+    here and is the notable gap: it closes the backtick-run escape and
     correctly preserves line breaks, but it applies no bidi balancing at all, so
     an override opened inside a hostile transcript keeps reordering display past
-    the closing fence. Filed in TODOS.md, not fixed here.
+    the closing fence. Filed in TODOS.md, not fixed here. `stderr_block` does
+    balance per line, so the two multi-line shapes now differ in exactly that
+    respect — which is the argument for `md_fence` eventually calling in here,
+    and not an argument that it already does.
+
+  * **`stderr_block`'s attribution is structural; its notices are not.** No
+    foreign line can produce a line without the prefix, and that is the whole
+    guarantee: unprefixed means moviola wrote it. The header and the
+    "not shown" line are ordinary text a hostile capture can imitate INSIDE a
+    prefixed line, and so is the per-line width marker. They exist so a bound
+    is never silent, not so a reader can trust their arithmetic.
 """
 from __future__ import annotations
 
@@ -78,6 +96,24 @@ _BIDI_OPENERS = {
     "\u2068": "\u2069",  # FSI
 }
 _BIDI_CLOSERS = ("\u202c", "\u2069")
+
+# The three constants a fenced block is built from. Public because the tests
+# assert against them rather than against literals \u2014 a bound nobody can name is
+# a bound nobody can check.
+#
+# The prefix is the only structural part. It goes on every line of the capture,
+# so a reader's rule is "unprefixed means moviola wrote it", and no foreign line
+# can satisfy that rule no matter what it contains.
+BLOCK_PREFIX = "| "
+
+# Both bounds are measured rather than picked. A real ffmpeg failure at
+# `-loglevel info` \u2014 a 1s synthesized clip into an unwritable directory \u2014 came
+# back as 48 lines, 90th-percentile width 113, widest line 1371 (that one is
+# `showinfo` dumping x264's SEI user data as hex). 40 lines and 200 columns keep
+# an ordinary diagnostic essentially whole while bounding a hostile one, and the
+# widest real line is the one worth cutting.
+MAX_BLOCK_LINES = 40
+MAX_BLOCK_WIDTH = 200
 
 
 def finite_float(value: object, default: float = 0.0) -> float:
@@ -225,3 +261,94 @@ def stderr_line(value: object) -> str:
     request needs to read what the server actually said.
     """
     return balance_bidi(str(value).translate(_TO_SPACES))
+
+
+def stderr_block(
+    value: object,
+    *,
+    source: str,
+    max_lines: int = MAX_BLOCK_LINES,
+    max_width: int = MAX_BLOCK_WIDTH,
+) -> str:
+    """Render a captured subprocess stderr as an attributed, bounded block.
+
+    Seven sites in this program raise `SystemExit(f"...: {result.stderr}")`
+    after an ffmpeg or ffprobe run returns non-zero, and every one of those
+    captures is a document somebody else wrote. At `-loglevel info` it opens
+    with the container's `Metadata:` block — `title`, `comment`, `artist`,
+    chosen by whoever made the video — and it lands in the agent's context
+    beside the report, with nothing marking where their text ends and this
+    program's resumes. `moviola.py`'s re-print of a caught `SystemExit` makes
+    that concrete: it puts a `[moviola] ` prefix on the first line of the block
+    and on none of the other forty-seven.
+
+    `stderr_line` is the wrong instrument here and the reason is in its own
+    docstring: it makes a value ONE line by collapsing every break to a space.
+    Applied to a forty-line diagnostic that produces one line of forty joined
+    fragments and throws away the structure the diagnostic was printed for.
+
+    So: `source` names the writer (a caller-supplied literal — the one trusted
+    argument), every line of the capture is prefixed with `BLOCK_PREFIX`, and
+    the result is bounded in both dimensions, because the writer chose both.
+
+    The line bound keeps the TAIL. That is the load-bearing half of it: ffmpeg
+    prints what went wrong last (`Conversion failed!` was the final line of
+    every failure measured) and puts the container's metadata near the front, so
+    a head-biased cut would keep the part a stranger wrote and discard the only
+    line a person debugging the run is looking for.
+
+    Ordering inside a line is slice-then-balance, the same order
+    `_read_error_body` uses: the slice can cut a bidi scope in half, so
+    balancing has to see what actually survives. Balancing is per LINE rather
+    than per block, because an override opened on line three would otherwise
+    reorder the display of line four — including the prefix that line four's
+    attribution rests on.
+
+    NON-GOALS, so the prefix is not read as a stronger promise than it keeps:
+
+      * **Attribution, not sanitization.** Nothing is stripped or escaped.
+        `| Conversion failed!` on a line ffmpeg never wrote is still a lie the
+        reader can be told; what they can no longer be told is that moviola
+        said it. Every family `balance_bidi` and this module are already blind
+        to — ANSI CSI, OSC 8/52, the implicit marks U+200E/U+200F/U+061C —
+        passes through a prefixed line untouched.
+
+      * **Only the prefix is structural.** The header and the "not shown" line
+        sit at column zero because they are this program's, and a foreign line
+        structurally cannot reach column zero. It can, however, contain text
+        that reads exactly like either of them, and the width marker sits
+        inside foreign territory by construction. Treat all three as notices,
+        never as arithmetic to trust.
+
+      * **`max_width` bounds the content, not the rendered line.** The prefix,
+        any terminators `balance_bidi` appends, and the width marker are added
+        afterwards. The result is still bounded — a 200-character slice can
+        open at most 200 scopes — just not bounded AT `max_width`.
+
+      * **It cannot see a capture that never reaches it.** A subprocess given
+        an inherited descriptor writes past this module entirely, which is
+        exactly what `download.py` does with yt-dlp, and that remains the
+        largest volume of remote text on this program's stderr.
+    """
+    text = str(value)
+    if not text.strip():
+        # An empty capture rendered as an empty block reads as "no diagnostic
+        # exists", when what happened is that the tool exited non-zero and said
+        # nothing — a different and more interesting fact.
+        return f"({source} exited non-zero and wrote nothing to stderr)"
+
+    lines = text.splitlines()
+    dropped = max(0, len(lines) - max_lines)
+    out = [
+        f"-- {len(lines)} line(s) of {source} output follow; moviola wrote none "
+        f"of them, and marks each with {BLOCK_PREFIX!r} --"
+    ]
+    if dropped:
+        out.append(f"({dropped} earlier line(s) not shown)")
+    for line in lines[dropped:]:
+        if len(line) > max_width:
+            body = balance_bidi(line[:max_width]) + f" ...(+{len(line) - max_width} char(s))"
+        else:
+            body = balance_bidi(line)
+        out.append(BLOCK_PREFIX + body)
+    return "\n".join(out)

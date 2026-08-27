@@ -41,26 +41,8 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Report as an untrusted document
 
-- **ffmpeg's and ffprobe's captured stderr is remote-controlled and still unfenced.**
-  (stderr review, 2026-08-26) `whisper.py:330`/`:373`/`:439` and `frames.py:136`/`:235`/
-  `:299`/`:654` interpolate `result.stderr.strip()` into a `SystemExit` message. That is a
-  banner echoing container metadata the video's author wrote, so it is as remote as the
-  API bodies `stderr_line` now fences — but unlike them it is legitimately MULTI-LINE,
-  and collapsing a forty-line diagnostic into one line destroys the only reason it is
-  printed. So it was left alone rather than half-fixed: this surface needs a fenced
-  BLOCK (a delimiter, or a prefix on every line) and not `stderr_line`. Deciding that
-  shape is the work; the sites are already enumerated above. **Two of the seven are the
-  live vector and five are conditional** (security review, 2026-08-26): `frames.py:299`
-  and `:654` run ffmpeg at `-loglevel info`, which prints the container's
-  `Metadata: title/comment` block verbatim on every run, so the author's text reaches
-  stderr whether or not anything failed. The other five run at `-loglevel error` and
-  carry it only when ffmpeg quotes the value back inside an error message. Start with
-  the two. The three `whisper.py` sites also reach the agent a SECOND way, re-printed
-  by `moviola.py:396`; fencing them at the raise closes both routes, and fencing the
-  re-print site closes neither properly — see the entry on that below.
-
 - **yt-dlp's own output is structurally unreachable from inside this process.** (stderr
-  review, 2026-08-26) `download.py:133` and `:209` run `subprocess.run(cmd,
+  review, 2026-08-26) `download.py:173` and `:249` run `subprocess.run(cmd,
   stdout=sys.stderr, stderr=sys.stderr)`, so yt-dlp inherits the file descriptor and
   writes to it directly. Not one of those bytes passes through Python, and no helper
   that edits an interpolated value can touch them — `stderr_line` covers exactly zero of
@@ -110,25 +92,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   what the server actually said. Recorded as a known hole with a stated reason, not a
   plan. Non-goal: none of these forge a LINE, which is the property the tests pin, so
   this is not a gap in the fix that shipped.
-
-- **`moviola.py:396` re-prints ffmpeg's captured stderr, which is a second path to a
-  surface already known to be uncovered.** (security gate, 2026-08-26) the handler at
-  `moviola.py:395` is `except SystemExit as exc:` and its body prints `{exc}` raw at
-  `:396`. `extract_audio`
-  (`whisper.py:330`), `audio_duration` (`:373`) and `split_audio` (`:439`) each raise
-  `SystemExit` with `result.stderr.strip()` embedded, and all three are called from
-  `transcribe_video`'s body (`:900`, `:920`, `:929`) — the only `except SystemExit` in
-  `whisper.py` is at `:793` and guards `transcribe_one()`, the upload path, which is
-  disjoint from them. So ffmpeg's and ffprobe's captured stderr reaches the agent context
-  through this handler on any extraction, probe or split failure during a Whisper
-  fallback, multi-line and unfenced. That value is already the first of the three
-  surfaces the CHANGELOG names as knowingly uncovered; what was missing is that it
-  arrives by two routes, and only the direct one was enumerated. **Do not fence it here.**
-  `stderr_line` collapses line breaks to spaces, and collapsing a forty-line ffmpeg
-  diagnostic into one line destroys the only reason it is printed. The fix belongs at the
-  three raise sites, with whatever block-safe fence the ffmpeg-stderr work adopts —
-  fixing there covers this handler, every other caller of those three functions, and the
-  case where the `SystemExit` is not caught at all and the interpreter prints it.
 
 - **Four stderr sites interpolate an exception raised while handling remote data, and the
   channel is latent rather than live.** (security gate, 2026-08-26) `download.py:168`
@@ -1151,6 +1114,59 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   here.
 
 ## Completed
+
+### ffmpeg's and ffprobe's captured stderr is now an attributed, bounded block
+
+(stderr review, 2026-08-26; security gate, 2026-08-26; fixed 2026-08-27) Seven raise
+sites interpolated a whole captured `result.stderr` into a `SystemExit` message — a
+banner echoing container metadata the video's author wrote, landing in the agent's
+context beside the report with nothing marking where their text ended and moviola's
+resumed. `untrusted.stderr_block` renders it instead: `BLOCK_PREFIX` (`"| "`) on every
+line of the capture, bounded to `MAX_BLOCK_LINES` (40) and `MAX_BLOCK_WIDTH` (200), with
+an empty capture reported as the fact it is rather than as nothing. Applied at
+`frames.py:284`/`:395`/`:467`/`:832` and `whisper.py:376`/`:422`/`:490`. Pinned by
+`tests/test_stderr_blocks_are_fenced.py`.
+
+`stderr_line` was the wrong instrument and that is why this waited: it makes a value ONE
+line by collapsing every break to a space, which turns a forty-line diagnostic into forty
+joined fragments and destroys the only reason it is printed. The three defences are each
+measured rather than chosen. Attribution is per LINE because a block delimiter is just
+more text a hostile capture can contain, and a real failure put the author's text at
+lines 6 and 32 of 48. The line bound keeps the TAIL because ffmpeg diagnoses last —
+`Conversion failed!` was the final line of every failure measured — and puts the metadata
+near the front, so a head-biased cut keeps the stranger's text and drops the line anyone
+reads. The width bound exists because the widest real line was 1371 characters against a
+90th percentile of 113 (`showinfo` dumping x264's SEI user data as hex).
+
+**Two corrections to what this entry used to claim.** It said two of the seven were "the
+live vector", reaching stderr "whether or not anything failed", because they run ffmpeg
+at `-loglevel info`. Measured: all seven run under `capture_output=True`, so on a
+successful run the capture is parsed for timestamps and discarded and NOTHING reaches a
+reader. The `-loglevel` split decides whether ANY failure carries the author's text or
+only one that quotes it back — not whether it is reachable. And its anchors had gone
+stale by roughly 150 lines; the live ones are above.
+
+The separate entry for `moviola.py`'s re-print of a caught `SystemExit` (`:525`/`:526`,
+formerly `:395`/`:396`) closes with this one, exactly as it predicted: fencing at the
+three `whisper.py` raise sites covers that handler, every other caller of those three
+functions, and the case where the `SystemExit` is never caught and the interpreter prints
+it. Nothing was fenced at the re-print site, which would have covered neither.
+
+The KILL harness ran nine mutations and ten legitimate rewrites; all nine died and all
+ten stayed green. Two of the nine are worth recording because they are the shapes a
+tidy-up would produce. Balancing bidi once over the joined block instead of per line
+looks like an obvious simplification and is a hole: an override opened on line three
+reorders the display of line four including the prefix line four's attribution rests on.
+And `text.split("\n")` in place of `text.splitlines()` looks equivalent and is not —
+U+2028, U+0085 and the rest of `LINE_BREAKS` end a line for `splitlines`, so the piece
+after one of them would have inherited no prefix and arrived at column zero.
+
+Non-goals, unchanged by the fix: this is attribution, not sanitization — every character
+the capture arrived with is still there, and the ANSI/OSC/implicit-mark families
+`balance_bidi` is blind to pass through a prefixed line untouched. Only the prefix is
+structural; the header, the truncation notice and the per-line width marker are notices a
+hostile capture can imitate inside its own prefixed line. And yt-dlp's output is still
+untouched, for the structural reason its own entry gives.
 
 ### Two runs sharing one `--out-dir` are now refused rather than mixed
 
