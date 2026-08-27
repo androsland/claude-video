@@ -96,6 +96,7 @@ class _CountingBody:
         self.unit = unit
         self.served = 0
         self.sizes: list[int | None] = []
+        self.closes = 0
 
     def read(self, size: int | None = None) -> bytes:
         self.sizes.append(size)
@@ -104,8 +105,12 @@ class _CountingBody:
         self.served += len(out)
         return out
 
-    def close(self) -> None:  # `addbase` closes the fp it was handed
-        pass
+    def close(self) -> None:
+        # Counted rather than ignored. `addbase` does NOT close the fp it was
+        # handed at construction — verified — so this counter answers exactly
+        # one question: did anything ever close the response, or was it left
+        # for the garbage collector.
+        self.closes += 1
 
 
 def _http_error_with_body(body: _CountingBody) -> urllib.error.HTTPError:
@@ -412,6 +417,60 @@ class TestAnErrorBodyIsBoundedBeforeItIsRead:
             size is not None and size > 0 for size in body.sizes
         ), f"an unbounded read reached the stream: {body.sizes}"
 
+    def test_the_response_is_closed_even_though_the_read_stopped_short(
+        self,
+    ) -> None:
+        # The regression this bound introduced, and the reason a resource fix
+        # needs a resource test rather than only a size assertion.
+        #
+        # `HTTPResponse` releases its socket from `_close_conn()`, which runs
+        # when a read reaches EOF. The unbounded `exc.read()` this replaced
+        # always reached EOF, so the socket came back on its own. A partial
+        # read never does. Measured against a local server answering 429 with
+        # a 1 MB body: `read()` left the connection released, `read(8192)`
+        # left it held with 1,040,384 bytes still owed.
+        #
+        # It matters here rather than nowhere because `_post_whisper` keeps the
+        # exception alive deliberately — `last_exc, last_detail = exc, detail`
+        # — across the whole retry ladder, including a clamped sleep of up to
+        # MAX_RETRY_DELAY, and past the final SystemExit. Refcounting collects
+        # it eventually, so this is fd lifetime rather than an unbounded leak;
+        # what it costs is a connection held open per chunk, with the far end
+        # still holding a response nobody will ever read.
+        # The exception is held in a local for the length of the assertion,
+        # and that is load-bearing rather than incidental. Written first as
+        # `_read_error_body(_http_error_with_body(body))`, this test PASSED
+        # against the unfixed code: the HTTPError went unreferenced at the end
+        # of the expression, refcounting collected it, and `addbase`'s
+        # finalizer closed the fp. It was measuring the garbage collector.
+        #
+        # Holding the reference is also the production shape. `_post_whisper`
+        # keeps the exception alive on purpose — `last_exc, last_detail = exc,
+        # detail` — precisely so it can be re-reported after the ladder ends,
+        # which is exactly the window in which the socket must not be held.
+        body = _CountingBody()
+        exc = _http_error_with_body(body)
+        whisper._read_error_body(exc)
+        assert body.closes == 1, (
+            "the bounded read left the response open; a partial read never "
+            f"reaches EOF, so nothing released the socket (closes={body.closes})"
+        )
+        assert exc.code == 500, "keeps `exc` alive past the assertion above"
+
+    def test_a_body_that_raises_is_still_closed(self) -> None:
+        # The close has to survive the failure path too, or the one case that
+        # most wants its socket back — a stream that errored mid-read — is the
+        # one case that does not get it.
+        class _Angry(_CountingBody):
+            def read(self, size: int | None = None) -> bytes:
+                raise OSError("connection reset")
+
+        body = _Angry()
+        exc = _http_error_with_body(body)
+        assert whisper._read_error_body(exc) == ""
+        assert body.closes == 1, "a stream that raised was left open"
+        assert exc.code == 500, "keeps `exc` alive past the assertion above"
+
     def test_a_gigantic_body_does_not_all_reach_memory(self) -> None:
         body = _CountingBody()
         whisper._read_error_body(_http_error_with_body(body))
@@ -431,9 +490,16 @@ class TestAnErrorBodyIsBoundedBeforeItIsRead:
         # Four-byte characters, which is the worst case the arithmetic above is
         # sized for. All 400 must come back — the bound must not be visible in
         # the output for any body a human would actually want to read.
-        body = _CountingBody(unit="☃🚀".encode())
+        #
+        # U+1F680 alone, and the "alone" is the correction. This read
+        # `unit="☃🚀"` and called it four-byte characters, which the snowman is
+        # not: U+2603 is three, so the pair averaged 3.5 and 400 of them cost
+        # 1400 bytes rather than the 1600 the comment claims to be exercising.
+        # One codepoint makes the sentence true and makes the arithmetic the
+        # worst case it says it is: 400 × 4 = 1600, against a bound of 8192.
+        body = _CountingBody(unit="🚀".encode())
         out = whisper._read_error_body(_http_error_with_body(body))
-        assert out.count("🚀") + out.count("☃") == 400
+        assert out.count("🚀") == 400
 
     def test_a_sequence_cut_by_the_bound_cannot_reach_the_report(self) -> None:
         # `read(n)` can stop mid-character, and `errors="replace"` turns that
@@ -441,16 +507,34 @@ class TestAnErrorBodyIsBoundedBeforeItIsRead:
         # characters with room to spare, so the damaged tail is always past the
         # slice. Pinned rather than assumed: a bound tightened to near 400 bytes
         # would put the replacement character inside the report.
-        body = _CountingBody(unit="🚀".encode())
+        #
+        # U+2603, and the width is the whole test rather than decoration. This
+        # used the four-byte rocket, and 8192 is divisible by four — so nothing
+        # was EVER cut mid-character and the assertion below passed for a
+        # reason that had nothing to do with the property it names. It would
+        # have stayed green against a slice that damaged the report. The
+        # snowman is three bytes, 8192 % 3 == 2, and the cut is guaranteed.
+        unit = "☃".encode()
+        body = _CountingBody(unit=unit)
         out = whisper._read_error_body(_http_error_with_body(body))
+
+        # The anti-vacuity half, asserted rather than reasoned about, so this
+        # cannot silently go hollow again if the bound is ever retuned to a
+        # multiple of three. Measured today: U+FFFD lands at character 2730 of
+        # the decoded capture, which is 2330 past the end of the report.
+        whole = (unit * (whisper.MAX_ERROR_BODY_BYTES // len(unit) + 1))[
+            : whisper.MAX_ERROR_BODY_BYTES
+        ].decode("utf-8", errors="replace")
+        assert "�" in whole, (
+            f"MAX_ERROR_BODY_BYTES ({whisper.MAX_ERROR_BODY_BYTES}) now divides "
+            f"{len(unit)} evenly, so no sequence is cut and the assertion below "
+            "proves nothing — pick a unit width that does not divide it"
+        )
         assert "�" not in out
 
     def test_an_empty_body_is_still_reported_as_nothing(self) -> None:
         # The bound is the only change. A server that says nothing still gets
         # an empty string rather than a dangling em-dash on the diagnostic.
-        empty = _CountingBody()
-        empty._UNBOUNDED = 0
-
         class _Empty(_CountingBody):
             def read(self, size: int | None = None) -> bytes:
                 self.sizes.append(size)

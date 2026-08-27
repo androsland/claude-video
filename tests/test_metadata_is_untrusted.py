@@ -88,6 +88,7 @@ Every value written below is inert filler. Nothing here reads a real credential.
 """
 from __future__ import annotations
 
+import decimal
 import json
 import math
 import subprocess
@@ -402,6 +403,60 @@ def _stub_stdout(monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
     )
 
 
+class TestTheDefaultGuardCatchesEveryWayItsOwnCheckCanFail:
+    """`math.isfinite` raises three things, and the guard named two.
+
+    The guard reads `except (TypeError, OverflowError)` and its comment states
+    that pair as the complete set: "Both answer False rather than escaping as
+    themselves". There is a third. `math.isfinite` converts its argument via
+    `__float__`, and a type whose conversion itself fails raises from inside
+    that conversion — `Decimal("sNaN")` is the reachable example, because IEEE
+    754 requires a signalling NaN to raise rather than quietly become a quiet
+    NaN.
+
+    What it costs is small and worth stating exactly: the escaping exception is
+    a `ValueError`, which is the same TYPE the guard would have raised anyway,
+    so no caller sees a different class of failure and no value comes back
+    wrong. What changes is the message. The guard exists so that a caller
+    debugging this reads one sentence naming `default`; the escape hands them
+    `cannot convert signaling NaN to float` from the math module instead, which
+    names neither the parameter nor the function that refused it.
+
+    NON-GOALS:
+
+      * **Not a claim that anything in the tree passes a Decimal.** Nothing
+        does; every `default` is the literal 0.0 or a nested `finite_float`
+        result. This pins the guard's own completeness, not a live call path.
+      * **Not an argument that the guard should return False here.** Refusing
+        is right — a non-finite default is this program's bug. The property is
+        that the refusal comes from the raise below, with its message, rather
+        than from the conversion inside the check.
+      * **It does not enumerate every type with a failing `__float__`.** A
+        custom class raising anything at all from `__float__` is the general
+        case and this catches one instance of it. The fix is the tuple, so the
+        general case is covered by the code even though the test names one.
+    """
+
+    def test_a_signalling_nan_default_is_refused_by_the_guard_not_by_math(
+        self,
+    ) -> None:
+        # Both paths raise ValueError, so the type alone proves nothing — the
+        # message is the assertion, because the message is what differs.
+        with pytest.raises(ValueError) as caught:
+            untrusted.finite_float("1.5", decimal.Decimal("sNaN"))
+        assert "non-finite default" in str(caught.value), (
+            "the check's own conversion raised before the guard could, so the "
+            f"caller reads the math module's words instead: {caught.value}"
+        )
+
+    def test_an_oversized_int_default_is_still_refused(self) -> None:
+        # The arm that already worked, kept beside the new one so a fix that
+        # widened the tuple by REPLACING a member instead of adding to it
+        # cannot pass. `math.isfinite(10**400)` raises OverflowError.
+        with pytest.raises(ValueError, match="non-finite default"):
+            untrusted.finite_float("1.5", 10**400)
+
+
 class TestTheDocumentIsUntrustedAndNotOnlyItsFields:
     """One trust boundary up from everything above.
 
@@ -457,9 +512,6 @@ class TestTheDocumentIsUntrustedAndNotOnlyItsFields:
         non-zero, and the returncode guard already owns the second half. This
         is defence in depth on the same footing as the `finite_float` guards,
         and TODOS.md records it that way.
-
-    Every value written below is inert filler. Nothing here reads a real
-    credential.
     """
 
     NOT_JSON = "ffprobe: unrecognized option '-show_streams'"

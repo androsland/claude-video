@@ -711,15 +711,48 @@ def _read_error_body(exc: urllib.error.HTTPError) -> str:
     `[:400]` decides what is printed. Slicing alone bounded only the second, so
     the size of the allocation was the far end's choice.
 
-    NON-GOAL: `read(n)` asks for n bytes and is free to be given fewer, and this
-    does not re-read to fill the quota. The report wants a prefix, not a
-    complete body, and a short read on a failing connection is the ordinary
-    case rather than an error to recover from.
+    The bound is why the close is here. A bounded read buys a memory ceiling
+    and, on its own, pays for it with a held connection — see the `finally`
+    below. The two belong together and neither is complete alone.
+
+    NON-GOALS:
+
+      * `read(n)` asks for n bytes and is free to be given fewer, and this does
+        not re-read to fill the quota. The report wants a prefix, not a
+        complete body, and a short read on a failing connection is the ordinary
+        case rather than an error to recover from.
+      * Only the ERROR path is bounded. `_post_whisper`'s success path still
+        reads the 2xx body whole, and the same argument applies to it verbatim
+        — it is a deliberate, filed gap rather than a claim of coverage, and it
+        is on the branch that reads the response, not here.
     """
     try:
         body = exc.read(MAX_ERROR_BODY_BYTES)
     except Exception:
         return ""
+    finally:
+        # `HTTPResponse` releases its socket from `_close_conn()`, which runs
+        # when a read reaches EOF. The unbounded `exc.read()` this replaced
+        # always reached EOF, so the connection came back without anyone
+        # asking; `read(n)` stops short by design and never does. Bounding the
+        # allocation therefore traded a memory ceiling for a held connection,
+        # and this is the other half of that trade rather than tidiness.
+        #
+        # Measured against a local server answering 429 with a 1 MB body:
+        # `read()` left the socket released, `read(8192)` left it held with
+        # 1,040,384 bytes still owed. `_post_whisper` keeps the exception alive
+        # across the whole ladder — `last_exc, last_detail = exc, detail` — so
+        # the window is a clamped sleep of up to MAX_RETRY_DELAY per attempt,
+        # once per chunk, not a moment.
+        #
+        # In a `finally` because the stream that raised mid-read is the one
+        # that most wants its socket back. Under its own `except` because this
+        # is best-effort cleanup on an error path: a close that fails must not
+        # replace the caller's diagnostic with a traceback about the cleanup.
+        try:
+            exc.close()
+        except Exception:
+            pass
     if not body:
         return ""
     try:
@@ -757,6 +790,20 @@ def _seconds_until(http_date: str) -> float | None:
     Greenwich a deadline seconds away would resolve hours into the past and be
     discarded. The bug is invisible wherever local time IS GMT, which is every
     CI runner, so the test that covers it pins a non-UTC zone of its own.
+
+    NON-GOAL: **the second `except` below is unreachable, and it is unreachable
+    BECAUSE of that zone line rather than independently of it.** Once a value is
+    aware, `datetime.timestamp()` is `(self - epoch).total_seconds()` — pure
+    arithmetic over a range that ends at year 9999, with no call into the
+    platform's clock. Measured on CPython 3.10 / x86_64 / Linux with the C
+    accelerator: `datetime.min` and `datetime.max` both answer, at UTC and at
+    the ±14h offset extremes, and only the NAIVE form raises. The other end is
+    closed too — `parsedate_to_datetime` refuses `year 99999` with `ValueError`
+    before this is reached at all. So it is not the 32-bit `time_t` guard it
+    looks like; it is the coupling guard for the two lines above, and what it
+    catches is a future edit that makes the zone attachment conditional. It is
+    deliberately unexercised: a test for it would have to construct a naive
+    out-of-range datetime that this function cannot receive.
     """
     try:
         deadline = email.utils.parsedate_to_datetime(http_date)

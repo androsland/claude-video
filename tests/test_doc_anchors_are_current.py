@@ -62,6 +62,17 @@ NON-GOALS, stated because an unstated limit reads as a claim of coverage:
   * **It cannot see an anchor that is correct today and stale tomorrow** any more
     than a reviewer can. It shortens the window to one test run; it does not close
     it. Nothing here runs on a document nobody edited.
+
+  * **`raise_sites()` keys on the attribute name `stderr`, so a fenced capture of
+    any OTHER attribute is invisible to it.** There is one today: `get_metadata`
+    fences ffprobe's `result.stdout` through the same `stderr_block` when the
+    document is not JSON, which makes eight `stderr_block` call sites and seven
+    raise sites, and this file re-derives the seven. That is deliberate, because
+    the seven are what the two documents anchor and the eighth is anchored
+    nowhere — but it means the number this file guards is "raise sites reading
+    `.stderr`", never "sites that fence a foreign capture". Widening the
+    predicate would make the sets stop matching the prose, which is the opposite
+    of the job. `tests/test_metadata_is_untrusted.py` pins the stdout one.
 """
 
 from __future__ import annotations

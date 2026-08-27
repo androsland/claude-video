@@ -186,9 +186,17 @@ def finite_float(value: object, default: float = 0.0) -> float:
         rather than at the point of return, because a lazy check fires only
         when `value` happens to be unparseable too — the caller's bug would
         then ship green and surface later, far from the line that caused it.
-        Every call site passes 0.0 today, so nothing in the tree can trigger
-        it; the name is the promise a future caller reads, and this is what
-        enforces it.
+        Nothing in the tree can trigger it, and the reason is worth stating
+        exactly, because "every call site passes 0.0" — which this bullet said
+        until somebody counted — is not one of the true ways to say it. There
+        are four. Three pass the literal `0.0`: `get_metadata`'s size field,
+        `moviola.py`'s transcript-only duration, and the INNER call of the
+        nested pair in `get_metadata`. The fourth is that pair's OUTER call,
+        whose default is the inner call's RESULT — safe for a stronger reason
+        than a literal is, since this same guard has already vetted it. The
+        refusal below is what makes the nesting safe rather than something the
+        nesting slips past. The name is the promise a future caller reads, and
+        this is what enforces it.
 
       * The refusal is finiteness alone. A negative default and a very large
         one both pass — sign and magnitude are separate findings with separate
@@ -207,13 +215,26 @@ def finite_float(value: object, default: float = 0.0) -> float:
     """
     try:
         default_is_finite = math.isfinite(default)
-    except (TypeError, OverflowError):
-        # TypeError for a `default` that is not a number at all; OverflowError
-        # for a Python int too large for a double, which is the same
-        # not-representable-as-a-finite-float condition arriving by a different
-        # exception. Both answer False rather than escaping as themselves — a
-        # caller debugging this should read one message naming `default`, not a
-        # traceback naming the math module.
+    except (TypeError, ValueError, OverflowError):
+        # Three, and the same three the `float(value)` call below already
+        # catches, because both are the same question asked of a different
+        # argument. TypeError for a `default` that is not a number at all;
+        # OverflowError for a Python int too large for a double; ValueError
+        # from inside the `__float__` conversion `math.isfinite` performs — a
+        # signalling NaN is the reachable example, since IEEE 754 requires it
+        # to raise rather than quietly become a quiet NaN.
+        #
+        # The third was missed on the branch that wrote this guard, and what it
+        # cost is worth stating exactly, because it is small: the escaping
+        # exception is a ValueError, which is the same TYPE the raise below
+        # produces, so no caller ever saw a different class of failure and no
+        # value ever came back wrong. What changed was the message — the guard
+        # exists so a caller reads one sentence naming `default`, and the
+        # escape handed them the math module's words instead.
+        #
+        # All three answer False rather than escaping as themselves, so the
+        # refusal below is the single exit for a default this function will not
+        # accept.
         default_is_finite = False
     if not default_is_finite:
         raise ValueError(
@@ -274,6 +295,18 @@ def json_object(text: object) -> dict | None:
         level is legitimately an array is refused, which is correct for every
         caller there is today and would be wrong for one that wanted a list.
         That caller wants its own function, not a widened return type here.
+
+      * **One level of shape, and the level below it is somebody else's.** A
+        right-shaped document with wrong-typed fields passes whole:
+        `{"format": "a string"}` IS an object, so it is returned, and
+        `get_metadata`'s `data.get("format", {})` then hands back that string.
+        Measured: the next line raises `AttributeError: 'str' object has no
+        attribute 'get'` — the very failure this function exists to prevent,
+        arriving one level deeper than the one it prevents. `{"streams": "ab"}`
+        does the same through the generator. Filed rather than fixed, and
+        filed as a schema question: the fix is a walk that knows what an
+        ffprobe document is supposed to contain, which is knowledge a leaf
+        module deliberately does not have.
     """
     try:
         document = json.loads(text)  # type: ignore[arg-type]

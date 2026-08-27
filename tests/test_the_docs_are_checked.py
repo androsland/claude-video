@@ -559,6 +559,67 @@ class TestTheHookClaimsNoMoreThanItChecked:
         assert "ready — transcription via the groq API" in result.stdout
 
 
+class TestNoHeadingWasSplitThroughAnInlineCodeSpan:
+    """A heading with an odd number of backticks is a line that got cut in half.
+
+    This exists because it happened. An edit to `TODOS.md` anchored on the
+    string `## Completed` — and that string also appears, inside backticks, in
+    the middle of a bullet that discusses the section by name. The insert
+    matched the mention rather than the heading, split the line there, and left
+    the tail at column zero as a real H2 reading
+
+        ## Completed`, leaving yt-dlp's inherited descriptor and `md_fence` ...
+
+    so the document had two `## Completed` headings and roughly a hundred lines
+    of OPEN work filed under the second one. Nothing caught it: the file parses,
+    the suite was green, and a duplicate-heading check does not fire either,
+    because the two lines are not equal as strings.
+
+    The odd backtick is what gives it away. Inline code spans come in pairs, so
+    a heading holding an unmatched one is a heading that was cut through the
+    middle of a span — which is exactly the shape a mis-anchored insert makes.
+    Measured across every tracked markdown file in the repository, the corrupt
+    line is the ONLY hit, so this is a signal and not a style rule.
+
+    NON-GOALS:
+
+      * **It sees one signature, not corruption in general.** A heading split
+        somewhere without backticks, or a heading duplicated cleanly, is
+        invisible here. This catches the shape that actually occurred.
+      * **It reads headings only.** The same mis-anchored insert landing in the
+        middle of a paragraph mangles a bullet without ever producing a
+        heading, and nothing in this class would notice.
+      * **A heading that legitimately wants one backtick would fire.** None
+        does today. If one is ever needed, write the character as a pair or as
+        an entity rather than loosening this check — the false-positive rate
+        measured across the repository is zero, which is the only reason a
+        check this blunt is worth having.
+      * **It does not check that headings are unique, ordered, or nested
+        correctly.** Those are different properties with different owners.
+    """
+
+    def test_no_tracked_heading_holds_an_unmatched_backtick(self) -> None:
+        offenders = []
+        for path in tracked_text_files():
+            if path.suffix != ".md":
+                continue
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                if not line.startswith("#"):
+                    continue
+                if not line.lstrip("#").startswith(" "):
+                    continue
+                if line.count("`") % 2:
+                    offenders.append(
+                        f"{path.relative_to(REPO)}:{number}: {line[:90]}"
+                    )
+        assert not offenders, (
+            "a heading holds an unmatched backtick, which is what a line split "
+            "through an inline code span looks like:\n  " + "\n  ".join(offenders)
+        )
+
+
 class TestTheChangelogsTestCountsAreReal:
     """A count in prose is a claim about a file, and it goes stale silently."""
 

@@ -349,9 +349,17 @@ class TestTheBlockFenceExists:
         # `source` is interpolated into the header and into the empty-capture
         # sentence, and both land at column zero. Every OTHER value in this
         # function is prefixed. The docstring called it "the one trusted
-        # argument", which is a convention no code enforced: an eighth site
-        # passing `cmd[0]` or a filename would forge a moviola line, and the
-        # AST sweep keys on the attribute name `stderr` so it would not see it.
+        # argument", which is a convention no code enforced: a site passing
+        # `cmd[0]` or a filename would forge a moviola line, and the AST sweep
+        # keys on the attribute name `stderr` so it would not see it.
+        #
+        # "An eighth site" is how this read when it was written, as the
+        # hypothetical. There is an eighth now — `get_metadata` fences
+        # ffprobe's `result.stdout` through this same function — and it is
+        # exactly the shape described: outside the sweep, because the sweep
+        # asks for `.stderr`. It passes a literal `"ffprobe"`, so the
+        # convention holds there; what closed the hole is that the property is
+        # enforced here rather than trusted.
         # The property is `stderr_line`'s, so state it as `stderr_line`'s: the
         # label may still be READ inside moviola's own line — nothing here is a
         # sanitizer — it just may not END that line and start one of its own.
