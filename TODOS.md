@@ -1062,12 +1062,41 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
      parse of output this program did not write, which is exactly what `untrusted.py`
      exists to hold. It sits in `frames.py` for historical reasons only. Moving it is
      mechanical and would put the surplus/shortfall reasoning beside the other fences.
-  4. `render_report`'s ordering is now load-bearing — the Frames bullet must be built
-     before the transcript block-quote because both read shared state — and nothing says
-     so. A comment is the cheap fix; a explicit render-order list is the real one.
-  5. `whisper.py:1017` builds a stderr line from a raw tuple, so a `TranscriptGaps` prints
-     as `(([1.0, 2.0]), 1, 4)` rather than as spans. It is stderr and it is diagnostic, but
-     it is the one place on the branch where a range reaches a human unformatted.
+  4. The report is assembled by a run of bare `print()` calls inside `main()`
+     (`moviola.py`, roughly 560–664) with no function of its own, so there is no name to
+     hang a contract on and no signature saying what a section may read. **The first
+     version of this item claimed `render_report`'s ordering was load-bearing, and both
+     halves of that were false** — no function called `render_report` has ever existed in
+     this repository (`git log -S` across all commits returns only the commit that wrote
+     this entry), and the ordering is not load-bearing: everything both sections read
+     (`frame_meta`, `transcript_gaps`, `transcript_segments`) is fully computed before any
+     printing starts, the five assignments between the two print sites are local read-only
+     derivations, and `untimed_note` and `gap_warning` are pure string builders over
+     disjoint state. Swapping the two prints would reorder the document and break nothing.
+     What is actually true is weaker and still worth fixing: the order is a convention held
+     by nothing, so a reader has no way to tell which of these prints may be moved. Extract
+     the block into a named function whose parameters say what it reads — that answers the
+     question the missing name leaves open, instead of adding a comment asserting a
+     dependency that is not there.
+  5. `whisper.py:1015` interpolates `gaps.ranges` straight into a stderr line, so a
+     failed-chunk span reaches a human as `missing [(1.0, 2.0)]` instead of as formatted
+     times. Only `.ranges` is raw — `gaps.failed` and `gaps.total` are already plain ints
+     in the "1 of 4" phrasing on the line above. (**This item first said `whisper.py:1017`
+     and showed `(([1.0, 2.0]), 1, 4)`; :1017 is the closing paren of the same call, and
+     nothing anywhere interpolates the whole `TranscriptGaps`.**) It is stderr and it is
+     diagnostic, but it is the one place on the branch where a range reaches a human
+     unformatted, and `format_missing_ranges` already exists to do it.
+
+  **Why two of five were wrong, recorded because it is the more useful finding.** Items 4
+  and 5 were written by paraphrasing the reviewer's report rather than by opening the
+  files, and a paraphrase carries the confident shape of a verified claim without the
+  verification. They were caught only because the same reviewer was asked, on a re-run, to
+  audit this entry against the code rather than to re-report its own findings. A deferral
+  is read by whoever picks the work up months later, with the review long gone — so a
+  wrong file or function name in TODOS.md costs strictly more than not filing at all,
+  because it sends someone searching for something that does not exist. Check a finding
+  against the code before it lands here, even when the finding came from a reviewer that
+  was right about everything else.
 
 ## Completed
 

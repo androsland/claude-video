@@ -465,8 +465,7 @@ class TestTheDroppedFramesReachTheReport:
 
         line = _frames_line(out)
         assert "2 dropped" in line
-        # Scoped to the bullet: the report's standing "`t=MM:SS` is the absolute
-        # timestamp" line satisfies this word against `out` on any run at all.
+        # Scoped to the bullet, not to `out` — see _frames_line's docstring.
         assert "timestamp" in line.lower()
 
     def test_the_default_engine_puts_the_count_where_the_report_looks(
@@ -600,7 +599,11 @@ class TestTheFallbackReportsItsOwnFrames:
             self._report(monkeypatch, capsys, cut_clip, dict(self.FALLBACK_META))
         )
 
-        assert "3" in line
+        # "timestamped 3", not a bare "3": the bullet also carries a budget, a
+        # cap and a candidate count, and any of those three numbers could grow a
+        # digit that satisfies a lone substring without the shortfall sentence
+        # rendering at all. Same failure the "1 frames" assertion above had.
+        assert "timestamped 3" in line
         assert "scene" in line.lower()
 
     def test_a_shortfall_driven_fallback_says_the_video_is_not_why(
