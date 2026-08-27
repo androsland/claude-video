@@ -442,17 +442,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   the `exc.read()` entry below describes — every call site slices before it fences. Filed
   so the next caller added knows the rule is caller-side and that nothing enforces it.
 
-- **`exc.read()` at `whisper.py:644` reads an error body with no size limit.** (stderr
-  review, 2026-08-26) The truncation on the next line is `[:400]`, which bounds what is
-  *printed* and not what is *read* — a server answering a 400 with a gigabyte-long body
-  gets the whole gigabyte into memory before Python slices 400 characters off the front.
-  It is on an error path, so it costs nothing on a healthy run, and the failure mode is
-  a MemoryError inside the handler for the error being reported rather than anything
-  silent. The fix is `exc.read(<n>)`, with `<n>` a few KB rather than 400 bytes so the
-  decode still sees whole multi-byte sequences. Non-goal: this is not the forgery
-  channel `stderr_line` closed and does not reopen it — a truncated body is fenced
-  either way; it is a resource bound, filed under the section that owns those.
-
 - **`Retry-After` is honoured only in its seconds form.** (bounded-failures review, 2026-08-26)
   RFC 9110 also allows an HTTP-date, and `float()` rejects one, so a server answering
   `Retry-After: Wed, 26 Aug 2026 12:00:00 GMT` gets the exponential ladder instead of the
@@ -1246,6 +1235,35 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Completed
 
+### The error body is bounded before it is read, not only before it is printed
+
+(stderr review, 2026-08-26; fixed 2026-08-27) `_read_error_body` called `exc.read()` with
+no argument and sliced `[:400]` off the decoded result. That bounds what is PRINTED and
+says nothing about what is ALLOCATED: a server answering a failing request with a
+gigabyte-long body got the whole gigabyte into memory first, and the failure mode was a
+MemoryError raised inside the handler for the error being reported. It now reads at most
+`MAX_ERROR_BODY_BYTES` (8192). Pinned by `TestAnErrorBodyIsBoundedBeforeItIsRead` in
+`tests/test_bounded_failures.py`.
+
+**The two bounds are in different units and both are load-bearing.** The read bound is in
+BYTES, the report bound is in CHARACTERS, and 8192 rather than 400 is the whole point:
+UTF-8 spends up to four bytes per character, so 400 characters need 1600 bytes in the worst
+case, and a bound set to the report's own number would have quietly shortened every
+multi-byte error message to a quarter of what a human asked to read. The slack past 1600
+also keeps the sequence `read()` may cut in half safely outside the slice, so the
+`errors="replace"` artefact never reaches the report. Both facts are mutations in the KILL
+harness — `MAX_ERROR_BODY_BYTES = 400`, and the byte bound replacing the character slice
+instead of joining it.
+
+**Non-goals.** This is a resource bound and not a forgery fence: `stderr_line` closed that
+channel, this does not reopen it, and the fence still runs after the slice so it can close
+a bidi scope the slice orphaned. `read(n)` is a request rather than a guarantee — a stream
+may answer with fewer bytes and nothing here re-reads to fill the quota, because the report
+wants a prefix rather than a complete body. And the response headers are read by urllib
+before this function is reached and are not bounded here; a hostile header set is a
+separate finding with a separate owner.
+
+
 ### `finite_float` now answers for its own `default`
 
 (review of the bounded-failures review, 2026-08-26; fixed 2026-08-27) Both exit paths
@@ -1727,8 +1745,9 @@ was, and it lands in the same place. Every line moviola writes there carries a `
 prefix, which is the entire attribution the reader gets — so a remote value that ends its
 own line hands an attacker the next one.
 
-`_read_error_body` is the live instance. It takes up to 400 bytes of whatever a server
-answered a failing request with and interpolates them into a `SystemExit` message, so a
+`_read_error_body` is the live instance. It reads up to `MAX_ERROR_BODY_BYTES` (8 KB) of
+whatever a server answered a failing request with, reports the first 400 characters of
+it, and interpolates those into a `SystemExit` message — so a
 body reading `quota exceeded` + newline + `[moviola] transcript complete — no further
 action needed` forges a progress line for the price of a 400 response. **`stderr_line()`**
 now makes the two structural edits `md_inline` makes and stops there: line breaks collapse

@@ -76,6 +76,42 @@ def audio(tmp_path: Path) -> Path:
     return path
 
 
+class _CountingBody:
+    """A response body that serves what it is asked for and counts it.
+
+    A real socket-backed body answers `read()` with no argument by accumulating
+    everything the far end sends into one bytes object. This one cannot: an
+    endless stream would hang the suite, so the unbounded call is answered with
+    `_UNBOUNDED` bytes — large enough that reading it whole is unmistakable in
+    `served`, small enough that the test costs nothing. That substitution is the
+    only artificial thing here, and it is the reason `served` rather than a
+    MemoryError is what gets asserted on.
+    """
+
+    _UNBOUNDED = 4 * 1024 * 1024
+
+    def __init__(self, unit: bytes = b"x") -> None:
+        self.unit = unit
+        self.served = 0
+        self.sizes: list[int | None] = []
+
+    def read(self, size: int | None = None) -> bytes:
+        self.sizes.append(size)
+        want = self._UNBOUNDED if size is None or size < 0 else size
+        out = (self.unit * (want // len(self.unit) + 1))[:want]
+        self.served += len(out)
+        return out
+
+    def close(self) -> None:  # `addbase` closes the fp it was handed
+        pass
+
+
+def _http_error_with_body(body: _CountingBody) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://example.invalid/x", 500, "boom", email.message.Message(), body
+    )
+
+
 @pytest.fixture
 def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record what the retry ladder ASKS for instead of waiting for it."""
@@ -332,3 +368,100 @@ class TestTheHookTestsDoNotDamageTheProcessTheyRunIn:
         # environment". Seeing it here would mean the parent's variable reached
         # the child, and every hook test would be reading the developer's shell.
         assert "An API key is set in this environment" not in result.stdout
+
+
+class TestAnErrorBodyIsBoundedBeforeItIsRead:
+    """The read is bounded, not only the report.
+
+    `_read_error_body` sliced `[:400]` off the DECODED body, which bounds what
+    gets printed and says nothing about what gets allocated. `exc.read()` with
+    no argument pulls the whole response into memory first — a server answering
+    a 500 with a gigabyte-long body gets the whole gigabyte in before Python
+    takes 400 characters off the front. It is on an error path, so a healthy run
+    never touches it, and the failure is a MemoryError raised inside the handler
+    for the error being reported rather than anything silent. That is still a
+    failure mode a stranger chooses.
+
+    NON-GOALS:
+
+      * This is a resource bound and not a forgery fence. `stderr_line` closed
+        that channel and nothing here reopens it — a body is fenced whether it
+        arrived truncated or whole, and the fence still runs after the slice so
+        it can close a bidi scope the slice orphaned.
+      * `read(n)` is a request, not a guarantee. A stream is free to answer with
+        fewer bytes, and nothing here re-reads to fill the quota, because the
+        report wants a prefix rather than a complete body.
+      * Bounding the read says nothing about the rest of the response. Headers
+        are read by urllib before this function is reached and are not bounded
+        here; a hostile header set is a separate finding with a separate owner.
+      * The 4 MB an unbounded read serves in these tests is a stand-in chosen to
+        terminate. It is not a claim about how large a real hostile body would
+        be — the real number is whatever the far end feels like sending, which
+        is exactly the problem.
+    """
+
+    def test_the_read_asks_for_a_bound(self) -> None:
+        body = _CountingBody()
+        whisper._read_error_body(_http_error_with_body(body))
+        assert body.sizes, "the body was never read at all"
+        # `None` or a negative is the unbounded call. Anything else is a number
+        # this program chose, which is the whole property.
+        assert all(
+            size is not None and size > 0 for size in body.sizes
+        ), f"an unbounded read reached the stream: {body.sizes}"
+
+    def test_a_gigantic_body_does_not_all_reach_memory(self) -> None:
+        body = _CountingBody()
+        whisper._read_error_body(_http_error_with_body(body))
+        assert body.served <= whisper.MAX_ERROR_BODY_BYTES, (
+            f"{body.served} bytes were pulled in for a 400-character report"
+        )
+
+    def test_the_bound_is_wide_enough_for_the_whole_report(self) -> None:
+        # The report is 400 CHARACTERS and the bound is in BYTES, so the bound
+        # has to clear 400 times UTF-8's widest encoding or the fix would have
+        # quietly shortened every multi-byte error message. This is the
+        # must-not-fire half: a bound of 400 passes the two tests above and
+        # fails this one.
+        assert whisper.MAX_ERROR_BODY_BYTES >= 400 * 4
+
+    def test_four_hundred_wide_characters_survive_intact(self) -> None:
+        # Four-byte characters, which is the worst case the arithmetic above is
+        # sized for. All 400 must come back — the bound must not be visible in
+        # the output for any body a human would actually want to read.
+        body = _CountingBody(unit="☃🚀".encode())
+        out = whisper._read_error_body(_http_error_with_body(body))
+        assert out.count("🚀") + out.count("☃") == 400
+
+    def test_a_sequence_cut_by_the_bound_cannot_reach_the_report(self) -> None:
+        # `read(n)` can stop mid-character, and `errors="replace"` turns that
+        # tail into U+FFFD. It is harmless only because the bound clears 400
+        # characters with room to spare, so the damaged tail is always past the
+        # slice. Pinned rather than assumed: a bound tightened to near 400 bytes
+        # would put the replacement character inside the report.
+        body = _CountingBody(unit="🚀".encode())
+        out = whisper._read_error_body(_http_error_with_body(body))
+        assert "�" not in out
+
+    def test_an_empty_body_is_still_reported_as_nothing(self) -> None:
+        # The bound is the only change. A server that says nothing still gets
+        # an empty string rather than a dangling em-dash on the diagnostic.
+        empty = _CountingBody()
+        empty._UNBOUNDED = 0
+
+        class _Empty(_CountingBody):
+            def read(self, size: int | None = None) -> bytes:
+                self.sizes.append(size)
+                return b""
+
+        assert whisper._read_error_body(_http_error_with_body(_Empty())) == ""
+
+    def test_a_stream_that_raises_is_still_survivable(self) -> None:
+        # The bound sits inside the same try. A body that raises on read gets
+        # an empty report, not an exception thrown from inside the handler for
+        # the exception being reported.
+        class _Angry(_CountingBody):
+            def read(self, size: int | None = None) -> bytes:
+                raise OSError("connection reset")
+
+        assert whisper._read_error_body(_http_error_with_body(_Angry())) == ""

@@ -582,6 +582,19 @@ RETRY_BASE_DELAY = 2.0
 # `Retry-After: 86400` is a real answer that real services give.
 MAX_RETRY_DELAY = 60.0
 
+# The most of an error body this program will pull into memory. `exc.read()`
+# with no argument accumulates the whole response first and slices afterwards,
+# so a server answering a failing request with a gigabyte-long body gets the
+# whole gigabyte in before 400 characters are taken off the front — a
+# MemoryError raised inside the handler for the error being reported.
+#
+# In BYTES, while the report is in CHARACTERS, and the gap between them is the
+# whole reason this is not 400. UTF-8 spends up to four bytes on one character,
+# so 400 characters need 1600 bytes in the worst case; 8 KB clears that with
+# room to spare, which is also what keeps the sequence `read()` may cut in half
+# safely past the slice rather than inside it.
+MAX_ERROR_BODY_BYTES = 8192
+
 
 def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> dict:
     fields = {
@@ -690,9 +703,19 @@ def _read_error_body(exc: urllib.error.HTTPError) -> str:
     body cut at 400 characters can lose the terminator for a bidi scope opened
     inside the first 400, and closing what the truncated text opens is exactly
     what `balance_bidi` is for.
+
+    The READ is bounded as well as the report, and they are separate bounds
+    doing separate jobs. `MAX_ERROR_BODY_BYTES` decides what is allocated;
+    `[:400]` decides what is printed. Slicing alone bounded only the second, so
+    the size of the allocation was the far end's choice.
+
+    NON-GOAL: `read(n)` asks for n bytes and is free to be given fewer, and this
+    does not re-read to fill the quota. The report wants a prefix, not a
+    complete body, and a short read on a failing connection is the ordinary
+    case rather than an error to recover from.
     """
     try:
-        body = exc.read()
+        body = exc.read(MAX_ERROR_BODY_BYTES)
     except Exception:
         return ""
     if not body:
