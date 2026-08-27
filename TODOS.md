@@ -144,7 +144,29 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `stderr_line`, which was already at roughly 1,250 insertions when this was found.
   Non-goals: this is not one of the surfaces the 0.3.0 CHANGELOG entry lists — it called
   three, of which ffmpeg's captured stderr has since been fixed and moved to
-  `## Completed`, leaving yt-dlp's inherited descriptor and `md_fence` open above. Those
+  `- **`forging_clip` is function-scoped, so the parametrized live vector runs ffmpeg twice.**
+  (performance gate, round 4, 2026-08-27) `tests/test_stderr_blocks_are_fenced.py:768-790`.
+  Commit `4737ca7` parametrized `test_a_container_title_reaches_the_diagnostic_attributed`
+  over both `-loglevel info` sites; `forging_clip` depends on the function-scoped
+  `tmp_path`, so pytest re-runs the fixture — and its real `ffmpeg` call — once per case.
+  MEASURED rather than assumed: 0.13s setup + 0.11s call for `[scene_candidates]`, 0.12s +
+  0.10s for `[keyframes]` = ~0.23s added, against a suite that was 915 passed in 54.42s at
+  the time. Under 0.5%. Deliberately not fixed: class-scoping the fixture means moving off
+  `tmp_path` to `tmp_path_factory`, which restructures the fixture's isolation guarantees
+  for a sub-quarter-second saving. NON-GOAL: this is not an argument that the second
+  parameter is incidental duplication — the two cases exercise two distinct call sites,
+  which is the entire point of the commit that added them.
+
+- **`stderr_block`'s `max_lines=0` / `max_width=0` boundary is untested.** (testing gate,
+  round 4, 2026-08-27) The suite exercises `max_lines=3`, `max_width=5`, and the exact
+  39/40/41 and 199/200/201 boundaries either side of the defaults, but never zero. No
+  caller passes zero today — both are keyword parameters with defaults, and all seven call
+  sites pass neither. Worth one test only if either is ever exposed to a caller that
+  COMPUTES its value, which is the condition that turns zero from unreachable into an
+  ordinary input. NON-GOAL: this is not a claim that zero currently misbehaves; nobody has
+  run it, which is the whole entry.
+
+## Completed`, leaving yt-dlp's inherited descriptor and `md_fence` open above. Those
   carry remote text today and these do not, and conflating them overstates what shipped.
   It
   covers sites that interpolate an *exception* and says nothing about a future site
