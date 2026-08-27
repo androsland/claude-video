@@ -378,6 +378,23 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   for the tests to drive `exclusive()` rather than inheriting the process-lifetime one.
   Documented as a NON-GOAL in `workdir.hold` in the meantime.
 
+- **Decide whether `untrusted.stderr_line` should strip ANSI, or say for good that it
+  does not.** (security review, 2026-08-27) Measured, not assumed: `stderr_line` rewrites
+  line breaks and balances bidi marks, and passes CSI and OSC sequences through byte for
+  byte — `\x1b[2K\x1b[1G` in a fenced value still erases the line it was printed on and
+  writes over it in any real terminal. That was harmless while every caller fenced the
+  stderr of a subprocess moviola had just launched; `workdir._describe_holder` is the
+  first to fence a value an attacker can plant BEFORE the run, in a file whose whole
+  premise is that this run does not own it. Damage is bounded to one line by the
+  `_MAX_STARTED` slice, which is why it is filed rather than fixed. The reason it is a
+  DECISION and not a task: the fix belongs in `untrusted`, and its four other callers
+  carry yt-dlp and ffmpeg output where colour is legitimate and stripping it would change
+  what disclosure looks like on an ordinary run. Either add a separate
+  `stderr_line(..., plain=True)` for pre-plantable sources, or write the passthrough into
+  `untrusted`'s own NON-GOALS as deliberate. Pinned meanwhile by
+  `test_the_ansi_non_goal_is_still_the_truth`, which fails the day the behaviour changes
+  so the prose cannot quietly become false.
+
 ## Bounded failures
 
 - **`stderr_line` imposes no length bound of its own, and every caller is responsible for

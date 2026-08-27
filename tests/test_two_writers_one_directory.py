@@ -58,6 +58,7 @@ import contextlib
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -88,8 +89,16 @@ FILENAME_LITERAL = re.compile(
 )
 
 
+# How long the child gets to say it holds the lock. Generous against a loaded
+# CI box and still far under the child's own 30s sleep, so a wedged run is
+# reported by this assertion rather than by whatever times out first.
+_CHILD_SPEAKS_WITHIN = 10.0
+
+
 @contextlib.contextmanager
-def _holding(body: str, work: Path) -> Iterator[subprocess.Popen]:
+def _holding(
+    body: str, work: Path, speaks_within: float = _CHILD_SPEAKS_WITHIN
+) -> Iterator[subprocess.Popen]:
     """A child process that takes the lock on `work`, says so, and then blocks.
 
     Both call sites need the same six things — a child on this repo's
@@ -118,6 +127,29 @@ def _holding(body: str, work: Path) -> Iterator[subprocess.Popen]:
     ) as child:
         try:
             assert child.stdout is not None
+            # BOUNDED, because the docstring above says so and until now it was
+            # the one claim here nothing kept. The crash case was never the
+            # hang: a child that dies before printing closes the pipe, and
+            # `readline()` returns '' at EOF — measured at 0.2s for a failed
+            # import. The unbounded case is a child that stays ALIVE and
+            # silent, which today cannot be reached through this module because
+            # the lock is `LOCK_NB` and `exclusive` never waits. It is one
+            # dropped `LOCK_NB` away, and that regression is exactly what these
+            # tests exist to catch — so without a bound the suite would hang on
+            # it rather than fail. Nothing above bounds it either: this repo has
+            # no pytest-timeout and no ini file.
+            #
+            # Residual, stated rather than papered over: `select` fires on the
+            # first BYTE, so a child that wrote a partial line and then hung
+            # would still block in `readline()`. No child here can do that —
+            # each writes its line in one `print` — and closing it properly
+            # needs a reader thread rather than a bound.
+            ready, _, _ = select.select([child.stdout], [], [], speaks_within)
+            assert ready, (
+                f"the child neither spoke nor exited within "
+                f"{speaks_within}s: `exclusive` is waiting where it "
+                f"should fail fast"
+            )
             assert child.stdout.readline().strip() == "held", (
                 "the child never reported holding the lock"
             )
@@ -191,15 +223,40 @@ class TestTheFrameSchemeIsOneConstant:
         # directory rather than by this program. Fifty foreign files turned one
         # warning into fifty names of somebody else's text, in the same stream
         # the report is read from — so the line names ten and counts the rest.
-        for i in range(50):
+        #
+        # Counted off `_MAX_LISTED` rather than written out. Hardcoding 10 and
+        # "and 40 more" made raising the cap — a legitimate change to a tuning
+        # constant — fail a test about flooding, which is how a constant stops
+        # being tunable.
+        flood = 5 * frames._MAX_LISTED
+        for i in range(flood):
             (tmp_path / f"frame_x{i:03d}.jpg").write_bytes(b"jpeg")
 
         assert frames.frames_in_order(tmp_path) == []
 
         err = capsys.readouterr().err
-        assert "50 file(s)" in err, "the total must survive the cap"
-        assert "and 40 more" in err, "the cap must say what it withheld"
-        assert err.count("frame_x") == 10
+        assert f"{flood} file(s)" in err, "the total must survive the cap"
+        assert f"and {flood - frames._MAX_LISTED} more" in err, (
+            "the cap must say what it withheld"
+        )
+        assert err.count("frame_x") == frames._MAX_LISTED
+
+    def test_exactly_the_cap_is_listed_with_nothing_withheld(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        # The boundary the 50-name test above cannot see. `_MAX_LISTED` gates
+        # the suffix with `>`, so exactly the cap is the value where an
+        # off-by-one goes either way: `>=` would append "and 0 more" to a line
+        # that withheld nothing, and `<` would drop the count from a line that
+        # did.
+        for i in range(frames._MAX_LISTED):
+            (tmp_path / f"frame_x{i:03d}.jpg").write_bytes(b"jpeg")
+
+        assert frames.frames_in_order(tmp_path) == []
+
+        err = capsys.readouterr().err
+        assert err.count("frame_x") == frames._MAX_LISTED, "all of them are named"
+        assert "more" not in err, "nothing was withheld, so nothing is counted"
 
     def test_two_widths_of_one_number_keep_a_stable_order(
         self, tmp_path: Path, capsys: pytest.CaptureFixture
@@ -593,6 +650,55 @@ class TestTheWorkDirectoryIsHeldExclusively:
         assert "transcript complete" not in workdir._describe_holder(lock)
 
 
+class TestTheHarnessItselfFailsRatherThanHangs:
+    """The bound in `_holding` is the one thing here with no other backstop.
+
+    Every other test in this file is checked by the suite failing when the code
+    regresses. This one checks the suite's own ability to fail: if `exclusive`
+    ever waits instead of refusing, the child never prints, and an unbounded
+    read turns a caught regression into a hung CI job with no output. There is
+    no pytest-timeout in this repo and no ini file configuring one, so this
+    assertion is the only thing standing there.
+
+    NON-GOALS:
+
+      * It does not test `workdir`. The child here never imports it — the point
+        is the harness, and involving the module under test would make a
+        harness bug look like a lock bug.
+      * It cannot bound a child that writes a PARTIAL line and then hangs;
+        `select` fires on the first byte. See the note in `_holding`.
+      * The timeout is wall-clock, so a machine paused for longer than
+        `_CHILD_SPEAKS_WITHIN` between the spawn and the select would report a
+        wedge that is not there. That is the trade every timeout makes, and 10s
+        is chosen to keep it theoretical.
+    """
+
+    def test_a_child_that_never_speaks_is_reported_not_waited_on(
+        self, tmp_path: Path
+    ) -> None:
+        import time as _time
+
+        started = _time.monotonic()
+        with pytest.raises(AssertionError) as failure:
+            # 0.5s, not the 10s default: this test DELIBERATELY trips the
+            # bound, and making the suite pay ten real seconds to watch a
+            # timeout work is how a backstop gets deleted for being slow.
+            with _holding("import time; time.sleep(30)\n", tmp_path,
+                          speaks_within=0.5):
+                pass  # pragma: no cover - the context manager never yields
+        elapsed = _time.monotonic() - started
+
+        assert "neither spoke nor exited" in str(failure.value)
+        assert elapsed < 5, f"it waited {elapsed:.1f}s for a child that never speaks"
+
+    def test_a_child_that_speaks_is_not_falsely_accused(self, tmp_path: Path) -> None:
+        # The must-not-fire half: the bound has to be invisible on every
+        # ordinary run, or it becomes a flaky test rather than a backstop.
+        with _holding('print("held", flush=True)\nimport time; time.sleep(30)\n',
+                      tmp_path) as child:
+            assert child.poll() is None
+
+
 class TestWhatHappensWithNoKernelLockAvailable:
     """The platform fallback: `fcntl` is POSIX, and moviola is not POSIX-only.
 
@@ -783,6 +889,46 @@ class TestTheLockFileIsNotSomebodyElsesFile:
             with pytest.raises(SystemExit):
                 with workdir.exclusive(tmp_path):
                     pass
+
+    def test_losing_the_race_every_time_refuses_instead_of_spinning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The test above fires the race ONCE, so `_acquire` always wins on its
+        # second pass and the loop's exit is never reached. That exit is not
+        # decoration: something replacing the lock file on every attempt is not
+        # the accidental second run this module is for, and the alternative to
+        # refusing is spinning forever against it.
+        opened: list[str] = []
+        real_open = os.open
+
+        # The race relents after a few attempts PAST the budget, so removing
+        # the loop's bound makes this test fail on the count below instead of
+        # spinning forever. A test whose failure mode is a hung CI job with no
+        # output is the same trap the bounded read in `_holding` exists for,
+        # and the branch under test here is the one that would cause it.
+        relent_after = workdir._ACQUIRE_ATTEMPTS + 3
+
+        def always_racing_open(path, flags, mode=0o777):
+            fd = real_open(path, flags, mode)
+            if str(path).endswith(workdir.LOCK_NAME):
+                opened.append(str(path))
+                if len(opened) <= relent_after:
+                    os.unlink(path)  # replaced again, every single time
+            return fd
+
+        monkeypatch.setattr(os, "open", always_racing_open)
+
+        with pytest.raises(SystemExit) as refusal:
+            with workdir.exclusive(tmp_path):
+                pass
+
+        message = str(refusal.value)
+        assert f"replaced {workdir._ACQUIRE_ATTEMPTS} times" in message
+        assert "Something other than a second moviola run" in message
+        assert len(opened) == workdir._ACQUIRE_ATTEMPTS, (
+            f"the loop ran {len(opened)} times, not {workdir._ACQUIRE_ATTEMPTS} — "
+            "it is no longer bounded by the retry budget"
+        )
 
     def test_a_lock_record_that_is_gone_still_describes_something(
         self, tmp_path: Path
