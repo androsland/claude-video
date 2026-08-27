@@ -872,14 +872,34 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   the user themselves named on the command line — it is that moviola cannot tell a
   scratch directory from a real one, and the wording does not distinguish them.
 
-- **An invalid `MOVIOLA_WHISPER` is described two different ways.** (forgeward privacy
-  review, 2026-08-26) `config.py:85-87` normalizes an unrecognised value to `auto`
-  silently; `hooks/scripts/check-setup.sh:158` prints that the backend "is pinned but
-  that backend is not usable here" for the same input. Both then resolve identically, so
-  this is message drift and not a consent-boundary bug — but it is the third surface
-  that re-derives the same precedence in its own words, which is the drift `## Quiet
-  failures` already warns about. A typo'd backend name should say "not a backend name"
-  in both places.
+- **`MOVIOLA_DETAIL` is compared case-sensitively while `MOVIOLA_WHISPER` is not, and
+  the two are validated four lines apart.** (fix/two-messages-that-disagree sweep,
+  2026-08-28) `get_config()` lowercases the whisper pin before testing it against
+  `WHISPER_BACKENDS`, so `MOVIOLA_WHISPER=LOCAL` is honoured; it tests `MOVIOLA_DETAIL`
+  verbatim against `DETAILS`, so `MOVIOLA_DETAIL=Balanced` is discarded and resolves to
+  `balanced`. As of the commit that closed the entry above, that discard is *announced*
+  rather than silent, which is all that commit changed — the asymmetry itself is pinned
+  as it stands, in `test_an_unrecognised_setting_is_reported.py`'s NON-GOALS, and not
+  fixed. Deferred deliberately: making the two agree means **accepting** a value that is
+  rejected today, which is a behaviour change rather than a message change and needs its
+  own RED test showing `MOVIOLA_DETAIL=Balanced` resolving to `balanced` with nothing
+  reported. **Non-goals:** it says nothing about `--detail`, which argparse validates
+  against the same tuple with `choices` and which was never case-insensitive on either
+  setting; and it is not a claim that lowercasing is the right answer for both — the
+  opposite fix, dropping the lowercase from the whisper pin, would also make them agree
+  and would break `MOVIOLA_WHISPER=LOCAL`, which works today.
+
+- **`setup.py` reads the same config and still says nothing about a setting it
+  discards.** (fix/two-messages-that-disagree sweep, 2026-08-28) `get_config()` now
+  returns `rejected`, and two surfaces report it: `moviola.py` prints one stderr line per
+  entry, and `hooks/scripts/check-setup.sh` names an unrecognised pin on Claude Code's
+  SessionStart. `setup.py` calls `get_config()` for the preflight and prints neither. So
+  a user on Codex, Cursor or claude.ai who runs the installer with `MOVIOLA_WHISPER=mlx`
+  gets a clean preflight and only learns the setting was ignored on their first real run.
+  The facts are already on the return value, so this is a call-site addition, not a
+  design question. **Non-goals:** it is not a claim the preflight should print
+  everything — `rejected` is the whole of what would be added, and the other settings
+  `get_config()` returns are deliberately unvalidated and must stay absent from it.
 
 - **The self-reference audit reads `<owner>/<word>` as a repo slug, and a branch name
   has that shape.** (release staging, 2026-08-26)
@@ -1480,6 +1500,40 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   next release that fails to publish an asset re-breaks them silently — the
   `test_the_docs_are_checked.py` audits read the repository, and a live URL is outside
   every one of them. Filed as its own OPEN entry rather than left as a sentence here.
+
+### The two surfaces that disagreed about a typo'd `MOVIOLA_WHISPER`
+
+(fix/two-messages-that-disagree sweep, 2026-08-28)
+
+- **Filed as message drift; it was that, plus a behavioural defect the entry did not
+  describe.** The drift half is closed as filed: `get_config()` no longer discards a
+  value in silence — it returns `rejected`, a tuple of `{name, value, allowed, fallback}`
+  facts for `MOVIOLA_WHISPER` and `MOVIOLA_DETAIL` — and `moviola.py` prints one
+  `stderr_line`-fenced line per entry. The formatting stays out of `config.py` on
+  purpose: it imports only `os` and `pathlib`, has no output channel, and three callers
+  read it. `check-setup.sh` now distinguishes "not a backend name" from "is pinned but
+  that backend is not usable here", which is the sentence the entry asked for.
+
+- **The behavioural half: the hook read the pin case-sensitively and `get_config()` does
+  not.** Reproduced before the fix, not reasoned about — with `MOVIOLA_WHISPER=LOCAL`, a
+  `GROQ_API_KEY` in the config file and no faster-whisper installed, the hook printed
+  `/moviola: ready — transcription via the groq API.` while a real run resolves the pin
+  to `local` and refuses to upload anything. That is the same class of lie
+  `TestPinIsHonoured` was written to close, reached by a different route, and it is not
+  message drift. The hook now lowercases the pin the way `config.py` does.
+
+- **The hook's four-name `case` list is cross-pinned to `config.WHISPER_BACKENDS`.** It
+  was a bash copy of a Python tuple and nothing compared them, so a fifth backend added
+  to the tuple would have resolved as unpinned on the one surface a user reads without
+  running anything. `test_every_recognised_backend_is_not_called_a_typo` is parameterised
+  over the live tuple and now fails in that case.
+
+- **Not established.** The `MOVIOLA_DETAIL` case asymmetry is announced, not fixed, and
+  `setup.py` still prints nothing — both re-filed as OPEN entries under `## Quiet
+  failures` rather than left as sentences here. The notice is placed ahead of the
+  `SETUP_COMPLETE` silent exit by the file's own precedent (the permissions warning
+  already prints there), so a fully-configured install still hears about a setting being
+  ignored.
 
 ### The report's last line was the one value nothing fenced
 

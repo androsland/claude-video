@@ -102,8 +102,34 @@ FILE_OPENAI="$(have_file_key OPENAI_API_KEY)"
 SETUP_COMPLETE="$(read_flag SETUP_COMPLETE)"
 WHISPER_PIN="$(read_flag MOVIOLA_WHISPER)"
 WHISPER_PIN="${WHISPER_PIN:-auto}"
+# config.get_config lowercases this before validating it, so MOVIOLA_WHISPER=LOCAL
+# is a real pin to every Python caller. Reading it case-sensitively here sent it
+# to the *) arm below — the UNPINNED resolution — so a machine with a config-file
+# groq key and no faster-whisper was told "ready via the groq API" while a real
+# run would refuse to upload. That is the same lie the pin fix above closed,
+# reached by a different route.
+WHISPER_PIN="$(printf '%s' "$WHISPER_PIN" | tr '[:upper:]' '[:lower:]')"
+
+# Whether the pin NAMES a backend at all, which is a different question from
+# whether that backend can run here, and used to share one message with it.
+# An unrecognised value is dropped by get_config and resolves as if unset, so
+# "install it, or set the matching API key" is advice about a backend that does
+# not exist. The four names are cross-pinned to config.WHISPER_BACKENDS by
+# tests/test_check_setup_hook.py, so adding one there and not here fails.
+WHISPER_KNOWN=""
+case "$WHISPER_PIN" in
+  auto|local|groq|openai) WHISPER_KNOWN="yes" ;;
+esac
+if [[ -z "$WHISPER_KNOWN" ]]; then
+  echo "/moviola: MOVIOLA_WHISPER=$WHISPER_PIN is not a backend name, so it is ignored and moviola resolves as if nothing were pinned. Recognised values: auto, local, groq, openai."
+fi
 
 # Fully configured → silent (Claude can surface status on demand via --check).
+# The notice above deliberately precedes this, the way the permissions warning at
+# the top of the file does: "fully configured" means there is no STATUS to report,
+# and a setting that is being ignored is news whatever the status is. It is also
+# the only surface that tells a user about their config file without them running
+# anything.
 if [[ "$SETUP_COMPLETE" == "true" && -n "$HAS_FFMPEG" && -n "$HAS_YTDLP" ]]; then
   exit 0
 fi
@@ -155,7 +181,7 @@ elif [[ "$BACKEND" == "local" ]]; then
   echo "/moviola: faster-whisper is installed — transcription runs on this machine, no API key needed."
 elif [[ -n "$BACKEND" ]]; then
   echo "/moviola: ready — transcription via the $BACKEND API."
-elif [[ "$WHISPER_PIN" != "auto" ]]; then
+elif [[ -n "$WHISPER_KNOWN" && "$WHISPER_PIN" != "auto" ]]; then
   echo "/moviola: MOVIOLA_WHISPER=$WHISPER_PIN is pinned but that backend is not usable here, so videos without captions get frames only. Either install it (\`pip install \"faster-whisper>=1.0\"\` for local, or set the matching API key in ~/.config/moviola/.env) or unset the pin."
 elif [[ -n "$HAS_GROQ" || -n "$HAS_OPENAI" ]]; then
   ambient="groq"; [[ -n "$HAS_OPENAI" && -z "$HAS_GROQ" ]] && ambient="openai"

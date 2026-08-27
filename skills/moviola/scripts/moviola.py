@@ -318,6 +318,18 @@ def main() -> int:
     args = build_parser().parse_args()
 
     config = get_config()
+    # A setting this program discarded used to resolve exactly like an unset one
+    # and say nothing, so `MOVIOLA_WHISPER=mlx` and no pin at all were
+    # indistinguishable from the outside. The value is the user's, not ours, so
+    # it goes through stderr_line like every other foreign value on this stream.
+    for discarded in config["rejected"]:
+        print(
+            f"[moviola] {discarded['name']}="
+            f"{stderr_line(str(discarded['value']))} is not one of "
+            f"{', '.join(discarded['allowed'])} — ignoring it and using "
+            f"{discarded['fallback']}.",
+            file=sys.stderr,
+        )
     detail = args.detail or str(config["detail"])
     whisper_choice = resolve_whisper_choice(args.whisper, str(config["whisper"]))
     whisper_options = {

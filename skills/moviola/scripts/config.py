@@ -78,17 +78,50 @@ def _truthy(value: str) -> bool | None:
 def get_config() -> dict[str, object]:
     file_values = read_env_file()
 
+    # What was discarded, as FACTS rather than a message. Both settings used to
+    # fall back in silence, so a typo'd value resolved exactly like an unset one
+    # and nothing anywhere said the difference. Formatting stays out of here on
+    # purpose: this module imports only `os` and `pathlib` and has no output
+    # channel, and giving it one would put a print inside a function the tests,
+    # setup.py and the entry point all call. Each entry carries the value the
+    # user actually wrote and the LIVE tuple it was checked against, so a caller
+    # never re-derives either — re-deriving the allowed set in a second place is
+    # the drift this exists to end, not a shape to repeat.
+    rejected: list[dict[str, object]] = []
+
     detail = _setting(file_values, "MOVIOLA_DETAIL", DEFAULT_DETAIL)
     if detail not in DETAILS:
+        rejected.append({
+            "name": "MOVIOLA_DETAIL",
+            "value": detail,
+            "allowed": DETAILS,
+            "fallback": DEFAULT_DETAIL,
+        })
         detail = DEFAULT_DETAIL
 
-    whisper = _setting(file_values, "MOVIOLA_WHISPER", DEFAULT_WHISPER).lower()
+    # Lowercased before validating, so MOVIOLA_WHISPER=LOCAL is a real pin.
+    # hooks/scripts/check-setup.sh does the same, and did not until 2026-08-28 —
+    # it read the pin case-sensitively, fell through to its unpinned arm, and
+    # could announce an API backend to someone who had pinned `local`.
+    raw_whisper = _setting(file_values, "MOVIOLA_WHISPER", DEFAULT_WHISPER)
+    whisper = raw_whisper.lower()
     if whisper not in WHISPER_BACKENDS:
+        rejected.append({
+            "name": "MOVIOLA_WHISPER",
+            # The value as the user wrote it, not the lowercased copy. They have
+            # to find this string in their own config file to fix it.
+            "value": raw_whisper,
+            "allowed": WHISPER_BACKENDS,
+            "fallback": DEFAULT_WHISPER,
+        })
         whisper = DEFAULT_WHISPER
 
     return {
         "detail": detail,
         "whisper": whisper,
+        # Empty whenever the configuration is valid, which is the state a caller
+        # loops over without a special case.
+        "rejected": tuple(rejected),
         # Empty means "let the local backend pick its own default" — validating
         # these here would mean hardcoding a model list that goes stale.
         "whisper_model": _setting(file_values, "MOVIOLA_WHISPER_MODEL"),

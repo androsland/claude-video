@@ -15,7 +15,14 @@ from pathlib import Path
 
 import pytest
 
+import config
+
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "scripts" / "check-setup.sh"
+
+# Inert filler, spelled the way test_consent_oracles.py spells it. Deliberately
+# not shaped like a provider key, so neither a secret scanner nor a human
+# skimming the diff has to stop and check.
+FILLER = "placeholder-value-not-a-credential"
 
 
 def _stub(path: Path, exit_code: int = 0) -> None:
@@ -193,3 +200,125 @@ class TestAmbientEnvironmentKeyIsNotConsent:
     def test_local_still_wins_over_an_ambient_key(self, tmp_path):
         out = _run(tmp_path, local_whisper=True, extra_env=self.AMBIENT)
         assert "on this machine" in out.stdout
+
+
+class TestAnUnrecognisedPinIsNotAnUnusableBackend:
+    """A string that is not a backend name must not be described as one.
+
+    The hook printed one message for two different inputs. `MOVIOLA_WHISPER=groq`
+    with no key is a real backend that cannot run here, and "is pinned but that
+    backend is not usable here — install it, or set the matching API key" is
+    exactly right for it. `MOVIOLA_WHISPER=mlx` is not a backend at all:
+    `get_config` drops it and resolves as if nothing were pinned, there is
+    nothing to install, and there is no matching key to set. The hook said the
+    same sentence to both, and it was the only thing either user was ever told,
+    because `get_config` discarded the value in silence.
+
+    The case arm is cross-pinned to `config.WHISPER_BACKENDS` below rather than
+    re-listed here. The hook already spells `local`, `groq` and `openai` in bash
+    and nothing compared that spelling to the Python tuple; a name added to the
+    tuple and not to the hook now fails here instead of resolving as unpinned on
+    the one surface a human actually reads.
+
+    NON-GOALS, so a green run is not read as more than it is:
+
+      * **It pins the MESSAGE, not the resolution.** An unrecognised pin
+        resolved as unpinned before this change and still does — which is
+        `get_config`'s behaviour and correct. Only the description changed.
+      * **It says nothing about the Python side of the same finding.**
+        `get_config` reporting what it discarded, and `moviola.py` printing it,
+        are pinned in `test_an_unrecognised_setting_is_reported.py`. The two
+        surfaces are fixed together and tested apart, which is what would catch
+        one of them regressing alone.
+      * **The legitimate configurations it must not fire on** are every name in
+        `WHISPER_BACKENDS`, including `auto` and including a differently-cased
+        spelling of a real one. Asserted below rather than left implicit.
+      * It cannot see a pin that is a real backend name the hook resolves
+        wrongly for some other reason; `TestPinIsHonoured` above owns that.
+    """
+
+    NOT_A_BACKEND = "not a backend name"
+    UNUSABLE = "is pinned but that backend is not usable"
+
+    def test_an_unrecognised_pin_says_it_is_not_a_backend_name(self, tmp_path):
+        out = _run(tmp_path, env_body="MOVIOLA_WHISPER=mlx\n", local_whisper=False)
+        assert self.NOT_A_BACKEND in out.stdout, (
+            f"a typo'd backend name was described as an unusable backend, or not "
+            f"at all.\nstdout:\n{out.stdout}"
+        )
+        assert self.UNUSABLE not in out.stdout, (
+            "the message for a real-but-unusable backend was used for a string "
+            f"that is not a backend.\nstdout:\n{out.stdout}"
+        )
+
+    def test_it_lists_what_the_recognised_values_are(self, tmp_path):
+        out = _run(tmp_path, env_body="MOVIOLA_WHISPER=mlx\n", local_whisper=False)
+        for name in config.WHISPER_BACKENDS:
+            assert name in out.stdout, (
+                f"the notice does not name {name}, so it tells the user their "
+                f"value is wrong without telling them what is right.\n{out.stdout}"
+            )
+
+    def test_the_notice_appears_even_when_a_backend_resolves(self, tmp_path):
+        """The setting is ignored whatever else happens, so it is still news."""
+        out = _run(tmp_path, env_body="MOVIOLA_WHISPER=mlx\n", local_whisper=True)
+        assert self.NOT_A_BACKEND in out.stdout
+        assert "on this machine" in out.stdout, (
+            "the status line was lost; the notice is an addition to it, not a "
+            f"replacement for it.\nstdout:\n{out.stdout}"
+        )
+
+    def test_the_notice_survives_a_completed_setup(self, tmp_path):
+        """`SETUP_COMPLETE=true` exits before the status line — and must not
+        take a broken setting down with it.
+
+        The permissions warning above already prints ahead of that exit, so
+        "warnings precede the silence" is the file's own existing shape rather
+        than a new rule. A SessionStart hook is the only surface that tells a
+        user about their config file without them running anything.
+        """
+        out = _run(
+            tmp_path,
+            env_body="SETUP_COMPLETE=true\nMOVIOLA_WHISPER=mlx\n",
+            local_whisper=False,
+        )
+        assert self.NOT_A_BACKEND in out.stdout, (
+            f"a fully-configured install was told nothing about a setting that "
+            f"is being ignored.\nstdout:\n{out.stdout}"
+        )
+        assert out.returncode == 0
+
+    @pytest.mark.parametrize("backend", config.WHISPER_BACKENDS)
+    def test_every_recognised_backend_is_not_called_a_typo(self, backend, tmp_path):
+        """Cross-pins the hook's bash `case` against the Python tuple."""
+        out = _run(
+            tmp_path, env_body=f"MOVIOLA_WHISPER={backend}\n", local_whisper=True
+        )
+        assert self.NOT_A_BACKEND not in out.stdout, (
+            f"{backend} is in config.WHISPER_BACKENDS and the hook does not "
+            f"recognise it, so it resolves as unpinned on the surface the user "
+            f"reads.\nstdout:\n{out.stdout}"
+        )
+
+    def test_a_differently_cased_pin_is_honoured_not_ignored(self, tmp_path):
+        """`get_config` lowercases the pin; the hook read it case-sensitively.
+
+        With `MOVIOLA_WHISPER=LOCAL` and a key in the config file, the hook fell
+        through to the unpinned arm and announced the API backend — the exact
+        lie `TestPinIsHonoured` exists to prevent, reached by a different route.
+        """
+        out = _run(
+            tmp_path,
+            env_body=f"MOVIOLA_WHISPER=LOCAL\nGROQ_API_KEY={FILLER}\n",
+            local_whisper=False,
+        )
+        assert self.NOT_A_BACKEND not in out.stdout, (
+            f"a real backend name in a different case was called a typo.\n{out.stdout}"
+        )
+        assert "groq API" not in out.stdout, (
+            "the hook announced the API backend to a user who pinned local, "
+            f"because it compared the pin case-sensitively.\nstdout:\n{out.stdout}"
+        )
+        assert self.UNUSABLE in out.stdout, (
+            f"the pin was honoured but its unusability was not reported.\n{out.stdout}"
+        )
