@@ -602,15 +602,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   changed, the failover has to announce the second provider before the first byte goes
   out, the same way `_announce_upload` does today.
 
-- **`finite_float` guards its input and not its `default`.** (review of the bounded-failures
-  review, 2026-08-26) Both exit paths return `default` unexamined, so
-  `finite_float(x, float("inf"))` returns inf out of a function named for finiteness. It is
-  latent rather than live — every call site in the tree passes `0.0`, and the two that pass
-  a computed value (`frames.py:305` nests one call as the other's default) pass a value the
-  same guard already vetted. Filed because the name is the promise a future caller will read,
-  and nothing enforces it. Non-goal: this is not the magnitude entry below; a checked
-  `default` still would not bound `1e300`.
-
 - **Finiteness is not magnitude, and past 1,000,000 seconds the run dies inside ffmpeg.**
   (review of the bounded-failures review, 2026-08-26) `finite_float` rejects nan and inf and
   has no ceiling below them, so a large duration passes intact — and `auto_fps` turns it into
@@ -1254,6 +1245,33 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   here.
 
 ## Completed
+
+### `finite_float` now answers for its own `default`
+
+(review of the bounded-failures review, 2026-08-26; fixed 2026-08-27) Both exit paths
+returned `default` unexamined, so `finite_float(x, float("inf"))` answered inf out of the
+guard that exists to reject inf. It now raises `ValueError` on entry when `default` is not
+finite, and the asymmetry with `value` is the point: `value` came from a stranger, so a bad
+one is ordinary and becomes the default; `default` is a literal a moviola author typed, so
+a non-finite one is this program's bug and is refused rather than repaired. Pinned by
+`TestTheGuardCoversItsOwnDefault` in `tests/test_metadata_is_untrusted.py`.
+
+**Checked on entry, not at the point of return, and the mutation harness is what settled
+that.** The lazy shape — test `default` inside the `except` arm, where it is about to be
+returned — reads as the cheaper fix and passes every test that drives bad data through the
+function. It fires only when `value` also happens to be unparseable, so a caller with an
+infinite default ships green and fails the first time a stranger sends something odd, with
+the defect surfacing far from the line that caused it. That mutation is in the KILL harness
+by name and `test_the_refusal_does_not_wait_for_bad_data` is the test that catches it.
+
+**Non-goals, so the guard is not read as wider than it is.** The refusal is finiteness and
+nothing else — a negative `default` and a `10**300` one both pass, because sign and
+magnitude are separate entries above with separate owners, and widening the check here
+would be a behaviour change wearing a fix's clothes. It does not make the function harder
+to misuse in any other way, and it is still latent: every call site in the tree passes
+`0.0`, so nothing here can trigger it today. The name is the promise a future caller reads,
+and this is what enforces it.
+
 
 ### ffmpeg's and ffprobe's captured stderr is now an attributed, bounded block
 

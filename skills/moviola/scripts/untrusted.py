@@ -170,10 +170,21 @@ def finite_float(value: object, default: float = 0.0) -> float:
         from a right one — ffprobe answering `3.0` for a thirty-second video
         passes straight through, here and everywhere downstream.
 
-      * The guard applies to `value` alone. `default` is returned unchecked
-        from both exit paths, so `finite_float(x, float("inf"))` returns inf
-        from a function called finite_float. Every call site passes 0.0 today,
-        which is why this is latent rather than live.
+      * `default` is REFUSED, not coerced, and the asymmetry is the point.
+        `value` came from a stranger, so a bad one is ordinary and becomes the
+        default; `default` is a literal a moviola author typed, so a non-finite
+        one is this program's bug and raises ValueError. It is checked on entry
+        rather than at the point of return, because a lazy check fires only
+        when `value` happens to be unparseable too — the caller's bug would
+        then ship green and surface later, far from the line that caused it.
+        Every call site passes 0.0 today, so nothing in the tree can trigger
+        it; the name is the promise a future caller reads, and this is what
+        enforces it.
+
+      * The refusal is finiteness alone. A negative default and a very large
+        one both pass — sign and magnitude are separate findings with separate
+        owners, and widening the guard to catch them here would be a behaviour
+        change wearing a fix's clothes.
 
       * Finiteness is not magnitude, and the consequence is a dead run rather
         than a silly one. There is no ceiling here and nothing downstream
@@ -185,6 +196,24 @@ def finite_float(value: object, default: float = 0.0) -> float:
       * Sign is not checked either. A negative duration passes, and
         `format_time(-1.0)` renders it as `-1:59:59`.
     """
+    try:
+        default_is_finite = math.isfinite(default)
+    except (TypeError, OverflowError):
+        # TypeError for a `default` that is not a number at all; OverflowError
+        # for a Python int too large for a double, which is the same
+        # not-representable-as-a-finite-float condition arriving by a different
+        # exception. Both answer False rather than escaping as themselves — a
+        # caller debugging this should read one message naming `default`, not a
+        # traceback naming the math module.
+        default_is_finite = False
+    if not default_is_finite:
+        raise ValueError(
+            f"finite_float() was given a non-finite default: {default!r}. "
+            "`value` is coerced because a stranger wrote it; `default` is this "
+            "program's own literal, so a non-finite one is a bug here and is "
+            "refused rather than repaired."
+        )
+
     try:
         number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError, OverflowError):

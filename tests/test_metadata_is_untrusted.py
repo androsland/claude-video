@@ -187,6 +187,58 @@ class TestTheGuardItself:
         assert untrusted.finite_float("N/A") == 0.0
 
 
+class TestTheGuardCoversItsOwnDefault:
+    """A function named for finiteness must not hand back a non-finite number.
+
+    `default` was returned unexamined from both exit paths, so
+    `finite_float(x, float("inf"))` answered inf out of the guard that exists to
+    reject inf. Latent rather than live — every call site in the tree passes
+    `0.0`, and the one that passes a computed value nests a `finite_float` call
+    the same guard already vetted — but the name is the promise the next caller
+    reads, and nothing enforced it.
+    """
+
+    @pytest.mark.parametrize(
+        "bad",
+        [float("inf"), float("-inf"), float("nan")],
+        ids=["inf", "neg-inf", "nan"],
+    )
+    def test_a_non_finite_default_is_refused(self, bad):
+        # ValueError, not a coerced 0.0. `value` is a stranger's string and gets
+        # coerced; `default` is a literal a moviola author typed, so a bad one
+        # is this program's bug and silently repairing it hides the bug at the
+        # only moment anyone could see it.
+        with pytest.raises(ValueError, match="default"):
+            untrusted.finite_float("N/A", bad)
+
+    def test_the_refusal_does_not_wait_for_bad_data(self):
+        # Checked on entry, not at the point of return. A lazy check only fires
+        # when `value` also happens to be unparseable, so a caller with an
+        # infinite default would ship green and fail the first time a stranger
+        # sent something odd — the defect surfacing far from the line that
+        # caused it, which is exactly the shape this module exists to stop.
+        with pytest.raises(ValueError, match="default"):
+            untrusted.finite_float("1.5", float("inf"))
+
+    @pytest.mark.parametrize(
+        "good", [0.0, 7.5, -4.0, 0, 10**300], ids=["zero", "float", "negative", "int", "large"]
+    )
+    def test_every_finite_default_still_passes(self, good):
+        # The refusal is finiteness and nothing else. Negative and very large
+        # defaults are legitimate and must not be caught by it: magnitude and
+        # sign are separate findings with separate owners, and a guard that
+        # quietly took them too would be a behaviour change wearing a fix's
+        # clothes.
+        assert untrusted.finite_float("N/A", good) == good
+
+    def test_a_default_that_is_not_a_number_at_all_is_refused(self):
+        # `math.isfinite(None)` raises TypeError, which would escape as a
+        # different exception naming the math module. The guard answers for its
+        # own parameter rather than letting stdlib do it in a worse voice.
+        with pytest.raises(ValueError, match="default"):
+            untrusted.finite_float("N/A", "0.0")
+
+
 class TestFfprobeMetadata:
     """A non-numeric field degrades to unknown instead of killing the run."""
 
