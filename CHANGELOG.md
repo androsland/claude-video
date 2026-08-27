@@ -2,7 +2,7 @@
 
 All notable changes to `/moviola` are documented here.
 
-## [0.3.0] — 2026-08-26
+## [0.3.0] — 2026-08-27
 
 ### Added
 - **On-device Whisper backend** — `pip install "faster-whisper>=1.0"` and transcription runs locally, with no API key and no audio leaving the machine. Uses CUDA when it is usable and falls back to CPU automatically; the fallback wraps the full transcription, not just model load, because CTranslate2 resolves its CUDA libraries lazily and a broken install only surfaces at the first matmul. pip-installed CUDA wheels (`nvidia-cublas-cu12`, `nvidia-cudnn-cu12`) land outside the dynamic loader path, so their `.so` files are preloaded before the model is built.
@@ -11,6 +11,8 @@ All notable changes to `/moviola` are documented here.
 - `tests/test_local_whisper.py` — 84 tests covering availability detection, runtime resolution, CUDA preloading, VAD-vs-device error classification, backend precedence, dispatch, focused-range extraction, the `{start, end, text}` segment contract, progress reporting, and the cuda-to-cpu retry loop. The retry is tested in both shapes it has to survive: a failure at model load, and a failure part-way through the segment generator — the stub yields a segment and only then raises, which is what CTranslate2's lazy CUDA resolution actually does. The suite passes both with and without faster-whisper installed.
 - `tests/test_every_backend_has_an_implementation.py` — every name `--whisper` offers must now reach code that can transcribe: a dispatch branch, a key lookup, a host entry, and an endpoint on that host. `auto` is asserted to have *no* implementation, because it is a sentinel meaning "no pin" and a branch for it would be the defect. The dispatch branches are read out of the AST rather than restated, so the check compares the offered set against the implemented one instead of comparing one literal to itself. It could not be written failing-first — all four names work today — and its docstring says so; its evidence is that six mutations, including a `deepgram` in the table and nowhere else and an `openai` branch copy-pasted from Groq's, each fail it.
 - Tested against faster-whisper 1.2.1, CTranslate2 4.8.0, onnxruntime 1.23.2, huggingface-hub 1.19.0. The install command pins a floor (`>=1.0`) rather than that exact set — the floor guards against resolving a pre-1.0 release with an incompatible API, and is not a claim that every version above it was exercised.
+- **CI runs the whole suite on two interpreters against a hash-pinned toolchain.** `requirements-ci.txt` pins the test toolchain by hash — it is not a package manifest, since moviola has no runtime dependencies and shells out to `yt-dlp` and `ffmpeg` as binaries. The matrix runs 3.10 and 3.13; the floor is the toolchain rather than the scripts, which parse under 3.7, because pytest and yt-dlp both declare `Requires-Python >= 3.10`. Upstream movement is reported separately by `.github/workflows/drift.yml`, which installs the same packages *unpinned* on a weekly schedule, so a dependency moving shows up as a scheduled red run instead of landing silently inside a pull request.
+- **A working directory is held exclusively for the life of a run.** `scripts/workdir.py` takes an `flock` over `.moviola.lock` before anything is written. Two runs sharing one `--out-dir` used to overwrite each other's `video.*` and `frame_*.jpg` with no collision anyone could see, and the `(mtime, size)` stale-file guard read the other run's fresh files as this run's — so a report could be assembled from two films and say so nowhere. The second run is now refused rather than reported on. Advisory and POSIX-only; the module's NON-GOALS say what that does not cover.
 
 ### Changed
 - **`--start` / `--end` now clip the audio before transcription.** `extract_audio` seeks on the input side (`-ss`/`-to` before `-i`) and segment timestamps are shifted back into source time, so a focused run transcribes ~30 seconds of audio instead of the whole video.
@@ -89,6 +91,11 @@ All notable changes to `/moviola` are documented here.
   source string are fenced against every line break `str.splitlines` recognises — not just
   `\n` and `\r` — with a backtick run that cannot occur inside the value, a non-empty
   body, and every bidi override it opens closed before the span ends.
+- **A symlinked entry point no longer trusts its own directory.** `moviola.py` computed `SCRIPT_DIR` as `Path(__file__).parent.resolve()` while its five peers used `Path(__file__).resolve().parent`, and it is the one site that then inserts that directory at the head of `sys.path` unguarded. The two spellings differ only when the script is reached through a symlink — which is how the skill is ordinarily installed, and how anything on `PATH` reaches it. The imports never broke, because CPython already resolves symlinks when it sets `sys.path[0]`; what the wrong spelling did was prepend a *second*, wrong directory ahead of the correct one, so a `config.py` dropped next to the symlink won over the package's own. That is arbitrary code execution against an ordinary install, and it was reproduced before it was fixed. The `sys.path.insert` itself is deliberately kept: under `-P` / `PYTHONSAFEPATH=1` CPython computes no script directory at all, and without it `python3.13 -P moviola.py --help` dies with `ModuleNotFoundError`.
+- **An explicit `--out-dir` is created 0700, like the temporary directory it replaces.** The default path uses `tempfile.mkdtemp`, which asks for 0700; an explicit `--out-dir` used a plain `mkdir` and got 0755 at an ordinary umask. That directory holds the downloaded video, every extracted frame and the transcript for the whole run, so the flag silently widened the audience for all of it while reading like a choice of location. A directory the user created themselves keeps its own mode — `exist_ok=True` ignores `mode`, and that is asserted as a passing case rather than left to chance. Only the leaf is covered: `parents=True` still creates intermediate directories with the default mode, and the files written inside still take the ambient umask.
+- **Captured subprocess stderr is attributed rather than interpolated.** ffmpeg's and ffprobe's captured output is legitimately multi-line, so the line fence added above was the wrong shape for it: `untrusted.stderr_block()` keeps the block's structure and prefixes every line of it, which is what stops a captured error body from presenting itself as a line moviola wrote. The two shapes are not interchangeable and the module says so.
+- **Reads are bounded and foreign documents are parsed as foreign.** An error body is now read to a bound rather than merely reported to one, and the response the bounded read leaves open is released. `Retry-After` is honoured in its HTTP-date form as well as its seconds form. `finite_float` refuses a non-finite default instead of returning it, and ffprobe's stdout is checked to *be* a document before any field is read out of it — `json_object` and `finite_float` being the same question one level apart: whether there is a document at all, and whether a value inside somebody else's document is a number.
+- **The file a tag executes is verifiable.** `release.yml` holds `contents: write`, so every action it runs is pinned to a commit SHA rather than to a tag that can be re-pointed at any commit at any time, and the permission is granted *before* the first step that runs anything — which makes step ordering load-bearing and is asserted as such. The tag trigger is deliberately wider than the tags this repository publishes, because a bare-numeric `0.1.0` on origin produced no workflow run at all under a `v*`-only filter and somebody published that release by hand. It closes one mis-spelling shape and not others: `V0.3.0`, `release-0.3.0` and `moviola-v0.3.0` still trigger nothing.
 - **No audio leaves the machine without stderr having said so first.** The upload notice
   was proven correct and never proven to be printed; both call sites could be deleted with
   every test still passing.
@@ -179,13 +186,37 @@ All notable changes to `/moviola` are documented here.
   them across runs.
 - **A malformed API response could cost the whole report.** A missing or non-list
   `segments` key raised instead of being reported as a transcription failure.
+- **Four quiet failures printed a plausible number instead of the truth.** A partial
+  transcript now says it is partial; a frame no longer wears another frame's timestamp;
+  the uniform fallback stopped disowning its own timestamps; and `transcribe_video`'s two
+  other descriptions caught up with what it actually returns. The shared shape is a run
+  that completed, produced a number, and gave the agent no way to tell that the number
+  was not the one it asked for.
+- **The frame filename scheme has one owner.** It had been re-derived at each site, which
+  is the drift that let the timestamp defects above exist at all.
+- **The published bundle refuses an incomplete tree.** `build-skill.sh` reads `HEAD`, and
+  neither `git diff` nor `git diff --cached` reports a file git has never seen — so a new
+  runtime module written but not `git add`ed produced a bundle missing it, under a success
+  message quoting a file count and a size. The guard now refuses, and it speaks before the
+  SKILL.md count check, whose `found 0` would otherwise send a developer looking for a
+  duplicate that does not exist.
+- **The repo-root `.skillignore` no longer ships inside the `/plugin install` archive.**
+  It is `export-ignore`d rather than deleted, because `npx skills add` copies the
+  directory wholesale, never runs `git archive`, and still needs the file — and because a
+  scanner pointed at a checkout of this repo reads it from disk, which no archive
+  attribute can reach. Six of its 23 entries name paths that DO ship — `.claude-plugin/`
+  and `hooks/`, both deliberately kept, plus README, CHANGELOG, AGENTS and CLAUDE —
+  enumerated against `git archive HEAD` rather than inferred. So the shipped file told an
+  install-time scanner to skip `hooks/scripts/check-setup.sh`, an executable that runs on
+  SessionStart, and both plugin manifests. It was not the inert list the first note
+  claimed.
 
 ## [0.2.0] — 2026-06-29
 
 ### Added
 - **`--detail` dial** with four modes — `transcript` (captions only, no frames), `efficient` (fast keyframe pass, cap 50), `balanced` (scene-aware, cap 100, default), and `token-burner` (scene-aware, uncapped). Set the default with `MOVIOLA_DETAIL` in `~/.config/moviola/.env`.
 - **Frame deduplication** (default on; `--no-dedup` to disable). Before the budget cap, a pass downscales each frame to a 16×16 grayscale thumbnail and drops frames whose mean per-pixel difference from the last *kept* frame is within threshold — so the budget goes to distinct content instead of held slides and static recordings. The **Frames** report line shows how many near-duplicates were dropped.
-- **Whisper auto-chunking.** Audio over the 25 MB upload cap is split into evenly sized chunks, transcribed per chunk, with segment timestamps shifted back into source time. Partial failures are tolerated — transcription only fails if *every* chunk fails, so length alone no longer breaks it.
+- **Whisper auto-chunking.** Audio over 24 MB is split into evenly sized chunks, transcribed per chunk, with segment timestamps shifted back into source time. Partial failures are tolerated — transcription only fails if *every* chunk fails, so length alone no longer breaks it. Groq and OpenAI both cap uploads at 25 MB; moviola splits at 24 so multipart framing overhead cannot push a chunk over, and the runtime notice names 24 too. (This entry said 25 from the day it was written; `MAX_UPLOAD_BYTES` has been `24 * 1024 * 1024` since the commit that introduced chunking, which shipped in this release.)
 - **`--timestamps T1,T2,…`** — grab a frame at each absolute timestamp; reserved against the cap, and the only frames produced under `--detail transcript`.
 - **`--no-whisper`** — disable transcription entirely (frames only).
 - pytest suite covering config, dedup, download, fixtures, frames, setup, timestamps, moviola, and whisper (no network; ffmpeg-synthesized clips).
