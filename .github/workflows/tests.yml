@@ -62,11 +62,20 @@ jobs:
         # `Requires-Python: >=3.10`, so below it the suite's own dependencies
         # will not install. AGENTS.md and README.md declare 3.10+ to match.
         #
-        # Both rungs were run locally before this landed rather than published
-        # as a guess: 1021 passed on 3.10.12 and 1021 on CPython 3.13.13, each
-        # against exactly the hash-pinned set below, and the 3.13 install was
-        # checked to resolve six packages — `exceptiongroup`, `tomli` and
-        # `typing-extensions` correctly excluded by their markers.
+        # The current number is a CI measurement, not a local one, and the
+        # distinction is the point: run 33109063305 reported 1041 passed on
+        # CPython 3.10.21 and 1041 on CPython 3.13.15, each against exactly the
+        # hash-pinned set below, with ffmpeg 6.1.1-3ubuntu5 on both rungs. Those
+        # are the interpreters the RUNNER resolved for `3.10` and `3.13`, which
+        # is what this file is about; the pre-land local run that introduced this
+        # sentence measured 1021 on 3.10.12 and 1021 on 3.13.13 and additionally
+        # checked that the 3.13 install resolved six packages — `exceptiongroup`,
+        # `tomli` and `typing-extensions` correctly excluded by their markers.
+        # CI does repeat that: the same run's 3.13 rung logged `Successfully
+        # installed` with those six, and the 3.10 rung with those three added,
+        # which is the marker exclusion. What is missing is not the measurement
+        # but an ASSERTION — nothing reads an install log, so the exclusion holds
+        # only for as long as somebody looks.
         #
         # That count is a SNAPSHOT of this branch, not an invariant, and it went
         # stale TWICE inside the branch that introduced it. First at 993: the
@@ -77,11 +86,13 @@ jobs:
         # drifting into falsehood later.
         #
         # Twice is not bad luck, it is an ORDERING defect: measure, then edit,
-        # then commit. So the number is now taken AFTER the last edit and
-        # immediately before the commit, which is the only order in which
-        # "run locally before this landed" is a true sentence. If `pytest -q`
-        # prints a different number today, the likely reason is that somebody
-        # added tests, not that a rung broke.
+        # then commit — the only order in which "run locally before this landed"
+        # is a true sentence. A CI number has the opposite property and its own
+        # staleness: it is measured AFTER a commit, so it is one commit behind
+        # the moment anything else lands. That is why it names its run — a
+        # reader can tell which commit it describes instead of guessing. If
+        # `pytest -q` prints a different number today, the likely reason is that
+        # somebody added tests, not that a rung broke.
         #
         # Nothing asserts this number and nothing should. A test pinning the
         # suite's own size fails on every commit that adds a test, which teaches

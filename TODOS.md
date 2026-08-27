@@ -6,7 +6,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 - **A manifest now exists, and it does not contain the dependency worth scanning.** `faster-whisper` is introduced only as a string in `setup.py`'s output and a lazy `import`; the runtime is otherwise pure stdlib and has no manifest, which is correct. The dependency chain to check by hand is `faster-whisper` -> `ctranslate2`, `onnxruntime`, `huggingface-hub`, `tokenizers`, `av`. Do not read a clean scan of this repo as a clean bill for that chain. **Amended 2026-08-27 (fix/ci-dependency-posture):** this entry used to rest on "there is no `requirements.txt`, `pyproject.toml` or lockfile in the repo", and `requirements-ci.txt` is now tracked, so that premise is gone. The finding survives its own reason and gets sharper: `trivy fs` and `osv-scanner` now DO find an artifact, they scan the two-package CI toolchain, and they report clean — which is a correct result about pytest and yt-dlp and says nothing at all about the six-package chain above. A clean scan of this repository was previously clean because nothing was read; it is now clean because the wrong thing was read, and the second is easier to mistake for coverage. (supply-chain review, 2026-08-26; premise corrected 2026-08-27)
 
-- **No test loads a real Whisper model.** `tests/test_local_whisper.py` now drives `_collect()`, `_run()`'s VAD fallback and `transcribe_local()`'s cuda-to-cpu retry against stub objects shaped like faster-whisper's `Segment`/`TranscriptionInfo`, so the segment contract and the fallback loop are covered; seven mutations were each confirmed to fail the suite (segment rounding, the dropped CPU retry, kept-empty-text, the progress catch-up loop, the language-pin guard, the progress line's own format, and moving the drain outside the retry's `try` — that last one fails only the fail-mid-drain test, which is what proves the two fallback tests exercise different paths). What remains uncovered is the real library boundary: if faster-whisper renames an attribute or changes `WhisperModel(...)`/`transcribe(...)`'s signature, the stubs keep matching the old shape and the suite stays green. Closing that needs a real model load, which means a multi-hundred-MB download in a suite that is otherwise network-free. Verified by hand instead: `large-v3` int8_float16 on a GTX 1650 Ti transcribed a 38.6 s clip in 22 s including model load. If a CI runner ever gets a model cache, add a `tiny`-model smoke test behind an opt-in marker. **Corrected 2026-08-26:** this entry originally said "CI stays green" and "If CI ever gets a model cache" as though a CI ran the suite. None did — `release.yml` on tag push was the whole of `.github/workflows/`, and it had never executed once in this repository (no workflow run of any kind existed), so the only thing that had ever run these tests was somebody's terminal. **Superseded 2026-08-26 by `ci/run-the-suite`:** `.github/workflows/tests.yml` now runs the suite on every pull request and on pushes to `main`. Two things that does NOT mean — it has still never *run* (no workflow run exists in this repository yet, and one will not until this merges), and the runner has no model cache, so the `tiny`-model smoke test below is still unbuilt and still opt-in when it is. The wording is fixed above and the gap is its own entry under `## Documentation as a checked claim`. (ai-output review, 2026-08-26)
+- **No test loads a real Whisper model.** `tests/test_local_whisper.py` now drives `_collect()`, `_run()`'s VAD fallback and `transcribe_local()`'s cuda-to-cpu retry against stub objects shaped like faster-whisper's `Segment`/`TranscriptionInfo`, so the segment contract and the fallback loop are covered; seven mutations were each confirmed to fail the suite (segment rounding, the dropped CPU retry, kept-empty-text, the progress catch-up loop, the language-pin guard, the progress line's own format, and moving the drain outside the retry's `try` — that last one fails only the fail-mid-drain test, which is what proves the two fallback tests exercise different paths). What remains uncovered is the real library boundary: if faster-whisper renames an attribute or changes `WhisperModel(...)`/`transcribe(...)`'s signature, the stubs keep matching the old shape and the suite stays green. Closing that needs a real model load, which means a multi-hundred-MB download in a suite that is otherwise network-free. Verified by hand instead: `large-v3` int8_float16 on a GTX 1650 Ti transcribed a 38.6 s clip in 22 s including model load. If a CI runner ever gets a model cache, add a `tiny`-model smoke test behind an opt-in marker. **Corrected 2026-08-26:** this entry originally said "CI stays green" and "If CI ever gets a model cache" as though a CI ran the suite. None did — `release.yml` on tag push was the whole of `.github/workflows/`, and it had never executed once in this repository (no workflow run of any kind existed), so the only thing that had ever run these tests was somebody's terminal. **Superseded 2026-08-26 by `ci/run-the-suite`:** `.github/workflows/tests.yml` now runs the suite on every pull request and on pushes to `main`. Two things that does NOT mean — **[corrected 2026-08-27:** this said "it has still never *run*", which stopped being true when the branch merged; `tests.yml` has run 17 times since 2026-08-26 and the suite is green on both rungs, so the sentence is now only a record of when it was written**]** — and, the part that still stands, the runner has no model cache, so the `tiny`-model smoke test below is still unbuilt and still opt-in when it is. The wording is fixed above and the gap is its own entry under `## Documentation as a checked claim`. (ai-output review, 2026-08-26)
 
 - **`MOVIOLA_WHISPER_MODEL` accepts an arbitrary Hugging Face repo id or path with no validation beyond what `huggingface_hub` does.** That is deliberate — it is how anyone uses a fine-tune or a local conversion — but it means a typo'd or hostile repo id is fetched and loaded on the user's behalf. Documented as a non-goal in SKILL.md's security section rather than fixed. (local-whisper branch, 2026-08-26)
 
@@ -776,6 +776,43 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Documentation as a checked claim
 
+- **The marker-gating of the three 3.10-only packages is checkable and is checked by
+  nobody.** (docs/release-notes-and-stale-claims, 2026-08-27, testing review)
+  `requirements-ci.txt` gates `exceptiongroup`, `tomli` and `typing-extensions` behind
+  `python_version < "3.11"`, so the 3.13 rung installs six packages and the 3.10 rung
+  nine. CI performs that resolution on every run and prints it, and no test reads an
+  install log — so the invariant holds only while a human looks at one, which is the
+  shape that goes stale unnoticed. It does not need a log reader to close: the markers
+  are parseable from `requirements-ci.txt` directly, and the matrix interpreters are
+  already read out of the YAML by `test_ci_runs_the_whole_suite.py`, so a test can assert
+  that every marker-gated requirement is gated for exactly the interpreters below its
+  floor. **Not** a claim that a passing such test proves the install succeeded — that is
+  the log's to say and this would still not read one; it would pin the intent, not the
+  outcome. The workflow comment and the Completed entry that describe this gap say it
+  "is nowhere asserted", which stays true until this is done.
+
+- **`MOVIOLA_WHISPER_CPU_THREADS` is read by the code and named in no shipped document.**
+  (docs/release-notes-and-stale-claims, 2026-08-27) `local_whisper.py:159` reads it and
+  `:165` raises a named error on a bad value, but `git grep` over `*.md` and `*.sh` finds
+  it in no settings surface — not in README.md, not in SKILL.md, and not in the `.env`
+  scaffold `setup.py` writes. (An earlier draft of this bullet said the grep found it
+  "only inside a non-goal in this file", which the next clause contradicts and which is
+  false at HEAD: `CHANGELOG.md:10` and `:23` name it, both added by this branch.) Being process-env-only is deliberate (it is a
+  benchmarking knob, not a setting), and the 0.3.0 changelog now says so; that is the
+  minimum, not the fix. Decide whether it belongs in SKILL.md's settings table or should
+  stay undocumented on purpose, and say which in the code.
+
+- **The README's two `/releases/latest` links 404, and close by tagging rather than
+  editing.** (docs/release-notes-and-stale-claims, 2026-08-27) `README.md:110` and `:142`
+  both point at `https://github.com/androsland/moviola/releases/latest`. `gh release list`
+  is empty and `git ls-remote --tags` stops at `v0.2.0`, so both 404 today. `release.yml`
+  triggers on `v*` and `[0-9]*`, so pushing `v0.3.0` publishes the first release and both
+  URLs resolve **with no diff** — which is why this is filed rather than fixed: "the link
+  is broken" and "the link needs changing" are different findings and only the first is
+  true. It stays OPEN until a tag exists. It was briefly written into `## Completed` on
+  this branch, which was wrong: a section named Completed is not a place to record a
+  condition that is still live, however imminent its resolution.
+
 - **The README-to-parser direction is not checked, and cannot be.** (docs-are-checked
   review, 2026-08-26) `test_the_docs_are_checked.py` proves every long flag
   `build_parser()` defines appears in README. The reverse would false-fire, because
@@ -816,13 +853,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   the local sentence was rewritten and these were left. Revisit only if a preflight
   request is ever added; until then the honest fix would be a wording change with no
   new evidence behind it.
-
-- **The released 0.2.0 changelog entry says 25 MB where the code says 24.** (docs-are-
-  checked review, 2026-08-26) The providers' documented cap is 25 MB and moviola splits
-  at 24 deliberately. `test_consistency.py` records that *distinction* in a comment above
-  `OUR_CAP`, but it does not cover this line: it reads `whisper.py` and `SKILL.md` and
-  never opens `CHANGELOG.md`, so nothing in the suite sees `CHANGELOG.md:84`. Rewriting a
-  released changelog entry is the wrong fix; the entry describes what shipped that day.
 
 - **The work directory is printed with bare backticks while SKILL.md tells the agent to
   `rm -rf` it.** (docs-are-checked review, 2026-08-26) `skills/moviola/SKILL.md:193`
@@ -878,9 +908,12 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   and `.skillignore` to every claude.ai user, because `export-ignore` matches relative
   to the *archive root* and the patterns were written at the repo root.
   The PUBLISH half is **not** verified and must not be written as if it were:
-  `release.yml` has never executed once in this repository. `gh run list` returns no run
-  of any workflow, ever — the five `v*` tags on origin arrived *with the fork* rather
-  than through a push, so no `push: tags` event has ever fired here. Cutting `v0.3.0`
+  `release.yml` has never executed once in this repository. `gh run list --workflow=release.yml`
+  returns nothing — the five `v*` tags on origin arrived *with the fork* rather
+  than through a push, so no `push: tags` event has ever fired here. (**Narrowed
+  2026-08-27:** this read "no run of any workflow, ever", which was true when written and
+  is not now — `tests.yml` has 17 runs. The release half is unaffected and is the claim
+  this entry needs.) Cutting `v0.3.0`
   is that workflow's first ever run. **Updated 2026-08-26:** it will no longer run
   with the six defects formerly filed under "Release workflow" — those are fixed and
   pinned by `tests/test_the_release_is_reproducible.py`. That section was deleted and
@@ -963,16 +996,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   24 tests call directly", which is both likelier and harder to read as a real
   regression when it happens.
 
-- **CI's ffmpeg is a major version this suite has never run against.** (testing
-  review of ci/run-the-suite, 2026-08-26) Every measurement in this repository
-  was taken on ffmpeg 4.4.2 (Ubuntu 22.04). `ubuntu-latest` has not been 22.04
-  since 2025, so the runner installs a different major, and six tests in
-  `test_frames.py` depend on x264 GOP placement and scene-detection thresholds —
-  behaviour that is tuned, not specified. This is a risk and not a predicted
-  failure: the workflow has never executed, so nobody knows either way. The
-  cheap answer if it bites is pinning `runs-on` to a specific image rather than
-  loosening the assertions; the assertions are the product.
-
 - **`test_ci_runs_the_whole_suite.py` reads the workflow as text, not as YAML.**
   (ci/run-the-suite, 2026-08-26; narrowed by review 2026-08-26) Two of the
   permissive cases are now closed — a name in a `#` comment and a name in a
@@ -1016,14 +1039,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   remaining blind spot, deliberately unfixed: a module-level
   `pytestmark = pytest.mark.skipif(find_spec("x") is None)`, which skips a whole
   file and looks nothing like an import guard.
-
-- **`AGENTS.md` documents a `.venv` that no longer exists in this checkout.**
-  (release staging, 2026-08-26) Its Commands block gives
-  `.venv/bin/pytest -q                # or: python3 -m pytest -q`, and there is no
-  `.venv/` here — the first form fails outright and only the fallback works. Left as a
-  finding rather than fixed in the same breath because the honest repair is a decision
-  about whether this project wants a checked-in venv convention at all, and that is
-  wider than a docs edit. `python3 -m pytest -q` collects 564 as of this commit.
 
 - **The file set the repo-wide audits read is a subset under a sparse checkout, and
   nothing says so.** (release staging, 2026-08-26) `tracked_text_files` asks
@@ -1439,6 +1454,105 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Completed
 
+### The released 0.2.0 changelog entry that said 25 MB
+
+(docs/release-notes-and-stale-claims, 2026-08-27) Closed by **reversing** the decision the
+entry itself recorded, which is why it gets its own note rather than a one-line strike.
+
+- **The entry said 25 MB where `MAX_UPLOAD_BYTES` is `24 * 1024 * 1024`.** Filed
+  2026-08-26 with the ruling *"rewriting a released changelog entry is the wrong fix; the
+  entry describes what shipped that day."* That ruling rests on a premise that turns out
+  to be false: `304b639`, which introduced chunking, already set the constant to 24, and
+  `git merge-base --is-ancestor 304b639 v0.2.0` confirms it shipped inside 0.2.0 —
+  `v0.2.0:skills/watch/scripts/whisper.py` reads 24. **The entry never described what
+  shipped.** It was wrong on the day it was written rather than drifted into wrongness
+  later, so the objection to rewriting it does not apply, and the line is now corrected
+  with a parenthetical recording that it was wrong from the start.
+
+- **The distinction the entry was protecting is preserved, not lost.** 25 MB is the
+  providers' documented cap and 24 is moviola's deliberate margin, so the corrected text
+  states both. What changed is which number is presented as moviola's behaviour.
+
+- **What this does NOT establish.** It is not a general licence to rewrite shipped
+  release notes. The suite stayed green on both sides of this edit — nothing in it
+  noticed; a human reviewer did. The reason is worth stating at the right scope, because
+  an earlier draft of this bullet got it wrong: it is *not* that
+  `test_the_docs_are_checked.py` reads the newest heading only. That is true of
+  `TestTheChangelogDescribesTheVersionBeingShipped`, which pins the manifests to the
+  topmost `## [x.y.z]`; two other classes in the same file read the CHANGELOG **whole** —
+  `TestTheChangelogsTestCountsAreReal` scans every heading for `` `tests/x.py` — N tests ``
+  and collects each one, and the heading-backtick check walks every heading in every doc.
+  Both cover the whole file and neither can see a prose number like 25 MB, so the edit was
+  invisible for want of a pattern that matches it, not for being under an older heading.
+  The rule that survives is narrower than the edit: correct an entry that was false when
+  written, leave one that has merely been overtaken.
+
+### CI's ffmpeg major version, and the pass counts that named it
+
+(docs/release-notes-and-stale-claims, 2026-08-27) Two entries close on the same
+evidence: run **33109063305** (headSha `cbf6696`), the last run on PR #26's branch
+before it merged — `cbf6696` is the second parent of `3dab2cb`, which is this branch's
+BASE, so it measured the work immediately preceding this branch and not this branch
+itself. Nothing has measured this branch: it has not been pushed. Two further findings
+are recorded below without closing anything.
+
+**Corrected during review of this branch:** this intro said "the first CI run the
+workflow ever made", which was false when written. `tests.yml` has **17** runs and
+33109063305 is the 16th; the first is **32993502867** (2026-08-26T17:20:05Z, headSha
+`58de3eb`), which already installed ffmpeg 6.1.1-3ubuntu5 and reported `750 passed`.
+The ffmpeg risk below was therefore settled a day before the run this entry credits —
+which strengthens the closure and falsifies the sentence that announced it. Filed as
+evidence for the rule it breaks: a superlative is a claim about a SET, and this one was
+written without enumerating the set.
+
+- **The ffmpeg risk did not bite.** The entry was filed as a risk and not a predicted
+  failure, on the correct ground that the workflow had never executed. It has now:
+  run **33109063305** installed **ffmpeg 6.1.1-3ubuntu5** on both rungs — a different
+  major from the 4.4.2 every measurement in this repository had been taken on — and the
+  suite passed whole, **1041 on CPython 3.10.21 and 1041 on CPython 3.13.15**. The six
+  `test_frames.py` tests that depend on x264 GOP placement and scene-detection
+  thresholds are inside those counts. The contingency stands unused and unneeded: pin
+  `runs-on` to a specific image rather than loosening the assertions.
+
+  **What this does NOT establish.** Seventeen runs, but one image and one ffmpeg
+  build — every `tests.yml` run to date resolved ffmpeg 6.1.1-3ubuntu5 on
+  `ubuntu-latest`, so run count adds repetition, not coverage. That "every" is
+  enumerated rather than sampled: all 17 run logs were fetched and grepped for
+  `ffmpeg version`, and all 17 returned that one string. It says
+  nothing about ffmpeg 5 or 7, nothing about the next `ubuntu-latest` rotation, and
+  nothing about the thresholds being *specified* rather than merely *agreeing here* —
+  they are still tuned behaviour that happens to hold across two majors. A green run
+  is evidence the risk was overestimated for this build, not that the class is closed.
+
+- **The `AGENTS.md` `.venv` entry had already been fixed, by a branch that did not
+  close it.** Filed 2026-08-26 when the Commands block read
+  `.venv/bin/pytest -q  # or: python3 -m pytest -q` — primary form first, and there is
+  no `.venv/` in this checkout, so the primary form failed outright. **`50a0aa9`
+  (PR #25, 2026-08-27) reversed the order to
+  `python3 -m pytest -q  # or: .venv/bin/pytest -q, if you made one`**, which is
+  conditional and therefore correct, and left the entry open. Traced rather than
+  eyeballed: `git log -S'.venv/bin/pytest' -- AGENTS.md` reports only the 2026-06-29
+  commit that introduced the line, because `-S` counts occurrences and reordering
+  changed none — `git log -G'.venv/bin/pytest' -- AGENTS.md` is what surfaces the
+  reorder, adding `50a0aa9`. **The pathspec is load-bearing and was missing here until
+  review:** unscoped, `-S` also matches this file's own prose quoting the string, so
+  the command as first written returns three commits and contradicts the sentence it
+  was offered as proof of. The entry deferred to "a decision about whether
+  this project wants a checked-in venv convention", and the answer the fix gives is
+  that it does not need one: the sentence no longer claims a `.venv` exists.
+
+- **The workflow's pass counts were stale by 20.** The comment claimed 1021 per rung
+  from a local pre-land measurement on 3.10.12 and 3.13.13. It now carries the CI
+  figure with its run id and the interpreters the runner actually resolved, keeping
+  the local numbers beside it because the six-package resolution check they also made
+  is nowhere asserted. (That check IS repeated by CI — the run's 3.13 rung logs the six
+  packages and its 3.10 rung the three excluded ones — but no test reads an install log,
+  so it holds only while somebody looks. The comment said "has not been repeated in CI",
+  which was the wrong half to claim, and was corrected during review of this branch.) `test_ci_runs_the_whole_suite.py` reads the VERSIONS out
+  of README and AGENTS and the matrix out of the YAML — never the counts — so this was
+  a documentation correction with no test to satisfy, which is exactly the shape that
+  goes stale unnoticed.
+
 ### Four packaging and path defects, and three of the entries that filed them were wrong
 
 (chore/packaging-and-docs, 2026-08-27) Closes the `--out-dir` umask entry, the
@@ -1515,8 +1629,13 @@ both declare `Requires-Python >= 3.10`. Both rungs were run locally before the w
 claimed them rather than published as a guess: 1021 passed on 3.10.12 and 1021 on
 CPython 3.13.13, each against exactly the pinned set, and the 3.13 install was checked to
 resolve six packages with `exceptiongroup`, `tomli` and `typing-extensions` correctly
-excluded by their `python_version < "3.11"` markers. That count is a snapshot with a date,
-not an invariant, and it went stale twice inside this branch: 993 was falsified by the
+excluded by their `python_version < "3.11"` markers. CI has since measured it for itself
+— run 33109063305, **1041 passed on CPython 3.10.21 and 1041 on CPython 3.13.15**, on the
+interpreters the runner resolved rather than the ones a developer had — and the workflow
+comment now carries the CI figure with its run id, keeping the local one beside it because
+the package-resolution check, though CI does perform it in its install log, is asserted by
+nothing. That count is a snapshot with a
+date, not an invariant, and it went stale twice inside this branch: 993 was falsified by the
 review commit that added twenty tests, and 1013 was falsified by the very commit that
 wrote it, which appended five more cases to the same file after measuring. The second is
 an ordering defect rather than an oversight — measure, then edit, then commit — so the

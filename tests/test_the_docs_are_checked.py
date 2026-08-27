@@ -215,11 +215,14 @@ class TestTheChangelogDescribesTheVersionBeingShipped:
         CHANGELOG is invisible to it — both halves are consistent at the old
         number.
       * It reads the NEWEST heading only. An older entry rewritten after the fact
-        passes — `TODOS.md` records one such case deliberately: the released 0.2.0
-        entry at `CHANGELOG.md:84` says 25 MB where the code says 24, and rewriting
-        a shipped entry is the wrong fix. (`test_consistency.py` records the 25-vs-24
-        DISTINCTION, in the comment above `OUR_CAP`, but it reads `whisper.py` only
-        and never opens the CHANGELOG — so nothing in the suite sees that line.)
+        passes, and this is not hypothetical: the released 0.2.0 entry said 25 MB
+        where the code says 24, it was rewritten to 24 in the 0.3.0 release-notes
+        pass, and every run of this test stayed green either side of that edit.
+        The rewrite was correct — the entry had said 25 from the day it was written,
+        so it never described what shipped — but correctness is not what made it
+        invisible here; being under an older heading is. (`test_consistency.py`
+        records the 25-vs-24 DISTINCTION, in the comment above `OUR_CAP`, but it
+        reads `whisper.py` only and never opens the CHANGELOG.)
       * It says nothing about the entry's CONTENT. A heading at the right number
         above a body describing different work is exactly as green as a correct one.
 
@@ -431,11 +434,16 @@ class TestThePluginInstallArchiveShipsNoScannerConfig:
         actually fetches.
 
       * **The legitimate configuration it must NOT fire on is the repo-root
-        `.skillignore` continuing to exist.** `npx skills add` copies the directory
-        wholesale and never runs `git archive`, so that surface still needs the file
-        and still gets it. `export-ignore` is what separates the two; DELETING the
-        file would fix this archive and break that one. Nothing here would catch
-        that, because a deleted file is also an absent one.
+        `.skillignore` continuing to exist.** It is kept for a scanner pointed at a
+        CHECKOUT of this repository, which reads it from disk where no archive
+        attribute applies — NOT because a packaging surface reads it. `npx skills
+        add` clones rather than archiving and copies only `skills/moviola/`, and
+        the `skills` CLI does not read `.skillignore` under any name; the earlier
+        version of this bullet claimed it did, and `.gitattributes` refutes that at
+        the lines that carry the patterns. `export-ignore` is what separates the
+        checkout from the archive; DELETING the file would fix this archive and
+        break the checkout. Nothing here would catch that, because a deleted file
+        is also an absent one.
 
       * It does not verify that any scanner honours `.skillignore`, or that the
         paths it names are the right ones. Whether the exclusion list is correct is
