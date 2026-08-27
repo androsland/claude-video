@@ -10,7 +10,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 - **`MOVIOLA_WHISPER_MODEL` accepts an arbitrary Hugging Face repo id or path with no validation beyond what `huggingface_hub` does.** That is deliberate — it is how anyone uses a fine-tune or a local conversion — but it means a typo'd or hostile repo id is fetched and loaded on the user's behalf. Documented as a non-goal in SKILL.md's security section rather than fixed. (local-whisper branch, 2026-08-26)
 
-- **`sys.path.insert(0, SCRIPT_DIR)` in `moviola.py:16` shadows the top-level `whisper` module of the `openai-whisper` package.** Our own `skills/moviola/scripts/whisper.py` wins for the lifetime of that process. Checked and accepted rather than fixed: of the eight modules in that directory (`config`, `download`, `frames`, `local_whisper`, `moviola`, `setup`, `transcribe`, `whisper`) **none** collide with a stdlib module name, and neither `faster_whisper` nor `ctranslate2` imports a bare `whisper` — so nothing this backend actually loads is affected. The shadow bites only a future dependency that imports `openai-whisper` by its top-level name from inside our process. The fix is renaming our module (`transcription.py`) and updating every import and test, which is a wide rename not worth doing mid-stack. Revisit if a dependency ever needs the real `whisper`. (whisper-runtime branch, 2026-08-26)
+- **`sys.path.insert(0, SCRIPT_DIR)` in `moviola.py:16` shadows the top-level `whisper` module of the `openai-whisper` package.** Our own `skills/moviola/scripts/whisper.py` wins for the lifetime of that process. Checked and accepted rather than fixed: of the ten modules in that directory (`config`, `download`, `frames`, `local_whisper`, `moviola`, `setup`, `transcribe`, `untrusted`, `whisper`, `workdir`) **none** collide with a stdlib module name — recounted 2026-08-27, the original count of eight predated `untrusted.py` and `workdir.py` and was never revisited, and neither `faster_whisper` nor `ctranslate2` imports a bare `whisper` — so nothing this backend actually loads is affected. The shadow bites only a future dependency that imports `openai-whisper` by its top-level name from inside our process. The fix is renaming our module (`transcription.py`) and updating every import and test, which is a wide rename not worth doing mid-stack. Revisit if a dependency ever needs the real `whisper`. (whisper-runtime branch, 2026-08-26)
 
 - **`_preload_cuda_libs()` is POSIX-only and does not support Windows.** pip's CUDA wheels put DLLs under `nvidia/*/bin` rather than `*/lib`, and Windows resolves them through `os.add_dll_directory()` rather than `ctypes.CDLL(..., RTLD_GLOBAL)` — a different mechanism, not a missing glob pattern. The POSIX path finds nothing there, so a Windows user with pip CUDA wheels falls back to CPU: correct, just slower. Not ported blind because it cannot be tested from this machine. Stated as an explicit non-goal in the function's docstring so the gap does not read as coverage. (whisper-runtime branch, 2026-08-26)
 
@@ -832,18 +832,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   the value is not ours. Fencing it is cheap; deciding whether the `rm -rf` instruction
   should exist at all is the larger question and belongs with it.
 
-- **A `--out-dir` work directory is created with the default umask.** (docs-are-checked
-  review, 2026-08-26; corrected after the forgeward privacy review, 2026-08-26)
-  `~/.config/moviola/.env` is written 0600 and checked for it. The work directory holds
-  the extracted audio, the downloaded video and every frame. **The default path is not
-  affected**: `moviola.py:259` uses `tempfile.mkdtemp`, which hardcodes 0700 regardless
-  of umask — verified directly under `umask 000` (`mkdtemp` → 0700, plain `mkdir` →
-  0777). Only the explicit `--out-dir` branch at `moviola.py:257` calls `Path.mkdir()`
-  and so inherits the shell's umask. This entry originally claimed the exposure for
-  every run; that was wrong, and it is recorded here rather than silently rewritten
-  because the overclaim is the sort of thing that sends someone to harden a path that
-  was already private.
-
 - **An invalid `MOVIOLA_WHISPER` is described two different ways.** (forgeward privacy
   review, 2026-08-26) `config.py:85-87` normalizes an unrecognised value to `auto`
   silently; `hooks/scripts/check-setup.sh:158` prints that the backend "is pinned but
@@ -1048,24 +1036,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   refuses to run. Nobody has hit this yet; it is filed so the next person does not
   discover it as a mystery.
 
-- **`build-skill.sh`'s untracked-file guard has no test.** (release staging, 2026-08-26)
-  The guard added in this commit — `git ls-files --others --exclude-standard --
-  skills/moviola` — closes a real hole: `git diff` sees no untracked files and the
-  archive reads `HEAD`, so a new-but-uncommitted runtime module produced a silently
-  incomplete bundle under a success message. It is verified by hand, not by the suite.
-  Testing it means driving a shell script that hard-exits on a dirty tree from inside
-  pytest, which wants a scratch clone per case; that is a fixture worth building when a
-  second script-level guard needs one, not for a single four-line `if`.
-
-- **A repo-root `.skillignore` still ships in the `/plugin install` archive.**
-  (release staging, 2026-08-26) The root `.gitattributes` export-ignores `.gitignore`
-  and `.gitattributes` but not `.skillignore`, so a 33-line scanner config lands in
-  every Claude Code plugin install. Same class as the bug this commit fixes and a
-  one-line fix, deliberately not taken here: it is the full-repo archive, not the
-  claude.ai bundle, and `TestThePublishedBundleShipsWhatGitattributesClaims` only reads
-  the subtree. Fixing it without extending that test to the root archive would be an
-  unpinned change at the tail of a branch that is otherwise ready.
-
 - **A gate finding was wrong, and the mutation harness is what said so.** (testing
   review, 2026-08-27; refuted 2026-08-27) The review reported that
   `TestTheFenceReachesEverySite`'s `failing_run` fixture patches `frames.shutil.which`
@@ -1175,6 +1145,77 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   test-harness code auditing this repository's own committed config, so anybody who can
   plant the symlink can already edit the workflow that runs the job.
 
+- **Files INSIDE the work directory are still written with the ambient umask.**
+  (chore/packaging-and-docs, 2026-08-27) `moviola.py` now creates the work directory
+  itself with `mode=0o700`, so on the default path and on an `--out-dir` moviola creates
+  nobody else can traverse into it. The files it then writes — `video.*`, every
+  `frame_*.jpg`, the transcript — still get `0666 & ~umask`, normally `0644`. Inside a
+  `0700` directory that is unreachable by anyone else and the mode is moot; inside a
+  pre-existing `--out-dir` the user chose, it is the user's own exposure and the
+  directory fix deliberately does not touch it. Stated as a NON-GOAL in
+  `tests/test_the_work_directory_is_private.py`. The open question is whether moviola
+  should WARN when it writes a run into a group- or world-readable directory, the way
+  the three surfaces in `test_key_file_permissions.py` warn about an exposed `.env` —
+  a warning reverses no decision of the user's, which is the objection that rules out
+  chmod-ing the directory itself.
+
+- **`--out-dir a/b/c` protects only `c`.** (chore/packaging-and-docs, 2026-08-27)
+  `Path.mkdir(parents=True, mode=0o700)` applies `mode` to the LEAF only — measured
+  against CPython, not inferred from the docs — so intermediate directories are created
+  with the default `0777 & ~umask` and a nested `--out-dir` whose parents do not exist
+  leaves them at `0755`. No content is exposed by this: traversal into the leaf is still
+  refused, so what leaks is the intermediate directory NAMES. Non-goals: it is a
+  disclosure of structure rather than of data, and a fix has to decide what to do about
+  an intermediate directory that already existed — the question the leaf fix sidesteps
+  entirely by only ever setting a mode at creation time. Pinned as a NON-GOAL rather
+  than as a passing case, so nothing here fires on it today.
+
+- **`--out-dir` pointed at an existing directory trusts it without checking who owns
+  it.** (chore/packaging-and-docs, 2026-08-27) `exist_ok=True` ignores `mode` for a
+  directory that already exists, which is deliberate — a directory the user made carries
+  a decision this program should not reverse — but moviola never asks whether the user
+  made it. A pre-existing world-writable directory under an attacker's control is
+  accepted and filled with the run's video, frames and transcript. An `st_uid` check
+  against `os.geteuid()` is the obvious guard. Non-goals: it is not the same hazard as
+  the mode fix, which was about what moviola CREATES; a check here has to decide what to
+  do about a legitimately shared directory on a multi-user box, which is why it is filed
+  rather than taken. `tests/test_the_work_directory_is_private.py` pins the current
+  behaviour as a deliberate passing case, so a fix has to change that test on purpose.
+
+- **`--out-dir` at a path that is a regular file dies with a bare traceback.**
+  (chore/packaging-and-docs, 2026-08-27) `Path.mkdir(exist_ok=True)` raises
+  `FileExistsError` for a non-directory, and nothing catches it, so a typo'd `--out-dir`
+  produces a Python traceback rather than the one-line refusal every other input error
+  in this program gets. Cosmetic, and the process exits non-zero either way.
+
+- **`parents=True` creates intermediate directories at the default mode, and there is a
+  window.** (chore/packaging-and-docs, 2026-08-27) Distinct from the leaf-only NON-GOAL
+  filed above, which is about disclosure of structure. This is the ordering: if a parent
+  of `--out-dir` is world-writable and does not yet exist, `mkdir(parents=True)` creates
+  it at `0777 & ~umask` before creating the 0700 leaf inside it, so between the two calls
+  another account can win the leaf's name. Narrow — it needs a world-writable ancestor
+  and a race — and closing it means creating the chain by hand rather than with
+  `parents=True`. Nothing here fires on it.
+
+- **`build-skill.sh`'s 200-file cap is not driven by any test.**
+  (chore/packaging-and-docs, 2026-08-27)
+  `tests/test_the_bundle_refuses_an_incomplete_tree.py` now runs the real script against
+  synthetic repositories and drives the dirty-tree guard (unstaged and staged), the
+  untracked-under-`skills/moviola` guard (a runtime module and a markdown file, the
+  FIRST — `test_an_untracked_runtime_module_is_refused_and_named` — asserting the
+  refusal NAMES the offender), the exactly-one-`SKILL.md` count,
+  and the two legitimate configurations the untracked guard must not fire on. The
+  200-file cap is the one guard left to inspection: reaching it needs 201 committed
+  files per invocation, so no test drives the refusal. **The uncovered surface is
+  narrower than "untested", measured 2026-08-27 by mutation rather than reasoned:**
+  inverting the comparison (`-gt 200` to `-lt 200`) fails 4 of the 8 tests including the
+  positive control, because every successful build runs that line against a 5-entry
+  archive. Only a LOOSENED bound escapes — `-gt 20000` passes all 8. Non-goals: an
+  earlier version of this entry, and of the file's own NON-GOALS, named "an inverted
+  comparison" among the uncaught regressions; that was false and would have sent someone
+  to write a test that already exists in effect. Both now say "a loosened bound", which
+  is the one thing genuinely invisible here.
+
 ## Housekeeping
 
 - **Every action in both workflows is now SHA-pinned, and ALL THREE of those pins are
@@ -1249,26 +1290,15 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   on ONE branch. It is an argument against a branch whose base is another unmerged branch,
   which is a different shape.
 
-- **`moviola.py` resolves its own directory differently from every other script.**
-  (stderr review, 2026-08-26) `moviola.py:15` is `Path(__file__).parent.resolve()`;
-  `whisper.py:34`, `setup.py:31` and `local_whisper.py:33` are
-  `Path(__file__).resolve().parent`. They agree on an ordinary checkout and diverge the
-  moment the script itself is a symlink: `.parent.resolve()` takes the directory the
-  link SITS in and resolves that, while `.resolve().parent` follows the link to its
-  target and takes the directory the real file sits in. An installer that symlinks
-  `moviola.py` into a bin directory would therefore have it insert the wrong path on
-  `sys.path` and fail to import its own siblings, while the other three would still
-  work. No installer does that today, which is why this is housekeeping and not a bug.
-  Make `moviola.py` match the other three. Non-goal: this says nothing about the plugin
-  cache or `dev-sync.sh`, which copy files rather than linking them and are unaffected
-  either way.
-
 - **This file is over the ~50KB archive threshold, and the split is deferred on a
   judgement, not on arithmetic.** (2026-08-26) Measured with
   `awk '/^## Completed/{f=1} f' TODOS.md | wc -c`: 98,552 bytes total, of which
   `## Completed` was 39,314 — 40%, a genuine mass and not a rounding error.
   **Re-measured 2026-08-26 after `fix/release-workflow`: 130,470 total / 51,222
-  completed = 39%.** The ratio barely moved while the file grew 32KB, which is the
+  completed = 39%. Re-measured again 2026-08-27 on `chore/packaging-and-docs`:
+  198,782 total / 81,980 completed = 41%.** The three figures above sit between 39%
+  and 41% while the file grew from 98KB to 194KiB — the parenthetical below is a
+  fourth, older and higher, and it is what the band is measured against. That is the
   point — both halves grow, so waiting does not make the split cheaper. (At the merge
   base for the stderr branch it was 53,933 / 51.2%; both halves have grown since, the
   live sections faster than the completed one.)
@@ -1301,6 +1331,40 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `AGENTS.md` as constraints rather than leaving as narrative — the `find_spec`
   rejection and the ambient-key rule are both in that class. Nothing verifies that
   extraction step, so a pass that archives without lifting them is a silent regression.
+
+- **Six `.gitattributes` `export-ignore` patterns match nothing this repository
+  tracks, and two of them name files it has never held.** (forgeward gate,
+  chore/packaging-and-docs, 2026-08-27) Measured by enumerating all 17 patterns against
+  `git ls-files`, not sampled. Four are prophylactic by design and correct as they are —
+  `__pycache__/`, `node_modules/`, `*.pyc`, `.DS_Store` mirror Anthropic's canonical
+  packaging excludes and name things that are untracked by nature. The other six divide:
+  `docs/`, `fixtures/`, `assets/` and `examples/` are placeholders for conventional
+  directories this repo has not needed yet, which is cheap and harmless; `V2_PLAN.md`
+  and `V2_CONCERNS.md` (lines 21-22) are two SPECIFIC filenames from a plan that has
+  never existed here. They arrived in upstream's own commit `429f314` and appear in no
+  tree of any of the 124 commits reachable from every local and remote-tracking ref,
+  `upstream/main` included. Non-goals: this is dead config, not a defect — no archive
+  differs either way, and nothing about the shipped bundle changes if all six are
+  deleted. The scope limit is that upstream branches never fetched into this checkout
+  could still hold those two files; the claim is about what is reachable here. Deleting
+  the two named ones is a one-line diff whose only argument is that a reader currently
+  infers a V2 planning tier that this repository does not have.
+
+- **`TODOS.md` — this file, ~194 KiB (198,782 bytes, measured 2026-08-27) and an index
+  of every known-unfixed gap — ships to every `/plugin install`.** (forgeward gate,
+  chore/packaging-and-docs, 2026-08-27)
+  Verified by `git archive --format=tar HEAD | tar -t`: `TODOS.md` is present, alongside
+  README, CHANGELOG, AGENTS and CLAUDE. It is NOT in the claude.ai `.skill` bundle, which
+  is built from `HEAD:skills/moviola` and never sees the repository root. The security
+  reviewer was asked and declined to file it as a security matter, and that judgement is
+  recorded rather than re-argued: the repository is public, every entry is derivable from
+  the source and history that ship beside it, and no secret is exposed. What is left is a
+  relevance-and-size question — the same question the `.skillignore` fix answered one file
+  over, and answered by keeping the file for a surface that genuinely reads it while
+  `export-ignore`-ing it out of the archives that do not. Non-goals: nothing here claims
+  a user is harmed, and an `export-ignore` on `TODOS.md` would be a behaviour change to
+  the install surface that belongs in its own commit with its own test, not folded into a
+  test-only branch. CHANGELOG.md and README.md ship deliberately and are not in scope.
 
 - **Five maintainability items from the gate on `fix/quiet-failures-ii`.** (forgeward
   maintainability reviewer, 2026-08-27) All PASS-with-debt — none blocks, and they are
@@ -1374,6 +1438,54 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   here.
 
 ## Completed
+
+### Four packaging and path defects, and three of the entries that filed them were wrong
+
+(chore/packaging-and-docs, 2026-08-27) Closes the `--out-dir` umask entry, the
+`build-skill.sh` untracked-guard entry, the repo-root `.skillignore` entry and the
+`SCRIPT_DIR` spelling entry. Each is now driven by a test. What is worth keeping is that
+**three of the four entries overstated or misdescribed the thing they filed**, and the
+tests written to close them are what said so — the same shape as the refuted gate finding
+filed above, one level up.
+
+- **The work directory.** `--out-dir` called `Path.mkdir()` and got `0777 & ~umask`,
+  so the downloaded video, every frame and the transcript were world-readable while the
+  default `mkdtemp` path was 0700. Fixed with `mode=0o700`. **The entry's own
+  justification was false**: it said `mkdtemp` "hardcodes 0700 regardless of umask".
+  It does not — `os.mkdir` subtracts the umask there too, so it is 0700 at any ordinary
+  umask and **0500 at umask 0200**, measured. The security DIRECTION holds
+  unconditionally (mkdtemp can only ever be narrower), which is why the fix stands and
+  why `tests/test_the_work_directory_is_private.py` says "never wider than 0700" rather
+  than "always 0700". Its line references (`moviola.py:257`/`:259`) were also stale.
+
+- **`build-skill.sh`'s untracked guard.** Now driven by
+  `tests/test_the_bundle_refuses_an_incomplete_tree.py`, which runs the real script
+  against synthetic repositories: both dirty-tree paths, both untracked paths, the
+  SKILL.md count, and the two legitimate states the guard must NOT refuse. The deferral
+  was reasonable and its cost estimate was right — the fixture is a scratch clone per
+  case — it was simply worth paying.
+
+- **The repo-root `.skillignore`.** Export-ignored. **The entry called it inert and it
+  was not**: 6 of its 23 entries name paths that DO ship in the full-repo archive —
+  `.claude-plugin/`, `hooks/`, README, CHANGELOG, AGENTS, CLAUDE — enumerated against
+  `git archive HEAD` rather than inferred. So the shipped file told an install-time
+  scanner to skip `hooks/scripts/check-setup.sh`, an executable that runs on
+  SessionStart, and both plugin manifests. The first draft of the fix's own rationale
+  repeated the entry's "already export-ignored" claim and had to be rewritten too.
+
+- **`SCRIPT_DIR` spelling.** Fixed to `Path(__file__).resolve().parent`. **The entry
+  named three peers where the tree holds five** (`frames.py`, `local_whisper.py`,
+  `setup.py`, `whisper.py`, `workdir.py`) and cited `whisper.py:34` where it is `:37`.
+  More usefully, **its stated mechanism was refuted by the test written to prove it**:
+  it predicted the entry point would "fail to import its own siblings" through a
+  symlink. It never did — CPython resolves the symlink itself when setting `sys.path[0]`,
+  so `--help` through a link exited 0 the whole time. The real defect is one notch
+  worse: the insert PREPENDED a second, wrong directory ahead of the correct one, so a
+  `config.py` dropped beside the symlink wins. Reproduced, and it is arbitrary code
+  execution against the ordinary install shape, not housekeeping. The peers'
+  `if str(SCRIPT_DIR) not in sys.path` guard does not save them either — with the wrong
+  spelling the symlink's directory is by construction not yet on the path, so the guard
+  passes and inserts it anyway.
 
 ### CI installs a hash-pinned test toolchain, on two interpreters, with drift reported separately
 
