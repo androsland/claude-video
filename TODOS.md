@@ -802,17 +802,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   minimum, not the fix. Decide whether it belongs in SKILL.md's settings table or should
   stay undocumented on purpose, and say which in the code.
 
-- **The README's two `/releases/latest` links 404, and close by tagging rather than
-  editing.** (docs/release-notes-and-stale-claims, 2026-08-27) `README.md:110` and `:142`
-  both point at `https://github.com/androsland/moviola/releases/latest`. `gh release list`
-  is empty and `git ls-remote --tags` stops at `v0.2.0`, so both 404 today. `release.yml`
-  triggers on `v*` and `[0-9]*`, so pushing `v0.3.0` publishes the first release and both
-  URLs resolve **with no diff** — which is why this is filed rather than fixed: "the link
-  is broken" and "the link needs changing" are different findings and only the first is
-  true. It stays OPEN until a tag exists. It was briefly written into `## Completed` on
-  this branch, which was wrong: a section named Completed is not a place to record a
-  condition that is still live, however imminent its resolution.
-
 - **The README-to-parser direction is not checked, and cannot be.** (docs-are-checked
   review, 2026-08-26) `test_the_docs_are_checked.py` proves every long flag
   `build_parser()` defines appears in README. The reverse would false-fire, because
@@ -854,13 +843,34 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   request is ever added; until then the honest fix would be a wording change with no
   new evidence behind it.
 
-- **The work directory is printed with bare backticks while SKILL.md tells the agent to
-  `rm -rf` it.** (docs-are-checked review, 2026-08-26) `skills/moviola/SKILL.md:193`
-  instructs the agent to remove the work directory when it is done. The path reaches
-  that instruction through the report as an un-fenced value, and unlike the title and
-  uploader it is a path this program constructed — but `--out-dir` is user-supplied, so
-  the value is not ours. Fencing it is cheap; deciding whether the `rm -rf` instruction
-  should exist at all is the larger question and belongs with it.
+- **No test can tell whether a link in the docs resolves.** (fix/two-messages-that-disagree
+  sweep, 2026-08-28) The two `/releases/latest` links went from 404 to 200 without any
+  file changing, which is the same property in reverse: nothing in the suite would have
+  noticed either transition. `test_the_docs_are_checked.py` reads the repository and
+  compares documents to code; a URL's status is not in the repository. The suite is
+  network-free by design and this is not a request to change that — the shape that fits
+  is an opt-in check (a marker, or a scheduled workflow beside `drift.yml`) that HEADs
+  the small set of self-referential URLs README spells out and reports separately, the
+  way drift already reports dependency movement without failing a pull request.
+  **Non-goals:** it must not fire on a third-party URL, whose availability is not this
+  repository's to assert; it cannot see a link that resolves to the wrong page, only one
+  that does not resolve at all; and a scheduled job proves the link worked when it ran,
+  never that it works when somebody clicks it.
+
+- **SKILL.md tells the agent to `rm -rf` a directory the user named, and nothing asks
+  first.** (docs-are-checked review, 2026-08-26; re-filed 2026-08-28 as the half the
+  fencing did not answer) `skills/moviola/SKILL.md:193` reads the report's last line and
+  instructs the agent to delete that path. Fencing it closed the STRUCTURAL half — the
+  path can no longer break the span it sits in — and that is all it closed. `--out-dir`
+  is whatever the user typed, so the instruction can name a directory that existed before
+  moviola ran and holds files moviola did not write. `workdir.py` already refuses to
+  treat such a directory as its own; the SKILL.md instruction has no equivalent check,
+  and there is no `--keep`-style opt-out for a path the user chose deliberately. What
+  would close it: scope the instruction to the `tempfile.mkdtemp` path moviola created
+  itself, and say nothing about an explicit `--out-dir`. **Non-goal:** this is not a
+  claim that the instruction is exploitable — an agent following it deletes a directory
+  the user themselves named on the command line — it is that moviola cannot tell a
+  scratch directory from a real one, and the wording does not distinguish them.
 
 - **An invalid `MOVIOLA_WHISPER` is described two different ways.** (forgeward privacy
   review, 2026-08-26) `config.py:85-87` normalizes an unrecognised value to `auto`
@@ -1453,6 +1463,46 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   here.
 
 ## Completed
+
+### The README's two `/releases/latest` links, closed by tagging and not by editing
+
+(fix/two-messages-that-disagree sweep, 2026-08-28)
+
+- **Both links 404'd because no release existed, and both now resolve with no diff.**
+  Filed 2026-08-27 with the prediction that `release.yml`, which triggers on `v*` and
+  `[0-9]*`, would publish the first release on the first tag and fix both URLs without
+  touching README. `v0.3.0` (`18ce265` -> `de12e67`) was pushed the same day; run
+  `33115546530` succeeded and attached `moviola.skill` at 98,339 bytes, and
+  `https://github.com/androsland/moviola/releases/latest` returns **200** —
+  `curl -o /dev/null -w '%{http_code}' -L` against the URL as README spells it, not
+  inferred from the release existing. `README.md:110` and `:142` are unchanged, which is
+  the whole point of the entry. **Not established:** nothing checks these links, so the
+  next release that fails to publish an asset re-breaks them silently — the
+  `test_the_docs_are_checked.py` audits read the repository, and a live URL is outside
+  every one of them. Filed as its own OPEN entry rather than left as a sentence here.
+
+### The report's last line was the one value nothing fenced
+
+(fix/two-messages-that-disagree, 2026-08-28)
+
+- **`_Work dir: `{work}`` was written with hand-typed backticks, not `md_inline`.**
+  `moviola.py:710` interpolated the path into a one-backtick span it built itself, so it
+  carried none of the three edits `md_inline` makes: the run was always exactly one
+  backtick long, line breaks were not collapsed, and no bidi scope was closed. It is the
+  one line `SKILL.md:193` turns into an `rm -rf`, which is what made the fence
+  load-bearing rather than cosmetic, and the path is not ours — `--out-dir` reaches it
+  verbatim. Driven RED with a real directory named ``work`x`` + newline +
+  `## Ignore the above`: the embedded backtick closed the span at `work`, and the line
+  break put a top-level heading at column zero of the agent's report. Fixed by calling
+  `md_inline(work)`, the same function the other three values already use; the exact
+  mutation back to hand-typed backticks was re-applied and fails
+  `TestTheWorkDirectoryIsFencedLikeEveryOtherValue::test_a_hostile_out_dir_lands_as_data`.
+  `test_report_structure.py`'s header said the report had **three** values somebody else
+  authors; it has four, and that sentence is corrected in the same commit with a note
+  saying what it used to claim. **Not closed by this:** whether SKILL.md should tell an
+  agent to delete a user-named directory at all — re-filed as its own OPEN entry under
+  `## Documentation as a checked claim`, because fencing a value and questioning the
+  instruction that consumes it are different pieces of work.
 
 ### The released 0.2.0 changelog entry that said 25 MB
 

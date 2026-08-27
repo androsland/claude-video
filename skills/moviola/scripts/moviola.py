@@ -707,7 +707,7 @@ def main() -> int:
 
     print()
     print("---")
-    print(f"_Work dir: `{work}` — delete when done._")
+    print(f"_Work dir: {md_inline(work)} — delete when done._")
 
     return 0
 
