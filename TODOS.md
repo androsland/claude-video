@@ -343,6 +343,41 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   span, the right ratio, formatted times, and the warning in the right place. They are
   claims nothing holds. Queued for `fix/quiet-failures-iii`.
 
+- **`FrameScheme` names the filename shape but not the SWEEP, so four call sites still
+  spell the same preamble.** (maintainability review, 2026-08-27) `frames.py` holds the
+  `for existing in out_dir.glob(SCHEME.glob): existing.unlink()` pair four times — three
+  detail engines plus the cue extractor. The constant removed the copy-pasted string; it
+  did not remove the copy-pasted loop, so a change to how a directory is emptied (say,
+  reporting what it removes) still has to land in four places and a miss in one of them
+  is invisible. A `FrameScheme.clear(out_dir)` method collapses all four. Not done on
+  `fix/quiet-failures-iii`: it touches every extraction path in the file for no change in
+  behaviour, and this branch is already carrying two security fixes that need to stay
+  legible on their own.
+
+- **The sweep unlinks foreign files silently, while the sorter that runs afterwards
+  discloses them.** (maintainability review, 2026-08-27) `frames_in_order` names a
+  `frame_a_0001.jpg` it excludes, and that is the whole point of the disclosure — but the
+  sweep two steps earlier has already deleted every `frame_*.jpg` in the directory without
+  saying a word, including that one. So the loud path only ever fires for a file written
+  BETWEEN the sweep and the read, and the common case — a user's own file matching the
+  glob in a reused `--out-dir` — is destroyed quietly. Decide whether the sweep should
+  name what it removes. It is a real question rather than an obvious yes: the sweep exists
+  precisely so a previous run's frames do not contaminate this one, and a line on every
+  ordinary re-run is the false alarm the disclosure rules warn about.
+
+- **`hold()` registers an `atexit` per call, so an in-process caller holds its flock for
+  the whole interpreter.** (maintainability review, 2026-08-27) The docstring's span is
+  "the rest of the process", which equals "the rest of the run" only because production's
+  sole caller is `raise SystemExit(main())`. Seven tests call `main()` directly
+  (`tests/test_moviola.py:238,278`, `tests/test_report_structure.py:170`,
+  `tests/test_quiet_failures_ii.py:203,467,505,574`), and each leaves a lock held until
+  pytest exits. Nothing bites today because no test reuses a `--out-dir` — a property of
+  the tests, not of the function — so a future test that calls `main()` twice on one
+  directory gets refused by its own first call, and the failure will look like a moviola
+  bug rather than a fixture one. The fix is for `hold` to be idempotent per directory, or
+  for the tests to drive `exclusive()` rather than inheriting the process-lifetime one.
+  Documented as a NON-GOAL in `workdir.hold` in the meantime.
+
 ## Bounded failures
 
 - **`stderr_line` imposes no length bound of its own, and every caller is responsible for

@@ -83,6 +83,13 @@ DETAIL_FRAMES = FrameScheme("frame_")
 CUE_FRAMES = FrameScheme("cue_")
 
 
+# How many foreign names the disclosure spells out before it starts counting.
+# The line exists to send someone to a specific file, and ten names does that;
+# a thousand does not, and the caller does not control how many files somebody
+# else put in the directory.
+_MAX_LISTED = 10
+
+
 def frames_in_order(out_dir: Path, scheme: FrameScheme | None = None) -> list[Path]:
     """The frames `scheme` wrote into `out_dir`, in the order ffmpeg wrote them.
 
@@ -100,6 +107,14 @@ def frames_in_order(out_dir: Path, scheme: FrameScheme | None = None) -> list[Pa
     timestamps does not fail — it shifts, and then reports a misalignment
     warning about ffmpeg for a file ffmpeg never wrote.
 
+    The `scheme` argument has no production caller today: every reader wants
+    the detail frames, and the cue frames are write-only — `cue_*.jpg` is
+    extracted for the report and never re-read in order. It is here because the
+    NUMBER of schemes is what makes the prefix check meaningful: a function that
+    hard-coded `DETAIL_FRAMES` would silently be a function about one scheme
+    again, and the second scheme is the reason `frame_a_0001.jpg` has to be
+    excluded rather than guessed at.
+
     NON-GOALS. This fixes the ORDER; it says nothing about whether ffmpeg's own
     showinfo timestamps are right, which is ffmpeg's business. It cannot see a
     collision INSIDE one scheme — `frame_1.jpg` and `frame_0001.jpg` both read
@@ -107,7 +122,12 @@ def frames_in_order(out_dir: Path, scheme: FrameScheme | None = None) -> list[Pa
     than reporting them. It never raises: a foreign file must not take down a
     run whose frames are all fine. And a frame this returns may still have NO
     timestamp reported for it — that is `pair_with_timestamps`' problem, and it
-    drops such frames rather than inventing a time for them.
+    drops such frames rather than inventing a time for them. It is also not
+    the first thing to look at a foreign file: every caller sweeps the glob and
+    unlinks what it matches before running ffmpeg, so the exclusion path here
+    fires only for a name written BETWEEN that sweep and this read. The
+    disclosure is therefore rare by construction and says nothing about what
+    the sweep already deleted — which is a gap, and it is filed as one.
     """
     # Resolved here rather than as a default argument, which would bind the
     # object at DEFINITION time — the writer would read the name and the sorter
@@ -126,8 +146,15 @@ def frames_in_order(out_dir: Path, scheme: FrameScheme | None = None) -> list[Pa
     if foreign:
         # Named, not counted: the point of the line is to send someone to the
         # specific file. The names come off a directory this program did not
-        # necessarily fill, so they are fenced like any other untrusted value.
-        listed = ", ".join(stderr_line(name) for name in sorted(foreign))
+        # necessarily fill, so they are fenced like any other untrusted value —
+        # and capped, because the COUNT is theirs to choose too. `stderr_line`
+        # bounds each name's shape and nothing bounds their number, so a
+        # directory holding ten thousand matching names turned one warning into
+        # ten thousand names of somebody else's text.
+        shown = sorted(foreign)[:_MAX_LISTED]
+        listed = ", ".join(stderr_line(name) for name in shown)
+        if len(foreign) > _MAX_LISTED:
+            listed += f", and {len(foreign) - _MAX_LISTED} more"
         print(
             f"[moviola] {len(foreign)} file(s) in {out_dir} match {scheme.glob} but not "
             f"the {scheme.prefix}NNNN.jpg scheme this run writes — excluded from the frame "

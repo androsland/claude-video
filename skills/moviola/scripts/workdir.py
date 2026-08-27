@@ -39,12 +39,26 @@ NON-GOALS, stated because an unstated limit reads as a claim of coverage:
   * **It says nothing about what is already in the directory.** A stale
     `video.mp4` from a previous, finished run is a different problem, and
     `snapshot_dir` is the thing that answers it.
+  * **The lock PATH is checked; the directory is not.** `.moviola.lock` is
+    refused when it is a symlink, a directory, or anything else that is not a
+    regular file, because truncating one of those destroys whatever it names.
+    That check covers the FINAL component only — a symlinked `--out-dir` is an
+    ordinary, legitimate thing to own and keeps working — and it says nothing
+    about the parent being swapped underneath the run, which needs `dir_fd`
+    relative opens throughout and is a different design. Nothing here detects
+    it.
+  * **Refusals are for the WRONG KIND OF THING, not for ordinary failure.** A
+    write that fails on ENOSPC or EIO still surfaces as a traceback: that is
+    the user's own machine telling them something true, and dressing it up as a
+    moviola refusal would hide where the problem is.
 """
 from __future__ import annotations
 
 import atexit
+import errno
 import json
 import os
+import stat
 import sys
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
@@ -63,8 +77,41 @@ except ImportError:  # pragma: no cover - POSIX-only; see NON-GOALS
 
 LOCK_NAME = ".moviola.lock"
 
+# The record is a file in a directory this run does not own, so its size is set
+# by whoever wrote it rather than by this program. `untrusted`'s own NON-GOALS
+# put bounding the input on the caller: `whisper._read_error_body` slices 400
+# characters before fencing, and this is the same move one module along.
+_MAX_RECORD = 64 * 1024
+_MAX_STARTED = 200
+
+# How many times to start over when the lock file is replaced underneath the
+# acquire. Five is "a couple of unlucky interleavings", not a retry budget —
+# anything that loses this race five times running is not the accidental second
+# run this module is for, and saying so beats spinning.
+_ACQUIRE_ATTEMPTS = 5
+
 
 def _describe_holder(lock_path: Path) -> str:
+    """Who holds the lock, in words safe to put in a refusal.
+
+    Every value below came off a file this program did not necessarily write,
+    so each is treated as a claim rather than a fact: the record may be absent,
+    unreadable, enormous, not JSON, JSON of the wrong shape, or a dict whose
+    fields are the wrong types, and each of those has to produce a SENTENCE
+    rather than a traceback. A refusal that crashes while explaining itself is
+    worse than the collision it was refusing.
+
+    The parse stays here rather than moving into `untrusted`, and AGENTS.md
+    can be read as forbidding that, so: `untrusted` holds edits and parses that
+    are about the SHAPE of a foreign value — a line break, a bidi scope, a float
+    that might be NaN — and are the same wherever they are applied. What follows
+    is about this record's DOMAIN: which keys exist, that `pid` is an int and
+    `started` a string, and what to say when they are not. Moving it would put
+    moviola's lock format inside a module whose whole value is that it knows
+    nothing about moviola. The pieces that ARE shape-level — the line fence, and
+    the length bound this record needs before it reaches it — do come from
+    there.
+    """
     """Who says they hold `lock_path`, phrased for a stderr line.
 
     The record is read back off a directory this run does NOT own — that is the
@@ -74,9 +121,25 @@ def _describe_holder(lock_path: Path) -> str:
     error: the holder writes it just AFTER taking the lock, so a run arriving in
     that window finds an empty file and must still say something useful.
     """
+    # `O_NOFOLLOW` and a bounded read rather than `read_text()`: the path is
+    # somebody else's to point wherever they like, and a symlink to /dev/zero
+    # is read forever by a call that has no size argument.
     try:
-        record = json.loads(lock_path.read_text() or "{}")
-    except (OSError, ValueError):
+        fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return "another moviola run (its lock file could not be read)"
+    try:
+        blob = os.read(fd, _MAX_RECORD + 1)
+    except OSError:
+        return "another moviola run (its lock file could not be read)"
+    finally:
+        os.close(fd)
+
+    if len(blob) > _MAX_RECORD:
+        return "another moviola run (its lock file was implausibly large)"
+    try:
+        record = json.loads(blob.decode("utf-8") or "{}")
+    except ValueError:  # includes UnicodeDecodeError
         return "another moviola run (its lock file could not be read)"
     if not isinstance(record, dict):
         return "another moviola run (its lock file was not the expected shape)"
@@ -87,10 +150,107 @@ def _describe_holder(lock_path: Path) -> str:
     if isinstance(pid, int):
         parts.append(f"pid {pid}")
     if isinstance(started, str) and started:
-        parts.append(f"started {stderr_line(started)}")
+        parts.append(f"started {stderr_line(started[:_MAX_STARTED])}")
     if not parts:
         return "another moviola run (it had not recorded itself yet)"
     return f"another moviola run ({', '.join(parts)})"
+
+
+def _refuse_planted(lock_path: Path, what: str) -> SystemExit:
+    return SystemExit(
+        f"[moviola] the lock file {lock_path} is {what}. moviola writes a "
+        "regular file there and will not follow or truncate anything else — "
+        "something other than moviola put this in the working directory. "
+        "Remove it, or pass a different --out-dir."
+    )
+
+
+def _open_regular(lock_path: Path) -> int:
+    """An fd on `lock_path`, which must be a regular file this run may truncate.
+
+    `O_NOFOLLOW` covers the FINAL component only, which is exactly the split
+    wanted here: a symlinked `--out-dir` is an ordinary thing to own — a
+    `~/videos` pointing at another volume — and must keep working, while a
+    symlinked `.moviola.lock` is not something moviola ever writes. Following
+    one would not redirect the lock. The next statements ftruncate the fd to
+    zero and write the record into it, so it would DESTROY whatever the link
+    named, before this run has downloaded anything, and the `unlink()` on the
+    way out would then remove the link and the evidence with it.
+
+    The `fstat` is the other half, because `O_NOFOLLOW` says nothing about a
+    FIFO or a directory and both reach real code: a directory raises out of
+    `os.open`, a FIFO opens fine under `O_RDWR` and raises EINVAL out of
+    `os.ftruncate`, several lines past the only `except` in `exclusive`. Both
+    escaped `main()` as tracebacks naming ftruncate rather than the planted
+    file — so a directory a stranger can write to was a denial of service on
+    every run pointed at it, described in terms of the wrong thing.
+    """
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        # ELOOP is Linux's answer; EMLINK is the BSD and macOS spelling.
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise _refuse_planted(lock_path, "a symbolic link") from None
+        if exc.errno == errno.EISDIR:
+            raise _refuse_planted(lock_path, "a directory") from None
+        raise
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise _refuse_planted(lock_path, "not a regular file")
+    return fd
+
+
+def _names_this_inode(lock_path: Path, fd: int) -> bool:
+    """Does `lock_path` still name the file `fd` is open on?"""
+    try:
+        on_disk = os.stat(lock_path)
+    except OSError:
+        return False
+    here = os.fstat(fd)
+    return (on_disk.st_dev, on_disk.st_ino) == (here.st_dev, here.st_ino)
+
+
+def _acquire(lock_path: Path, work: Path) -> int:
+    """An fd holding an exclusive lock on the file `lock_path` NAMES.
+
+    "Names" is the load-bearing word. `flock` locks an inode, and between the
+    `os.open` and the `flock` a statement later the holder can finish and
+    unlink the entry this run just opened. The lock then succeeds on a file
+    with no name; the next arrival opens the path, creates a fresh inode, locks
+    THAT, and the two run concurrently — two runs, two inodes, each convinced
+    it owns the directory. That is the mixed report this module exists to
+    prevent, reached through the module itself, so the inode is re-checked
+    against the path once the lock is held and a run that lost the race starts
+    over instead of holding an orphan.
+    """
+    for _attempt in range(_ACQUIRE_ATTEMPTS):
+        fd = _open_regular(lock_path)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise SystemExit(
+                    f"[moviola] {_describe_holder(lock_path)} is already using this "
+                    f"working directory: {work}. Two runs sharing one --out-dir "
+                    "overwrite each other's video.* and frame_*.jpg, and the "
+                    "stale-file guard cannot tell whose file is whose — so this run "
+                    "is stopping rather than reporting on a mix of both. Pass a "
+                    "different --out-dir, or wait for the other run to finish."
+                )
+            if _names_this_inode(lock_path, fd):
+                return fd
+        except BaseException:
+            os.close(fd)
+            raise
+        # Lost the race: what this run locked is not what the path names now.
+        os.close(fd)
+
+    raise SystemExit(
+        f"[moviola] the lock file in {work} was replaced {_ACQUIRE_ATTEMPTS} times "
+        "while this run tried to take it, so moviola cannot tell whether it owns "
+        "this working directory. Something other than a second moviola run is "
+        "writing into it. Pass a different --out-dir."
+    )
 
 
 @contextmanager
@@ -113,20 +273,8 @@ def exclusive(work: Path) -> Iterator[None]:
         return
 
     lock_path = work / LOCK_NAME
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fd = _acquire(lock_path, work)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise SystemExit(
-                f"[moviola] {_describe_holder(lock_path)} is already using this "
-                f"working directory: {work}. Two runs sharing one --out-dir "
-                "overwrite each other's video.* and frame_*.jpg, and the "
-                "stale-file guard cannot tell whose file is whose — so this run "
-                "is stopping rather than reporting on a mix of both. Pass a "
-                "different --out-dir, or wait for the other run to finish."
-            )
-
         os.ftruncate(fd, 0)
         os.write(fd, json.dumps({
             "pid": os.getpid(),
@@ -136,13 +284,26 @@ def exclusive(work: Path) -> Iterator[None]:
         try:
             yield
         finally:
-            # Unlink BEFORE releasing. The other order leaves a window in which a
-            # waiting run takes the lock on an inode this one is about to delete,
-            # and then holds a lock on a file no new arrival will ever open.
+            # Unlink BEFORE releasing. This does not CLOSE the window — an
+            # arrival that already opened this inode can still lock it the
+            # moment LOCK_UN lands, whichever order the two go in, and closing
+            # that is `_acquire`'s inode re-check rather than this ordering.
+            # What it does is narrow it, at no cost. Nothing ever waits here:
+            # the lock is taken `LOCK_NB`, so an arrival fails immediately.
+            #
+            # And only if the path still names THIS inode. A lock file replaced
+            # during the run belongs to whoever replaced it, and unlinking by
+            # path would take somebody else's lock out from under them.
             try:
-                lock_path.unlink()
+                if _names_this_inode(lock_path, fd):
+                    lock_path.unlink()
             except OSError:
                 pass
+            # Redundant for release: `os.close` below drops the kernel lock by
+            # itself, which is this module's whole premise. Kept so the release
+            # is a statement someone can read rather than a side effect of
+            # cleanup, and so a path that ever dups or inherits this fd does not
+            # silently extend the hold past here.
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
@@ -151,17 +312,26 @@ def exclusive(work: Path) -> Iterator[None]:
 def hold(work: Path) -> None:
     """Take the lock for the REST OF THE PROCESS, releasing it at exit.
 
-    `main()` IS the whole program — `raise SystemExit(main())` is its only
-    caller — so "until this process ends" and "for the duration of the run" are
-    the same span. Saying it this way keeps the call site one line instead of
-    indenting the whole of `main` under a `with`, and a reindent that large is
-    the kind of diff a real change hides inside.
+    `main()` is the whole program in PRODUCTION — `raise SystemExit(main())` is
+    its only caller there — so "until this process ends" and "for the duration
+    of the run" are the same span. Saying it this way keeps the call site one
+    line instead of indenting the whole of `main` under a `with`, and a reindent
+    that large is the kind of diff a real change hides inside.
 
     Cleanup is `atexit`, which covers a normal return and every `SystemExit`
     moviola raises. What it does NOT cover is SIGKILL, and that is survivable in
     a way a pid file would not be: the kernel drops the `flock` regardless, so
     the worst case is a stray empty `.moviola.lock` that the next run opens and
     locks without noticing. Nothing has to expire it.
+
+    NON-GOAL, and it is a live one rather than a hypothetical: "the rest of the
+    process" is not "the rest of the run" for an IN-PROCESS caller. Seven tests
+    call `main()` directly, and each one registers an `atexit` that holds its
+    flock until the interpreter exits — so a test calling `main()` twice against
+    one `--out-dir` refuses itself on the second call, and the lock outlives
+    every test in the session rather than the run that took it. That is filed in
+    TODOS.md; today it does not bite because no test reuses a directory, which
+    is a property of the tests and not of this function.
     """
     stack = ExitStack()
     stack.enter_context(exclusive(work))
