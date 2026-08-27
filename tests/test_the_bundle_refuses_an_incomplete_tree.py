@@ -24,11 +24,15 @@ NON-GOALS, so a green run here is not read as more than it is:
     throwaway repo and run there. A green run here means the guards work, not that
     `dist/moviola.skill` built from this checkout would be complete.
 
-  * **The 200-file cap is not driven.** Reaching it needs 201 committed files per
-    invocation, and the check is a single integer comparison whose failure mode is
-    arithmetic rather than logic. It is left to inspection deliberately, and the
-    consequence is that a regression there — an inverted comparison, a wrong bound —
-    would not be caught here.
+  * **The 200-file cap is not driven — but the gap is narrower than "untested".**
+    Reaching it needs 201 committed files per invocation, so nothing here exercises
+    the refusal. Measured 2026-08-27, not assumed: INVERTING the comparison
+    (`-gt 200` to `-lt 200`) fails 4 of the 8 tests below, the positive control among
+    them, because every successful build runs that line against a 5-entry archive.
+    What escapes is a LOOSENED bound — `-gt 20000` passes all 8 — and that is the
+    single regression this file cannot see. An earlier draft of this NON-GOAL named
+    "an inverted comparison" as uncaught, which was false and would have sent someone
+    to write a test that already exists in effect.
 
   * It checks the script's exit status and its message, never that the bundle it
     produces installs anywhere or that its contents are runnable. A `.skill` file
@@ -57,10 +61,16 @@ BUILD_SCRIPT = REPO / "skills" / "moviola" / "scripts" / "build-skill.sh"
 
 # Identity for the throwaway repo's single commit. Passed with -c rather than written
 # into a config file so nothing here depends on, or alters, the developer's own git
-# identity.
+# identity. `commit.gpgsign=false` is here for a different reason: a contributor with
+# signing on globally has no key for `tests@example.invalid`, and every case below
+# ERRORS at fixture setup with `exit status 128`. That was a loud failure rather than a
+# silent pass, so it broke nothing — it just made the suite unrunnable for them.
+# `core.hooksPath` pointing at a failing pre-commit hook is the same class and is NOT
+# neutralized here.
 GIT_IDENTITY = (
     "-c", "user.email=tests@example.invalid",
     "-c", "user.name=moviola tests",
+    "-c", "commit.gpgsign=false",
 )
 
 

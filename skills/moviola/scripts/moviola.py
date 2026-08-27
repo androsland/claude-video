@@ -341,14 +341,19 @@ def main() -> int:
         work = Path(args.out_dir).expanduser().resolve()
     else:
         work = Path(tempfile.mkdtemp(prefix="moviola-"))
-    # 0o700 so the two branches above agree about who may read the run. mkdtemp is
-    # 0700 unconditionally; a plain mkdir is 0777 & ~umask, so --out-dir used to hand
-    # the downloaded video, every frame and the transcript to every account on the
-    # machine while the default path handed them to nobody. `exist_ok=True` ignores
-    # `mode` for a directory that already exists, which is deliberate: a directory the
-    # user made themselves carries a decision this program should not reverse. Only
-    # the LEAF is covered — `parents=True` creates intermediate directories with the
-    # default mode. Pinned by tests/test_the_work_directory_is_private.py.
+    # 0o700 so the two branches above agree about who may read the run. mkdtemp asks
+    # for 0700 and a plain mkdir asks for 0777, both minus the umask — so --out-dir
+    # used to hand the downloaded video, every frame and the transcript to every
+    # account on the machine while the default path handed them to nobody.
+    # `exist_ok=True` ignores `mode` for a directory that already exists, which is
+    # deliberate: a directory the user made themselves carries a decision this program
+    # should not reverse. THREE limits this does not close, so the line is not read as
+    # a guarantee: only the LEAF is covered, since `parents=True` creates intermediate
+    # directories with the default mode; a filesystem that does not store modes ignores
+    # it silently and says nothing (a Windows drive under WSL returns 0777 for a 0700
+    # mkdir — measured, not assumed); and the files written inside still take the
+    # ambient umask. tests/test_the_work_directory_is_private.py pins what IS covered
+    # and carries all three in its NON-GOALS.
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
     print(f"[moviola] working dir: {work}", file=sys.stderr)
     # Before anything is written into it. Two runs sharing one --out-dir do not

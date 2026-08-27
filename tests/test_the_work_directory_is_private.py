@@ -2,8 +2,13 @@
 
 moviola picks its working directory one of two ways, and they disagreed:
 
-    no --out-dir : tempfile.mkdtemp(prefix="moviola-")   -> 0700, always
+    no --out-dir : tempfile.mkdtemp(prefix="moviola-")   -> 0700 & ~umask, so 0700
     --out-dir X  : Path(X).mkdir(parents=True, ...)      -> 0777 & ~umask, so 0755
+
+`mkdtemp` asks for 0700 and `os.mkdir` still subtracts the umask, so it is 0700 at any
+ordinary umask but 0500 at umask 0200 — measured, and the reason this file says
+"never wider than 0700" rather than "always 0700". The security direction is what
+matters and it holds unconditionally: `mkdtemp` can only ever be narrower.
 
 That directory holds the downloaded video, every extracted frame and the transcript
 for the whole run. On the default path nobody else on the machine can look at any of
@@ -42,7 +47,15 @@ NON-GOALS, so a green run here is not read as more than it is:
 
   * **It says nothing about a directory that was already exposed.** Re-using a 0755
     `--out-dir` from a previous run keeps 0755, by design, and that is asserted below
-    as a passing case rather than left implicit.
+    as a passing case rather than left implicit. That case asserts a mode the FIXTURE
+    set, so it carries an explicit control that moviola actually reached the code
+    under test; without one it passed even when the entry point died before `main()`.
+
+  * **It does not strip `PYTHONPATH` or `HOME`** the way
+    `test_the_entry_point_resolves_through_a_symlink.py` strips `PYTHONPATH`. The
+    subprocess inherits the developer's real `~/.config/moviola/.env`. The control
+    above turns what would have been a silent pass into a loud failure, but the
+    inherited environment is still a live variable here.
 
   * The subprocess is run under an explicit `umask 022`. A developer whose shell sets
     a restrictive umask would otherwise get 0700 from the unfixed code and a green run
@@ -177,7 +190,21 @@ class TestBothWaysOfChoosingAWorkDirectoryAgree:
         self_check = _mode(work)
         assert self_check == "0o755", f"the fixture could not create 0o755: {self_check}"
 
-        _run([MISSING_SOURCE, "--out-dir", str(work)], cwd=tmp_path, tmpdir=tmp_path)
+        result = _run([MISSING_SOURCE, "--out-dir", str(work)], cwd=tmp_path,
+                      tmpdir=tmp_path)
+
+        # The control its two siblings get for free. They assert on something moviola
+        # PRODUCED, so an entry point that died before main() fails them loudly; this
+        # one asserts a mode the FIXTURE set, and without this line it stayed green
+        # having proved nothing — verified by making moviola exit before main(), which
+        # failed the other two and passed this one. `samefile` rather than `==` because
+        # the --out-dir branch canonicalizes the path it reports and tmp_path may not be
+        # canonical.
+        reported = _reported_work_dir(result)
+        assert reported.samefile(work), (
+            f"moviola reported {reported}, not the --out-dir it was given ({work}), "
+            "so the assertion below is checking a mode nothing under test touched."
+        )
 
         assert _mode(work) == "0o755", (
             f"moviola changed an existing directory from 0o755 to {_mode(work)}. "

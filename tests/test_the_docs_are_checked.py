@@ -388,11 +388,19 @@ class TestThePluginInstallArchiveShipsNoScannerConfig:
     The repo-root `.skillignore` shipped in it. That file is scanner configuration —
     a list of paths install-time security scanners are told to skip — and shipping it
     is the same defect one directory up from the one already fixed: the bundle
-    carried an instruction not to look at things. It is worse than useless here,
-    because every path it names is ALREADY absent from this archive (`tests/`,
-    `.github/`, `.agents/`, `dev-sync.sh` and `skills/moviola/scripts/build-skill.sh`
-    are all `export-ignore`d), so what ships is an exclusion list whose only live
-    effect would be on files a user added themselves.
+    carried an instruction not to look at things.
+
+    That instruction was LIVE, not vestigial. Enumerated 2026-08-27, 6 of the file's 23
+    entries name paths present in this archive — `.claude-plugin/` and `hooks/`, both
+    kept on purpose by the repo-root `.gitattributes` NOTE and both asserted below as
+    MUST_SHIP, plus README.md, CHANGELOG.md, AGENTS.md and CLAUDE.md. The shipped
+    exclusion list therefore told a scanner to skip `hooks/scripts/check-setup.sh`, an
+    executable that ships and runs on SessionStart. Ten further entries (`tests/`,
+    `.github/`, `.agents/`, `dev-sync.sh`, `skills/moviola/scripts/build-skill.sh` and
+    five cache/artifact patterns) genuinely are export-ignored, and seven name paths git
+    never tracked. An earlier draft of this docstring generalised those ten into "every
+    path it names", which understated a real scanner-blinding exclusion as a vacuous
+    one; the count is written out here so the next reader does not have to trust it.
 
     NON-GOALS, so a green run here is not read as more than it is:
 
@@ -464,11 +472,13 @@ class TestThePluginInstallArchiveShipsNoScannerConfig:
         assert not shipped, (
             f"{shipped} ships inside the archive `/plugin install` fetches. "
             ".skillignore is install-time scanner configuration: it tells a scanner "
-            "which paths not to read. Every path it names is already export-ignored "
-            "out of this archive, so shipping it adds no exclusion a user wants and "
-            "one they did not ask for. Fix it with `/.skillignore export-ignore` in "
-            "the repo-root .gitattributes, NOT by deleting the file — `npx skills "
-            "add` copies the directory wholesale and still needs it."
+            "which paths not to read. Six of its entries name paths that DO ship here "
+            "— .claude-plugin/ and hooks/ (both deliberately kept) plus the four "
+            "top-level docs — so shipping it suppresses a scan of "
+            "hooks/scripts/check-setup.sh, an executable that runs on SessionStart. "
+            "Fix it with `/.skillignore export-ignore` in the repo-root .gitattributes, "
+            "NOT by deleting the file: a scanner pointed at a checkout of this repo "
+            "still reads it from disk, which no archive attribute can reach."
         )
 
 

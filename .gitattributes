@@ -41,12 +41,20 @@ V2_CONCERNS.md   export-ignore
 .gitattributes  export-ignore
 
 # Install-time scanner config. `.skillignore` tells scanners which paths NOT to read,
-# and every path this one names is already export-ignored out of the archive above —
-# so what shipped was an exclusion list with no exclusion a user wants in it, and one
-# they did not ask for. EXPORT-IGNORED rather than deleted: `npx skills add` copies the
-# directory wholesale and never runs `git archive`, so that surface still needs the file
-# and still gets it. The leading slash anchors this to the repository root so it does not
-# also match skills/moviola/.skillignore, which skills/moviola/.gitattributes already
-# excludes for its own reasons.
+# and 6 of this one's 23 entries name paths that DO ship in this archive: `.claude-plugin/`
+# and `hooks/` — both deliberately kept, see the NOTE above — plus README.md, CHANGELOG.md,
+# AGENTS.md and CLAUDE.md. So the shipped file was not an inert leftover. It told an
+# install-time scanner to skip `hooks/scripts/check-setup.sh`, an executable that ships and
+# runs on SessionStart, and both plugin manifests. Measured 2026-08-27 by enumerating every
+# entry against `git archive HEAD`, not inferred.
+# EXPORT-IGNORED rather than deleted — but NOT because another surface reads it. `npx skills
+# add` clones rather than archiving (so `export-ignore` could not reach it there anyway) and
+# then copies only skills/moviola/, never the repository root; the `skills` CLI does not read
+# `.skillignore` under any name. The file is kept for the one surface it still serves: a
+# scanner pointed at a CHECKOUT of this repository reads it from disk, where no archive
+# attribute applies.
+# The leading slash anchors this to the repository root so it does not also match
+# skills/moviola/.skillignore, which skills/moviola/.gitattributes:16 already excludes
+# for its own reasons.
 # Pinned by TestThePluginInstallArchiveShipsNoScannerConfig.
 /.skillignore   export-ignore

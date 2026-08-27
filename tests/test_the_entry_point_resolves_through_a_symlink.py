@@ -8,33 +8,51 @@ which directory the program is in:
     .parent.resolve()   -> the directory holding the SYMLINK
     .resolve().parent   -> the directory holding the real script
 
-`moviola.py` is the only one of the six sites that then does
-`sys.path.insert(0, str(SCRIPT_DIR))`, which is what turns a cosmetic divergence into
-a behavioural one. Two consequences, both reproduced before this file was written:
+All six sites then insert `SCRIPT_DIR` at the head of `sys.path`, which is what turns
+a cosmetic divergence into a behavioural one. `moviola.py` is only the one that inserts
+UNGUARDED — the five peers wrap it in `if str(SCRIPT_DIR) not in sys.path`. **That guard
+does not save a regressed peer**, and this was reproduced rather than reasoned: with the
+wrong spelling `SCRIPT_DIR` is the SYMLINK's directory, which by construction is not yet
+on `sys.path`, so the guard passes and inserts the wrong directory at position 0 exactly
+as the unguarded form does. Two consequences, both reproduced before this file was
+written:
 
   * **A module beside the symlink shadows the package's own.** CPython already sets
     `sys.path[0]` to the REAL script's directory — it resolves the symlink itself —
-    so the sibling imports on line 17 never actually broke, and `--help` through a
-    symlink exited 0 the whole time. What the insert did was prepend a SECOND
+    so the sibling imports on lines 18-40 never actually broke, and `--help` through
+    a symlink exited 0 the whole time. What the insert did was prepend a SECOND
     directory ahead of the correct one. A `config.py` dropped next to the symlink
     therefore wins over the real `config.py`, and the same holds for `download`,
-    `frames`, `setup`, `transcribe`, `untrusted`, `whisper` and `workdir`. That is
+    `frames`, `local_whisper`, `setup`, `transcribe`, `untrusted`, `whisper` and
+    `workdir` — `local_whisper` is imported by bare name from `whisper.py` and
+    `setup.py` rather than here, and `sys.path` is process-global. That is
     arbitrary code execution against anyone who installs the skill the ordinary way
     — a symlink from a directory on PATH into the skill folder.
 
-  * **`SCRIPT_DIR / "setup.py"` points at nothing.** Lines 539 and 685 build the
-    installer path from `SCRIPT_DIR`, so through a symlink they addressed a
-    `setup.py` beside the symlink, which does not exist.
+  * **`SCRIPT_DIR / "setup.py"` points at nothing.** `moviola.py:547` and `:693`
+    build the installer path from `SCRIPT_DIR`, so through a symlink they addressed
+    a `setup.py` beside the symlink, which does not exist.
 
-The fix is the one-line spelling change, which makes the insert redundant rather than
-wrong: `.resolve().parent` is already what CPython put at `sys.path[0]`.
+The fix is the one-line spelling change. It does NOT make the insert redundant, and
+the insert is deliberately kept: under `-P` or `PYTHONSAFEPATH=1` (3.11+) CPython
+computes no script directory at all, and with the insert removed
+`python3.13 -P moviola.py --help` dies with `ModuleNotFoundError: No module named
+'config'` while plain invocation stays green — measured both ways on 3.13.13. What the
+fix changes is that for the invocations where CPython DOES set `sys.path[0]`, the
+insert is now a duplicate of the correct directory instead of a second, wrong one
+ahead of it.
 
 NON-GOALS, so a green run here is not read as more than it is:
 
-  * The behavioural class drives `moviola.py` and nothing else, because it is the
-    only site that mutates `sys.path`. The other five compute `SCRIPT_DIR` and use
-    it as a path; a regression there is caught by the structural class below as a
-    change of FORM, never as a change of behaviour.
+  * The behavioural class drives `moviola.py` and nothing else — a limit of reach,
+    NOT a statement that the other five are harmless. All six mutate `sys.path`;
+    four of the five peers (`frames`, `local_whisper`, `setup`, `whisper`) carry
+    `if __name__ == "__main__"` and are directly invocable; and a peer regressed to
+    the wrong spelling was reproduced shadowing a decoy `config.py` through a
+    symlink DESPITE its guard. A regression in a peer is therefore the same
+    arbitrary code execution, and the structural class below is the only thing that
+    would catch it — as a change of FORM. Nothing here drives the resulting
+    BEHAVIOUR for any file but `moviola.py`.
 
   * The structural class is a textual scan of `SCRIPT_DIR = ` assignments. It cannot
     see a module that finds its own directory some other way — `os.path.dirname`, a
