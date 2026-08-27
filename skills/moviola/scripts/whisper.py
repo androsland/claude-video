@@ -899,7 +899,7 @@ def transcribe_video(
     options: dict | None = None,
     start_seconds: float | None = None,
     end_seconds: float | None = None,
-) -> tuple[list[dict], str]:
+) -> tuple[list[dict], str, TranscriptGaps]:
     """Run the full flow: extract audio → transcribe → parse segments.
 
     `options` carries local-backend settings — `model`, `device`, `compute`,
@@ -910,7 +910,12 @@ def transcribe_video(
     work to one range; returned segment times are shifted back onto the original
     video's timeline, so callers see absolute timestamps either way.
 
-    Returns (segments, backend_used). Raises SystemExit on any failure.
+    Returns (segments, backend_used, gaps). `gaps` is a `TranscriptGaps`
+    describing which spans of the requested range never transcribed, on the same
+    timeline as the segments — it is `TranscriptGaps([], 0, 1)` on every path
+    that is not chunked, because those either succeed whole or raise. A caller
+    that discards it publishes a transcript that reads as continuous across a
+    hole nothing covered. Raises SystemExit on any failure.
     """
     pinned = backend is not None
     if backend is None:

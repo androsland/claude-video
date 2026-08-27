@@ -332,6 +332,11 @@ def extract_scene_candidates(
     has emitted that many frames (early exit) and avoids writing extras that we
     would only delete afterwards. ``None`` (uncapped "complete" detail) keeps
     every detected shot, as the user explicitly opted in.
+
+    Returns (frames, untimed_dropped). The second value counts frames ffmpeg
+    wrote but never reported a timestamp for; :func:`pair_with_timestamps`
+    deletes those rather than inventing a time, and the count exists so the
+    caller can say a shortfall happened.
     """
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg is not installed. Install with: brew install ffmpeg")
