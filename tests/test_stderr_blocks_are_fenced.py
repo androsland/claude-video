@@ -116,14 +116,21 @@ NON-GOALS, stated so a green run here is not read as more than it proves:
     its timestamps out of an unmodified capture: the fence is applied where the
     capture becomes a MESSAGE, never where it is parsed.
 
-  * **Two of these tests can SKIP themselves into silence.** The live-vector
-    class shells out to a real ffmpeg and a real ffprobe, so it skips where
-    neither is installed; one of its tests also skips under a euid of 0,
-    because root can write to the unwritable directory the vector depends on.
-    A green run is therefore not by itself evidence that the live vector was
-    exercised — CI must keep ffmpeg present and must not run as root for these
-    to mean anything, and a `-rs` in the pytest invocation is the only way to
-    see which of the two happened.
+  * **Two of these tests can skip themselves into silence, and a third
+    ERRORS rather than skipping.** The two that skip are
+    `TestTheFenceReachesEverySite.test_get_metadata_asks_ffprobe_to_speak`,
+    which guards on `shutil.which("ffprobe")`, and the euid-0 skip on the
+    unwritable-directory vector, because root can write to the directory that
+    vector depends on. `TestTheLiveVectorEndToEnd` is NOT one of them: it
+    never calls ffprobe at all, and its `forging_clip` fixture shells out to
+    ffmpeg through `conftest._run` with no presence guard, so a host without
+    ffmpeg errors the class with `FileNotFoundError`. That is the loud
+    failure, not the silent one, and it matches the rest of this suite, which
+    treats ffmpeg as a hard dependency. This bullet claimed the opposite until
+    the gate that caught it — the live-vector class was described as skipping
+    on a binary it does not invoke. A green run is still not by itself
+    evidence the live vector ran: CI must keep ffmpeg present and must not run
+    as root, and `-rs` is the only way to see which skip fired.
 
   * **Nothing here bounds MEMORY.** `MAX_BLOCK_LINES` and `MAX_BLOCK_WIDTH`
     bound what is rendered, not what is read: `splitlines()` materializes every
@@ -352,7 +359,7 @@ class TestTheBlockFenceExists:
         strong = [
             ch for ch in line if unicodedata.bidirectional(ch) in ("L", "R", "AL")
         ]
-        assert strong and strong[0] == "\u200e", (
+        assert strong and strong[0] == untrusted.DIR_ANCHOR, (
             "the first strong character of a rendered line is the capture's, so "
             f"the line resolves RTL and the prefix moves: {strong[:3]!r}"
         )
@@ -423,10 +430,61 @@ class TestTheBlockFenceExists:
         # kept theirs. Trimming foreign text is a decision the leaf owns.
         block = untrusted.stderr_block("    indented\n    also", source="ffmpeg")
         kept = [ln for ln in block.splitlines() if ln.startswith(untrusted.BLOCK_PREFIX)]
-        assert [ln[len(untrusted.BLOCK_PREFIX):].lstrip("\u200e") for ln in kept] == [
+        assert [
+            ln[len(untrusted.BLOCK_PREFIX):].lstrip(untrusted.DIR_ANCHOR) for ln in kept
+        ] == [
             "    indented",
             "    also",
         ]
+
+    def test_the_empty_capture_message_claims_only_what_it_can_know(self) -> None:
+        # This function is handed a capture. It is never handed a returncode,
+        # so "exited non-zero" was a fact it had no access to — and one of its
+        # own callers contradicts it. `whisper.split_audio`'s guard is
+        # compound (`returncode != 0 or not out_path.exists() or
+        # st_size == 0`), so a run that exits 0 and writes an empty chunk
+        # reaches this branch and is reported to the reader as a non-zero
+        # exit. That case is not hypothetical: `extract_audio`'s comment two
+        # functions above documents an -ss past the end of the media exiting 0
+        # and writing a valid but empty mp3, measured at 333 bytes.
+        block = untrusted.stderr_block("", source="ffmpeg")
+        assert "non-zero" not in block, (
+            f"the message asserts an exit status the function never saw: {block!r}"
+        )
+        # Deliberately NOT asserting the wording. The sibling test below pins
+        # that the message is non-empty; what belongs here is only that it
+        # still names the writer, so a reword stays green and a message that
+        # quietly drops its subject does not.
+        assert "ffmpeg" in block, (
+            f"the message no longer names the tool it is about: {block!r}"
+        )
+
+    def test_a_crlf_capture_breaks_once_not_twice(self) -> None:
+        # Windows-built ffmpeg and ffprobe write CRLF on stderr. `splitlines()`
+        # treats "\r\n" as ONE break, but both halves are in LINE_BREAKS
+        # individually, so the two ways of hand-rolling this fail differently:
+        # splitting on each character separately manufactures an empty line
+        # between every real pair, and splitting on "\n" alone leaves a bare
+        # CR at the end of every rendered line. The line COUNT is what tells
+        # those two apart, so assert it rather than only the prefix.
+        block = untrusted.stderr_block(
+            f"first\r\nsecond\r\n{FORGED}", source="ffmpeg"
+        )
+        # Inspected with split("\n"), NOT splitlines(). splitlines() would
+        # consume a stray CR as a terminator in its own right and hand back
+        # lines that look clean — so the obvious way to write this test is
+        # structurally blind to half of what it is here to catch. Measured:
+        # against a `split("\n")` render leaving "| \u200efirst\r", a
+        # splitlines()-based check saw "| \u200efirst" and passed.
+        raw = block.split("\n")
+        kept = [ln for ln in raw if ln.startswith(untrusted.BLOCK_PREFIX)]
+        assert len(kept) == 3, f"CRLF did not break exactly three times: {kept!r}"
+        assert not any("\r" in ln for ln in kept), (
+            f"a bare CR survived inside a rendered line: {kept!r}"
+        )
+        assert not any(ln.startswith("[moviola]") for ln in raw), (
+            "a CRLF-terminated capture carried a line past the fence"
+        )
 
     def test_an_empty_capture_says_so_rather_than_nothing(self) -> None:
         block = untrusted.stderr_block("   \n  \n", source="ffmpeg")
@@ -525,8 +583,8 @@ class TestTheFenceReachesEverySite:
     def test_get_metadata_asks_ffprobe_to_speak(self, tmp_path: Path) -> None:
         # A real ffprobe, no monkeypatch. `-v quiet` silences ffprobe's stderr
         # as well as its info, so this site's capture was ALWAYS empty and the
-        # block it now renders would permanently read "(ffprobe exited non-zero
-        # and wrote nothing to stderr)". The fence was applied to a site that
+        # block it now renders would permanently read "(ffprobe wrote nothing
+        # to stderr)". The fence was applied to a site that
         # had nothing to fence. whisper.py:408 already carries the fix and the
         # comment explaining it; this is its sibling.
         if shutil.which("ffprobe") is None:
@@ -562,7 +620,7 @@ class TestTheFenceReachesEverySite:
         with pytest.raises(SystemExit) as caught:
             frames.get_metadata(str(clip))
         bodies = [
-            ln[len(untrusted.BLOCK_PREFIX):].lstrip("\u200e")
+            ln[len(untrusted.BLOCK_PREFIX):].lstrip(untrusted.DIR_ANCHOR)
             for ln in str(caught.value).splitlines()
             if ln.startswith(untrusted.BLOCK_PREFIX)
         ]
@@ -616,6 +674,26 @@ class TestTheFenceReachesEverySite:
         with pytest.raises(SystemExit) as caught:
             whisper.split_audio(audio, tmp_path, [(0.0, 30.0)])
         self._assert_fenced(str(caught.value))
+
+    def test_split_audio_reports_a_zero_exit_honestly(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The only one of the seven guards that is COMPOUND, so the only one
+        # whose raise is reachable with a returncode of 0: ffmpeg can exit
+        # clean and still leave no chunk behind. The fence is not what is
+        # under test here — there is no capture to fence — the diagnostic's
+        # truthfulness is.
+        def clean_run(cmd, *args, **kwargs):
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(whisper.subprocess, "run", clean_run)
+        audio = tmp_path / "a.mp3"
+        audio.write_bytes(b"x" * 4096)
+        with pytest.raises(SystemExit) as caught:
+            whisper.split_audio(audio, tmp_path, [(0.0, 30.0)])
+        assert "non-zero" not in str(caught.value), (
+            f"ffmpeg exited 0 and the reader is told otherwise: {caught.value}"
+        )
 
 
 @pytest.mark.skipif(

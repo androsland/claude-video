@@ -164,16 +164,34 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   this says nothing about the descriptor yt-dlp inherits, where no buffer of ours exists
   at all.
 
+- **`stderr_block` walks the capture three times, not once.** (performance review,
+  2026-08-27) `text.strip("\r\n")`, then `.splitlines()`, then the per-line
+  comprehension — three O(n) passes where one would do. The reviewer raised it and
+  **declined to file it as a finding**, correctly: it is a constant factor on a path
+  that is about to raise, and the entry above bounds the same code by the same
+  argument. It is recorded here so the next reader reaches the same conclusion without
+  re-deriving it, not as work to pick up. Non-goals: this is NOT a licence to fuse the
+  passes — a hand-rolled single-pass scanner is exactly the mutation the KILL harness
+  kills, because both obvious spellings get CRLF wrong (`split("\n")` leaves a bare CR,
+  and splitting on each `LINE_BREAKS` character manufactures an empty line between the
+  pair). `splitlines()` is the correct primitive here and the cost of it is the price.
+
 - **Two tests in `test_stderr_blocks_are_fenced.py` can skip themselves into silence.**
-  (testing review, 2026-08-27) The live-vector class shells out to a real ffmpeg and a
-  real ffprobe and skips where neither is installed; one of its tests also skips under a
-  euid of 0, because root can write to the unwritable directory the vector depends on. A
-  green run is therefore not by itself evidence the live vector was exercised. CI must
-  keep ffmpeg present and must not run as root for these to mean anything, and nothing
-  asserts either condition — `-rs` is the only way to see which happened. The clean fix
-  is a CI assertion that the two never skip, which belongs with the CI work rather than
-  here. Non-goal: this is about visibility, not about the skips themselves — both are
-  correct, and a test that silently passed as root would be worse than one that skips.
+  (testing review, 2026-08-27; corrected 2026-08-27 after the gate) The two are
+  `TestTheFenceReachesEverySite.test_get_metadata_asks_ffprobe_to_speak`, which guards
+  on `shutil.which("ffprobe")`, and the euid-0 skip on the unwritable-directory vector,
+  because root can write to the directory that vector depends on. A green run is
+  therefore not by itself evidence either ran. CI must keep ffmpeg present and must not
+  run as root for these to mean anything, and nothing asserts either condition — `-rs`
+  is the only way to see which happened. The clean fix is a CI assertion that neither
+  skips, which belongs with the CI work rather than here. **This entry named the wrong
+  two tests until the gate that caught it**: `TestTheLiveVectorEndToEnd` was described
+  as skipping on a binary it never invokes, when in fact its `forging_clip` fixture
+  shells out to ffmpeg through `conftest._run` with no presence guard, so a host
+  without ffmpeg ERRORS the class rather than skipping it. That is the loud failure and
+  it is the suite's convention, so it is deliberately left alone. Non-goal: this is
+  about visibility, not about the skips themselves — both are correct, and a test that
+  silently passed as root would be worse than one that skips.
 
 - **Nothing stops a literal bidi control from being committed again.** (security gate,
   2026-08-26) Eighteen were removed from `untrusted.py` and fourteen more from
@@ -1162,7 +1180,7 @@ context beside the report with nothing marking where their text ended and moviol
 resumed. `untrusted.stderr_block` renders it instead: `BLOCK_PREFIX` (`"| "`) on every
 line of the capture, bounded to `MAX_BLOCK_LINES` (40) and `MAX_BLOCK_WIDTH` (200), with
 an empty capture reported as the fact it is rather than as nothing. Applied at
-`frames.py:284`/`:395`/`:467`/`:832` and `whisper.py:376`/`:422`/`:490`. Pinned by
+`frames.py:290`/`:401`/`:473`/`:838` and `whisper.py:376`/`:422`/`:490`. Pinned by
 `tests/test_stderr_blocks_are_fenced.py`.
 
 `stderr_line` was the wrong instrument and that is why this waited: it makes a value ONE

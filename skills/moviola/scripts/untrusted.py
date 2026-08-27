@@ -333,15 +333,23 @@ def stderr_block(
       * **Only the prefix is structural, and only in the STRING.** The header
         and the "not shown" line sit at column zero because they are this
         program's, and a foreign line structurally cannot reach column zero of
-        the string an agent ingests. On a terminal it still can: the ANSI family
-        disclosed above includes column-addressing sequences — CHA (`ESC[G`),
-        CNL (`ESC[E`), and the two-character 7-bit NEL (`ESC E`, which
-        `splitlines` correctly does not treat as a break) — that repaint foreign
-        text at physical column zero with no `| ` in front of it. `DIR_ANCHOR`
-        closes the bidi half of this and nothing closes the ANSI half. It can, however, contain text
+        the string an agent ingests. The capture can, however, contain text
         that reads exactly like either of them, and the width marker sits
         inside foreign territory by construction. Treat all three as notices,
         never as arithmetic to trust.
+
+      * **On a TERMINAL, column zero is not structural at all.** The ANSI
+        family disclosed above includes column-addressing sequences — CHA
+        (`ESC[G`), CNL (`ESC[E`), and the two-character 7-bit NEL (`ESC E`,
+        which `splitlines` correctly does not treat as a break) — that
+        repaint foreign text at physical column zero with no `| ` in front of
+        it. Nor is an ESC required to do it: a run of C0 backspace (`0x08`)
+        walks a naive terminal's cursor back across `BLOCK_PREFIX` and
+        `DIR_ANCHOR` and overstrikes them with whatever prints next — the
+        same outcome by an older and simpler mechanism. `DIR_ANCHOR` closes
+        the bidi half of this; nothing here closes either control-character
+        half, and the agent reading the string is the reader this module is
+        written for.
 
       * **`max_width` bounds the content, not the rendered line.** The prefix,
         any terminators `balance_bidi` appends, and the width marker are added
@@ -374,9 +382,21 @@ def stderr_block(
     source = stderr_line(source)
     if not text.strip():
         # An empty capture rendered as an empty block reads as "no diagnostic
-        # exists", when what happened is that the tool exited non-zero and said
-        # nothing — a different and more interesting fact.
-        return f"({source} exited non-zero and wrote nothing to stderr)"
+        # exists", when what happened is that the tool ran and said nothing —
+        # a different and more interesting fact.
+        #
+        # It does NOT say "exited non-zero", though it did until the gate that
+        # caught it. This function is handed a capture and never a returncode,
+        # so that was a fact it had no access to, and one of its own callers
+        # contradicts the guess: `whisper.split_audio` holds the only compound
+        # guard of the seven — `returncode != 0 or not out_path.exists() or
+        # st_size == 0` — so a run that exits 0 and leaves no chunk behind
+        # lands here and was reported to the reader as a non-zero exit.
+        # `extract_audio` documents that exact case two functions above it: an
+        # -ss past the end of the media exits 0 and writes a valid but empty
+        # mp3, measured at 333 bytes. Report what the capture shows; the exit
+        # status belongs to the caller, which is the only one holding it.
+        return f"({source} wrote nothing to stderr)"
 
     # Trimmed here rather than at each call site. All seven passed
     # `result.stderr.strip()`, which also eats the FIRST line's indentation — so
