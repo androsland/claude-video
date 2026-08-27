@@ -47,8 +47,10 @@ Every value written below is inert filler. Nothing here reads a real credential.
 from __future__ import annotations
 
 import email.message
+import email.utils
 import io
 import os
+import time
 import urllib.error
 from pathlib import Path
 
@@ -465,3 +467,141 @@ class TestAnErrorBodyIsBoundedBeforeItIsRead:
                 raise OSError("connection reset")
 
         assert whisper._read_error_body(_http_error_with_body(_Angry())) == ""
+
+
+# A fixed point to measure deadlines from. Any value works; a literal keeps the
+# tests reading as arithmetic rather than as a race against the wall clock.
+FAKE_NOW = 1_800_000_000.0
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> float:
+    """Pin `time.time` so an HTTP-date has a deadline that does not move."""
+    monkeypatch.setattr(whisper.time, "time", lambda: FAKE_NOW)
+    return FAKE_NOW
+
+
+@pytest.fixture
+def local_zone_is_not_utc() -> object:
+    """Run the body under a local zone that is NOT GMT.
+
+    Without this the naive-datetime test is a no-op wherever the host happens to
+    be at UTC — which is every CI runner. `.timestamp()` on a naive value reads
+    it as local time, so the bug it exists to catch is invisible unless local
+    time and GMT actually differ. Asia/Kolkata is UTC+5:30, chosen because a
+    half-hour offset also catches an implementation that assumes whole hours.
+
+    `time.tzset` is POSIX-only, which matches the rest of this package.
+    """
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is not available on this platform")
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Kolkata"
+    time.tzset()
+    try:
+        if time.timezone == 0 and time.altzone == 0:
+            pytest.skip("this host has no zone database; local time is GMT")
+        yield
+    finally:
+        if before is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = before
+        time.tzset()
+
+
+def _http_date(offset_seconds: float) -> str:
+    return email.utils.formatdate(FAKE_NOW + offset_seconds, usegmt=True)
+
+
+class TestTheServersDeadlineIsHonouredInEitherForm:
+    """RFC 9110 allows `Retry-After` to be a delta OR an HTTP-date.
+
+    `float()` rejects a date, so `Retry-After: Wed, 26 Aug 2026 12:00:00 GMT`
+    fell through to the exponential ladder. The ladder is bounded and correct,
+    so nothing broke — but moviola retried SOONER than the provider asked, and
+    on a strict rate limiter retrying early is how a 429 becomes a ban. Both
+    forms now resolve to the same thing: a number of seconds, clamped by
+    `_bounded_delay` exactly as the delta form already was.
+
+    NON-GOALS, so a green run is not read as more than it is:
+
+      * A date is read against THIS machine's clock, and nothing here can tell
+        clock skew from a genuine deadline. That is survivable only because the
+        answer is clamped: a server whose clock is a day ahead buys
+        `MAX_RETRY_DELAY`, not a day. The clamp is the safety property; the
+        parse is only an improvement in politeness.
+      * A date at or before now falls back to the ladder rather than sleeping
+        zero, which is the same contract `Retry-After: 0` already had. It is
+        deliberately NOT "retry immediately" — a server naming a deadline that
+        has passed is not evidence its rate limiter agrees.
+      * Honouring the header does not make the request succeed. A rate-limited
+        run still gives up at `MAX_429_RETRIES`; it just gives up on the
+        server's schedule instead of its own.
+      * This says nothing about any other date-valued header. `Retry-After` is
+        the only one this program reads.
+    """
+
+    def test_a_date_in_the_future_is_read_as_a_delay(
+        self, frozen_clock: float
+    ) -> None:
+        exc = _http_error(429, {"Retry-After": _http_date(30)})
+        assert whisper._retry_after(exc) == pytest.approx(30.0, abs=1.0)
+
+    def test_a_date_far_out_is_clamped_like_any_other_delay(
+        self, frozen_clock: float
+    ) -> None:
+        # The clamp is what makes reading a stranger's clock safe at all.
+        exc = _http_error(429, {"Retry-After": _http_date(86_400)})
+        assert whisper._retry_after(exc) == whisper.MAX_RETRY_DELAY
+
+    def test_a_date_with_no_zone_is_read_as_gmt(
+        self, frozen_clock: float, local_zone_is_not_utc: object
+    ) -> None:
+        # RFC 9110's IMF-fixdate is GMT by definition, and `parsedate_to_datetime`
+        # hands back a NAIVE datetime when the zone is missing. Calling
+        # `.timestamp()` on a naive value silently interprets it as LOCAL time,
+        # so on a machine at UTC+5:30 a deadline 30 seconds out reads as five and
+        # a half hours in the PAST and falls back to the ladder. This test is the
+        # reason the zone is attached explicitly rather than left to the default,
+        # and the reason it pins the local zone rather than trusting the host's:
+        # on a UTC runner — which is every CI runner — local time and GMT agree
+        # and the bug is invisible.
+        stamped = _http_date(30).replace(" GMT", "")
+        exc = _http_error(429, {"Retry-After": stamped})
+        assert whisper._retry_after(exc) == pytest.approx(30.0, abs=1.0)
+
+    def test_a_date_already_past_falls_back_to_the_ladder(
+        self, frozen_clock: float
+    ) -> None:
+        # Same contract as `Retry-After: 0`, and deliberately not "retry now".
+        exc = _http_error(429, {"Retry-After": _http_date(-3600)})
+        assert whisper._retry_after(exc) is None
+
+    def test_a_header_that_is_neither_form_still_falls_back(self) -> None:
+        exc = _http_error(429, {"Retry-After": "soon-ish"})
+        assert whisper._retry_after(exc) is None
+
+    def test_the_seconds_form_is_untouched(self) -> None:
+        # The must-not-fire half. Adding a second parse must not disturb the
+        # first one, and the delta form is the one every real provider sends.
+        assert whisper._retry_after(_http_error(429, {"Retry-After": "5"})) == 5.0
+        assert whisper._retry_after(_http_error(429, {"Retry-After": "0"})) is None
+        assert (
+            whisper._retry_after(_http_error(429, {"Retry-After": "86400"}))
+            == whisper.MAX_RETRY_DELAY
+        )
+
+    def test_a_bare_number_is_never_read_as_a_date(
+        self, frozen_clock: float
+    ) -> None:
+        # Pins the OUTCOME, not the mechanism, and the distinction is worth
+        # stating: `_parsedate_tz` needs five or more whitespace- or
+        # comma-separated fields before it produces a date, so a bare number
+        # cannot parse as one and the branch order is not what saves this.
+        # Under a frozen clock, so a header that somehow did resolve as a date
+        # would land nowhere near 5.0 and this would say so.
+        assert whisper._retry_after(_http_error(429, {"Retry-After": "5"})) == 5.0
+
+    def test_a_missing_header_is_still_no_answer_at_all(self) -> None:
+        assert whisper._retry_after(_http_error(429)) is None

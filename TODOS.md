@@ -442,14 +442,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   the `exc.read()` entry below describes — every call site slices before it fences. Filed
   so the next caller added knows the rule is caller-side and that nothing enforces it.
 
-- **`Retry-After` is honoured only in its seconds form.** (bounded-failures review, 2026-08-26)
-  RFC 9110 also allows an HTTP-date, and `float()` rejects one, so a server answering
-  `Retry-After: Wed, 26 Aug 2026 12:00:00 GMT` gets the exponential ladder instead of the
-  wait it asked for. That is a deliberate under-read — the ladder is bounded and correct,
-  and honouring a date needs a clock comparison with its own failure modes (skew, a server
-  that sends a date in the past) — but it does mean moviola can retry sooner than a
-  provider told it to, which on a strict rate limiter is how a 429 becomes a ban.
-
 - **`MAX_RETRY_DELAY` is a fixed 60 seconds with no way to change it.** (bounded-failures
   review, 2026-08-26) The number was picked to be longer than any legitimate backoff and
   far shorter than a parked run; nothing measured it. A user on a provider that genuinely
@@ -1235,6 +1227,43 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Completed
 
+### `Retry-After` is honoured in both of the forms RFC 9110 defines
+
+(bounded-failures review, 2026-08-26; fixed 2026-08-27) `float()` rejects an HTTP-date, so
+a server answering `Retry-After: Wed, 26 Aug 2026 12:00:00 GMT` fell through to the
+exponential ladder and moviola retried SOONER than the provider asked — which on a strict
+rate limiter is how a 429 becomes a ban. `_seconds_until` now turns an IMF-fixdate into a
+number of seconds and both forms land on the same clamp. Pinned by
+`TestTheServersDeadlineIsHonouredInEitherForm` in `tests/test_bounded_failures.py`.
+
+**The clamp is what made this safe to do at all, and it predates it.** Reading a date means
+reading a stranger's clock, and nothing can tell skew from a genuine deadline — so the
+answer is only survivable because it goes through `_bounded_delay` like every other wait: a
+server whose clock is a day fast buys `MAX_RETRY_DELAY`, not a day. A deadline at or before
+now falls back to the ladder rather than sleeping zero, which is the same contract the delta
+form already gave `Retry-After: 0`, and deliberately not "retry immediately".
+
+**The zone line is the one that would have shipped broken.** `parsedate_to_datetime` returns
+a NAIVE datetime when the header omits its zone, `.timestamp()` reads a naive value as LOCAL
+time, and IMF-fixdate is GMT by definition — so east of Greenwich a deadline seconds away
+resolves hours into the past and is discarded. It is invisible wherever local time IS GMT,
+which is every CI runner, so the test that covers it pins `Asia/Kolkata` with `time.tzset`
+rather than trusting the host's zone. Half-hour offset on purpose: it also catches an
+implementation that assumes whole hours.
+
+**A claim in the first draft of this fix was wrong and is recorded rather than quietly
+dropped.** The docstring said the numeric parse must run FIRST because
+`parsedate_to_datetime` is lenient enough to read a bare number as a date. It is not:
+`_parsedate_tz` needs five or more whitespace- or comma-separated fields, so `Retry-After: 5`
+cannot reach the date parse and swapping the branches changes no answer. The swap therefore
+sits in the KILL harness's must-PASS half, and `test_a_bare_number_is_never_read_as_a_date`
+says in its own comment that it pins the outcome rather than the mechanism. Measured on
+CPython 3.10, which is the only interpreter on this machine.
+
+**Non-goal:** honouring the header does not make the request succeed. A rate-limited run
+still gives up at `MAX_429_RETRIES`; it gives up on the server's schedule instead of its own.
+
+
 ### The error body is bounded before it is read, not only before it is printed
 
 (stderr review, 2026-08-26; fixed 2026-08-27) `_read_error_body` called `exc.read()` with
@@ -1300,7 +1329,7 @@ context beside the report with nothing marking where their text ended and moviol
 resumed. `untrusted.stderr_block` renders it instead: `BLOCK_PREFIX` (`"| "`) on every
 line of the capture, bounded to `MAX_BLOCK_LINES` (40) and `MAX_BLOCK_WIDTH` (200), with
 an empty capture reported as the fact it is rather than as nothing. Applied at
-`frames.py:291`/`:402`/`:474`/`:839` and `whisper.py:376`/`:422`/`:490`. Pinned by
+`frames.py:291`/`:402`/`:474`/`:839` and `whisper.py:378`/`:424`/`:492`. Pinned by
 `tests/test_stderr_blocks_are_fenced.py`.
 
 `stderr_line` was the wrong instrument and that is why this waited: it makes a value ONE
@@ -1845,7 +1874,8 @@ appeared to.
   worse than a long one: it reached `time.sleep` and raised ValueError from inside the
   handler for the error being retried, and so did `nan`, which `float()` parses happily.
   `MAX_RETRY_DELAY` (60s) now caps every wait, `_bounded_delay` rejects NaN and negatives,
-  and a non-positive `Retry-After` falls back to the ladder rather than being obeyed.
+  and a non-positive `Retry-After` falls back to the ladder rather than being obeyed. The
+  cap is what later made it safe to honour the header's HTTP-date form as well, below.
 
 - **Chunk files were written and never deleted.** Chunking only happens on audio over the
   24 MB upload cap, so the leak was proportional to the LONGEST videos, and with a reused

@@ -13,6 +13,8 @@ this module keeps working when that package is absent.
 """
 from __future__ import annotations
 
+import datetime
+import email.utils
 import io
 import json
 import math
@@ -742,13 +744,64 @@ def _bounded_delay(seconds: float) -> float:
     return min(seconds, MAX_RETRY_DELAY)
 
 
+def _seconds_until(http_date: str) -> float | None:
+    """An HTTP-date read as a number of seconds from now, or None.
+
+    RFC 9110 allows `Retry-After` to be either a delta or an IMF-fixdate, and
+    only the delta form is a number. This turns the other form into one.
+
+    The zone is attached explicitly when the header omits it, and that line is
+    load-bearing rather than defensive. `parsedate_to_datetime` hands back a
+    NAIVE datetime for a zoneless date, `.timestamp()` reads a naive value as
+    LOCAL time, and IMF-fixdate is GMT by definition — so on a machine east of
+    Greenwich a deadline seconds away would resolve hours into the past and be
+    discarded. The bug is invisible wherever local time IS GMT, which is every
+    CI runner, so the test that covers it pins a non-UTC zone of its own.
+    """
+    try:
+        deadline = email.utils.parsedate_to_datetime(http_date)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=datetime.timezone.utc)
+    try:
+        return deadline.timestamp() - time.time()
+    except (OverflowError, OSError, ValueError):
+        # A year outside the platform's epoch range. Unrepresentable is not
+        # "retry now" — it is no usable answer, which is what None means here.
+        return None
+
+
 def _retry_after(exc: urllib.error.HTTPError) -> float | None:
     """The server's requested wait, clamped — or None to use our own ladder.
 
-    NON-GOAL: RFC 9110 also allows an HTTP-date here. `float()` rejects one, so
-    a date-form header falls back to the exponential ladder rather than being
-    honoured. That is a deliberate under-read: the ladder is bounded and correct,
-    and a date needs a clock comparison this function has no business doing.
+    Both of RFC 9110's forms are honoured: a delta in seconds, and an IMF-fixdate
+    naming the moment the wait expires. The delta is tried first because it is
+    the form every real provider sends and the cheaper parse.
+
+    That order is NOT what makes `Retry-After: 5` mean five seconds. Checked
+    rather than assumed: `_parsedate_tz` needs at least five whitespace- or
+    comma-separated fields before it will produce a date, so a bare number
+    cannot parse as one and swapping the two branches changes no answer. The
+    ordering is for whoever reads this next, and the KILL harness records the
+    swap in its must-PASS half rather than pretending it is a defect. Measured
+    on CPython 3.10; the field-count requirement is structural to that parser
+    rather than version-specific, but 3.10 is the version actually run here.
+
+    NON-GOALS:
+
+      * A date is read against THIS machine's clock, and nothing here can tell
+        clock skew from a genuine deadline. That is survivable only because the
+        answer goes through `_bounded_delay` like any other: a server whose clock
+        is a day fast buys `MAX_RETRY_DELAY`, not a day. The clamp is the safety
+        property; the parse is an improvement in politeness.
+      * A deadline at or before now falls back to the ladder rather than sleeping
+        zero — the same contract the delta form already gave `Retry-After: 0`. It
+        is deliberately not "retry immediately": a server naming a deadline that
+        has already passed is not evidence that its rate limiter agrees.
+      * Honouring the header does not make the request succeed. A rate-limited
+        run still gives up at MAX_429_RETRIES; it gives up on the server's
+        schedule instead of its own.
     """
     header = exc.headers.get("Retry-After") if getattr(exc, "headers", None) else None
     if not header:
@@ -756,7 +809,10 @@ def _retry_after(exc: urllib.error.HTTPError) -> float | None:
     try:
         seconds = float(header)
     except ValueError:
-        return None
+        parsed = _seconds_until(header.strip())
+        if parsed is None:
+            return None
+        seconds = parsed
     if seconds != seconds or seconds <= 0:
         return None
     return _bounded_delay(seconds)

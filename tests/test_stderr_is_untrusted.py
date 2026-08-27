@@ -46,7 +46,7 @@ NON-GOALS, so a green run here is not read as "stderr is trusted now":
     tool for them and its docstring says so: collapsing a forty-line diagnostic
     into one line destroys the only reason it is printed. They take a fenced
     BLOCK instead (`untrusted.stderr_block`), applied at
-    `frames.py:291`/`:402`/`:474`/`:839` and `whisper.py:376`/`:422`/`:490`, and
+    `frames.py:291`/`:402`/`:474`/`:839` and `whisper.py:378`/`:424`/`:492`, and
     `tests/test_stderr_blocks_are_fenced.py` is what pins that shape. Nothing in
     THIS file would notice if every one of those fences were removed tomorrow —
     the two files divide the surface by the shape of the fence, not by the
