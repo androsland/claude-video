@@ -247,6 +247,88 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   the transcript block, say) would not be caught by anything here. Adding `markdown-it-py`
   as a dev dependency and asserting the heading tree is the shape.
 
+- **`forging_clip` is function-scoped, so the parametrized live vector runs ffmpeg twice.**
+  (performance gate, round 4, 2026-08-27) `tests/test_stderr_blocks_are_fenced.py:768-790`.
+  Commit `4737ca7` parametrized `test_a_container_title_reaches_the_diagnostic_attributed`
+  over both `-loglevel info` sites; `forging_clip` depends on the function-scoped
+  `tmp_path`, so pytest re-runs the fixture — and its real `ffmpeg` call — once per case.
+  MEASURED rather than assumed: 0.13s setup + 0.11s call for `[scene_candidates]`, 0.12s +
+  0.10s for `[keyframes]` = ~0.23s added, against a suite that was 915 passed in 54.42s at
+  the time. Under 0.5%. Deliberately not fixed: class-scoping the fixture means moving off
+  `tmp_path` to `tmp_path_factory`, which restructures the fixture's isolation guarantees
+  for a sub-quarter-second saving. NON-GOAL: this is not an argument that the second
+  parameter is incidental duplication — the two cases exercise two distinct call sites,
+  which is the entire point of the commit that added them.
+
+- **`stderr_block`'s `max_lines=0` / `max_width=0` boundary is untested.** (testing gate,
+  round 4, 2026-08-27) The suite exercises `max_lines=3`, `max_width=5`, and the exact
+  39/40/41 and 199/200/201 boundaries either side of the defaults, but never zero. No
+  caller passes zero today — both are keyword parameters with defaults, and all seven call
+  sites pass neither. Worth one test only if either is ever exposed to a caller that
+  COMPUTES its value, which is the condition that turns zero from unreachable into an
+  ordinary input. NON-GOAL: this is not a claim that zero currently misbehaves; nobody has
+  run it, which is the whole entry.
+
+- **`audio_duration` is `get_metadata`'s unswept twin, and it is the worse of the
+  two.** (round-5 review — testing, maintainability and security independently,
+  2026-08-27) `whisper.py:426` reads `json.loads(result.stdout or "{}").get("format",
+  {})` and returns `float(fmt.get("duration") or 0.0)`. That is the exact pair of lines
+  `get_metadata` had before this branch guarded it, minus BOTH guards: no `json_object`
+  on the document and no `finite_float` on the field. Five failure modes, each measured
+  against the live function rather than reasoned about:
+
+  | stdout | what happens |
+  |---|---|
+  | `not json` | `JSONDecodeError`, uncaught, naming a column of a string nobody saw |
+  | `[]` | `AttributeError: 'list' object has no attribute 'get'` |
+  | `{"format":{"duration":"N/A"}}` | `ValueError: could not convert string to float` |
+  | `{"format":{"duration":NaN}}` | returns `nan`, **silently** |
+  | `{"format":{"duration":Infinity}}` | returns `inf`, **silently** |
+
+  The last two are why this outranks the one that was fixed. `json.loads` accepts the
+  non-standard `NaN`/`Infinity` tokens, `nan or 0.0` is truthy so the `or` never
+  catches it, and the value flows into `plan_chunks(duration, audio_bytes, ...)` at
+  `whisper.py:1115`. Traced: `total_seconds <= 0` is False for `nan` (every nan
+  comparison is), so the guard does not fire, and a 100 MB audio plans as
+  `[(nan, nan), (nan, nan), (nan, nan), (nan, nan)]` — four ffmpeg invocations with
+  `-ss nan -t nan`. `inf` plans `[(nan, inf), (inf, inf), (inf, inf), (inf, nan)]`.
+  `-inf` DOES trip the guard and yields one chunk of `-inf` seconds.
+
+  This is a direct instance of the rule about a fix undershooting its own evidence: the
+  proposition was "ffprobe's stdout is parsed as though it were a document" and the
+  branch fixed one of the two sites that do it. Stated as a deliberate deferral rather
+  than left implicit — the branch was already at ~1,000 insertions when the twin was
+  found, and it is the headline of `fix/bounded-failures-iv`. NON-GOAL: this says
+  nothing about `download.py:200` or `workdir.py:156`, which also call `json.loads` on
+  text this program did not write; neither has been audited and neither is claimed
+  covered.
+
+- **`json_object` guards ONE level of shape, and the level below it is unguarded.**
+  (round-5 security review, 2026-08-27) A right-shaped document with wrong-typed fields
+  passes whole. Measured: `{"format": "a string"}` is an object, so it is returned, and
+  `get_metadata`'s `data.get("format", {})` hands back the string — the next line raises
+  `AttributeError: 'str' object has no attribute 'get'`, the very failure the guard
+  exists to prevent, one level deeper than the one it prevents. `{"streams": "ab"}` does
+  the same through the generator. Written into `json_object`'s NON-GOALS on this branch
+  so the limit is not read as coverage; not fixed, because the fix is a walk that knows
+  what an ffprobe document is supposed to contain, and a leaf module deliberately does
+  not have that knowledge. Whoever takes it should decide first whether it belongs in
+  `frames.py` as a schema check or nowhere at all — the reachability is the same low
+  bar as the guard it sits under, and a `-v error -print_format json` ffprobe does not
+  emit this shape.
+
+- **Every `subprocess.run` here decodes with the locale's encoding, not UTF-8.**
+  (round-5 review, 2026-08-27) Nine sites pass `text=True` with no `encoding=`, so
+  Python decodes ffmpeg's and ffprobe's output with `locale.getpreferredencoding(False)`.
+  On a machine whose locale is not UTF-8 — a bare container with `LC_ALL=C`, or a
+  Windows console on cp1252 — a video title containing non-ASCII comes back mojibake or
+  raises `UnicodeDecodeError` from inside `subprocess`, which no fence and no guard on
+  this branch can see, because the damage happens before any of them run. The fix is
+  `encoding="utf-8", errors="replace"` on all nine, which is mechanical and touches
+  three files. NON-GOALS: it is not a security finding — mojibake is unreadable, not
+  forgeable, and `stderr_block` still fences whatever comes through; and it says nothing
+  about the descriptor yt-dlp inherits, where this process does no decoding at all.
+
 ## Quiet failures
 
 - **`parse_vtt` warns on a caption track that is legitimately empty.** (quiet-failures
@@ -414,6 +496,33 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `test_the_ansi_non_goal_is_still_the_truth`, which fails the day the behaviour changes
   so the prose cannot quietly become false.
 
+- **`_retry_after` refuses a `Retry-After` this program itself would accept.** (round-5
+  review, 2026-08-27) `float(header)` is wider than RFC 9110's delta-seconds, which is
+  `1*DIGIT`. `float` accepts `" 5 "`, `5.5`, `1e3`, `+5`, `5_0` (PEP 515 underscores), and —
+  the one that matters — `"nan"` and `"inf"`. The `seconds != seconds` line immediately
+  below is the nan guard and it works, so the reachable consequence today is narrow:
+  `Retry-After: inf` becomes `MAX_RETRY_DELAY` via `_bounded_delay`, which is the same
+  answer a clamped enormous delta gets and is arguably correct. Filed because the
+  tolerance is undeclared rather than because it currently bites — a reader of these two
+  lines cannot tell which of `float`'s vocabulary is intended. Either narrow the parse to
+  `header.strip().isdigit()` and let everything else fall to the date branch, or write
+  the tolerance into the docstring as deliberate. NON-GOAL: not a DoS vector; every path
+  out of here goes through `_bounded_delay`, which is the property that makes this
+  cosmetic.
+
+- **`SystemExit` is raised for conditions that are the CALLER's bug, not the user's.**
+  (round-5 maintainability review, 2026-08-27) The convention in these scripts is that a
+  failed subprocess or an unusable input exits with a message, and that is right for a
+  CLI. It is not right for `finite_float`'s non-finite-default refusal, which raises
+  `ValueError` — correctly, because a moviola author typed that literal. The two
+  conventions now sit side by side with nothing saying which applies when, and the next
+  guard someone adds will pick by coin-flip. **Needs a decision rather than a patch:**
+  either "anything a stranger caused exits, anything a moviola author caused raises",
+  or one exception type throughout with the distinction carried in the message. Andreas's
+  call; do not resolve it inside a bug-fix branch. NON-GOAL: nothing is currently WRONG —
+  both existing behaviours are individually defensible, and this is a consistency debt,
+  not a defect.
+
 ## Bounded failures
 
 - **`stderr_line` imposes no length bound of its own, and every caller is responsible for
@@ -426,10 +535,10 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `local_whisper.py`'s hub-failure line now slices 400, and `str(HTTPError)` is bounded
   only by `http.client._MAXLINE` — 65536 bytes of status line, an underscore-private
   constant this program neither sets nor should rely on. On stdout, `md_inline` calls
-  `stderr_line` and caps nothing: `moviola.py:441` and `:443` interpolate `info['title']`
+  `stderr_line` and caps nothing: `moviola.py:571` and `:573` interpolate `info['title']`
   and `info['uploader']`, which are `raw.get("title")` / `raw.get("uploader")` off
-  yt-dlp's JSON with no cap anywhere between that site and the report, and `:451` does the
-  same for the container's codec string out of ffprobe. `moviola.py:439` is `args.source`,
+  yt-dlp's JSON with no cap anywhere between that site and the report, and `:581` does the
+  same for the container's codec string out of ffprobe. `moviola.py:569` is `args.source`,
   a local CLI argument rather than a remote value. With `balance_bidi` linear these cost
   time proportional to their length rather than to its square, so this is report bloat and
   context flooding and NOT the denial of service that was fixed — a multi-megabyte title
@@ -441,25 +550,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   is not the forgery channel and does not reopen it, and it is not the unbounded READ that
   the `exc.read()` entry below describes — every call site slices before it fences. Filed
   so the next caller added knows the rule is caller-side and that nothing enforces it.
-
-- **`exc.read()` at `whisper.py:644` reads an error body with no size limit.** (stderr
-  review, 2026-08-26) The truncation on the next line is `[:400]`, which bounds what is
-  *printed* and not what is *read* — a server answering a 400 with a gigabyte-long body
-  gets the whole gigabyte into memory before Python slices 400 characters off the front.
-  It is on an error path, so it costs nothing on a healthy run, and the failure mode is
-  a MemoryError inside the handler for the error being reported rather than anything
-  silent. The fix is `exc.read(<n>)`, with `<n>` a few KB rather than 400 bytes so the
-  decode still sees whole multi-byte sequences. Non-goal: this is not the forgery
-  channel `stderr_line` closed and does not reopen it — a truncated body is fenced
-  either way; it is a resource bound, filed under the section that owns those.
-
-- **`Retry-After` is honoured only in its seconds form.** (bounded-failures review, 2026-08-26)
-  RFC 9110 also allows an HTTP-date, and `float()` rejects one, so a server answering
-  `Retry-After: Wed, 26 Aug 2026 12:00:00 GMT` gets the exponential ladder instead of the
-  wait it asked for. That is a deliberate under-read — the ladder is bounded and correct,
-  and honouring a date needs a clock comparison with its own failure modes (skew, a server
-  that sends a date in the past) — but it does mean moviola can retry sooner than a
-  provider told it to, which on a strict rate limiter is how a 429 becomes a ban.
 
 - **`MAX_RETRY_DELAY` is a fixed 60 seconds with no way to change it.** (bounded-failures
   review, 2026-08-26) The number was picked to be longer than any legitimate backoff and
@@ -602,15 +692,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   changed, the failover has to announce the second provider before the first byte goes
   out, the same way `_announce_upload` does today.
 
-- **`finite_float` guards its input and not its `default`.** (review of the bounded-failures
-  review, 2026-08-26) Both exit paths return `default` unexamined, so
-  `finite_float(x, float("inf"))` returns inf out of a function named for finiteness. It is
-  latent rather than live — every call site in the tree passes `0.0`, and the two that pass
-  a computed value (`frames.py:305` nests one call as the other's default) pass a value the
-  same guard already vetted. Filed because the name is the promise a future caller will read,
-  and nothing enforces it. Non-goal: this is not the magnitude entry below; a checked
-  `default` still would not bound `1e300`.
-
 - **Finiteness is not magnitude, and past 1,000,000 seconds the run dies inside ffmpeg.**
   (review of the bounded-failures review, 2026-08-26) `finite_float` rejects nan and inf and
   has no ceiling below them, so a large duration passes intact — and `auto_fps` turns it into
@@ -640,19 +721,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   negative would land on the same value and be indistinguishable from an absent key. Filed
   with the sentinel entry it depends on rather than fixed alongside it.
 
-- **`get_metadata` parses ffprobe's stdout with an unguarded `json.loads`.** (review of the
-  bounded-failures review, 2026-08-26) `frames.py:294` is
-  `json.loads(result.stdout or "{}")` and nothing catches `JSONDecodeError`. The `or "{}"`
-  handles empty output and nothing else, so a returncode of 0 with non-JSON on stdout takes
-  the run down with a traceback naming the json module. It is the same class as the
-  `finite_float` findings — a value this program did not write, parsed as though it had —
-  but one level up: the guards protect the FIELDS inside a document that was already assumed
-  to be a document. Reachability is low and is the reason this is filed rather than fixed:
-  the real ffprobe under `-v error -print_format json` either emits JSON or exits non-zero,
-  so it takes a shim or a wrapper on PATH answering to the name `ffprobe`. Non-goal: this is
-  not the `_read_info` half — `download.py:178` reads a file yt-dlp wrote and has the same
-  shape with its own reachability story.
-
 - **The reachability evidence reads `format` only, so a stream-level `N/A` is invisible to
   it.** (review of the bounded-failures review, 2026-08-26) `test_the_json_writer_omits_the_key_instead`
   is the test carrying the whole "the ValueError is not reachable" correction, and its
@@ -681,6 +749,30 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   test file at once, which is the diff shape that hides a real change. Non-goal: moving it
   does not enforce the convention either — a module that declares its own string still
   passes; only a review catches that.
+
+- **The SUCCESS path reads the response body unbounded, and the error path no longer
+  does.** (round-5 review — performance, testing and security, three specialists,
+  2026-08-27) `whisper.py:626` is `payload = response.read().decode("utf-8",
+  errors="replace")`, with no size argument, on a 2xx from an API this program does not
+  control. Every argument in `MAX_ERROR_BODY_BYTES`'s own comment applies to it verbatim
+  — the far end chooses the allocation — and the asymmetry is now the confusing part: a
+  reader of the bounded error path will reasonably assume the success path is bounded
+  too. It is not the same fix, though, and that is why it is not on this branch: an error
+  body is a diagnostic and a 400-character prefix is all anybody wants, while a
+  transcript body is the PRODUCT and truncating it silently loses the user's data. The
+  bound there has to be a refusal — read `MAX + 1`, and if the extra byte arrives, fail
+  with "the response was larger than X" rather than parse a prefix. Written into
+  `_read_error_body`'s NON-GOALS on this branch so the gap is filed rather than implied.
+
+- **`[:400]` is a magic number in the one place a magic number costs something.**
+  (round-5 maintainability review, 2026-08-27) `MAX_ERROR_BODY_BYTES = 8192` is a named
+  constant with a comment; the 400-character report slice beside it is a literal. The
+  two are coupled — `test_the_bound_is_wide_enough_for_the_whole_report` asserts
+  `MAX_ERROR_BODY_BYTES >= 400 * 4`, and that test has to spell the 400 itself because
+  there is nothing to import. Name it `MAX_ERROR_REPORT_CHARS = 400`, use it in both
+  places and in the test, so retuning either one cannot silently break the relationship.
+  NON-GOAL: this changes no behaviour and is not worth a branch of its own — fold it into
+  the next branch that touches this function.
 
 ## Documentation as a checked claim
 
@@ -1255,6 +1347,148 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Completed
 
+### ffprobe's stdout is checked for being a document before its fields are read
+
+(review of the bounded-failures review, 2026-08-26; fixed 2026-08-27) `get_metadata` read
+`json.loads(result.stdout or "{}")` straight into `.get()`, which is the `finite_float`
+class of finding one level up: the field guards protect values inside a document that was
+itself only ever assumed to be one. `untrusted.json_object` now answers that question, and
+it answers `None` to three failures rather than the one that was obvious. `json.loads`
+RAISES on text that is not JSON — a shim on PATH, a wrapper printing a warning first, a
+proxy answering with an HTML error page. It SUCCEEDS on valid JSON that is not an object:
+`[]`, `3`, `"text"`, `null` and `true` all parse cleanly, and that is the dangerous shape
+precisely because the parse worked, landing the failure at the caller's first `.get()` as
+an `AttributeError` naming a dict method a frame away from the subprocess that produced
+it. And it raises `RecursionError` — neither a `ValueError` nor caught by anyone expecting
+one — past about a thousand opening brackets, reachable with a 2 KB string in well under a
+millisecond. All three were probed rather than assumed before the docstring claimed them.
+
+The guard lives in `untrusted.py` beside `finite_float` because AGENTS.md says a new parse
+of somebody else's output belongs in the leaf, and it returns `None` rather than raising
+because the leaf answers the shape question while the caller owns the policy — the same
+split `_seconds_until` took in the commit before it. `frames.py:317` reads that `None` as
+FATAL, matching the returncode guard four lines above: a probe answering in a format that
+is not its own is evidence about what is on PATH, not evidence about the video, and
+degrading to `{}` would put a duration of zero in the report as a fact about a video
+nothing successfully probed. The capture goes through `stderr_block(..., source="ffprobe")`
+like every other foreign block, so a stdout line reading `ffprobe failed:` cannot reach
+column zero of a message moviola signs.
+
+Two new classes, one at the call site and one on the leaf: 15 test functions, 32 collected
+cases once the parametrized ones are counted apart. One of them
+covers a seam the fix created rather than the finding: `.strip()` was added so that
+whitespace-only stdout stays on the "wrote nothing" side of `or "{}"`, and without a test
+its removal would have been an unkilled mutation. The KILL harness runs nine mutations,
+all of which fail the suite, including the two half-fixes worth naming: catching only the
+decode and leaving the type (so `[]` still reaches `.get()`), and widening the check to
+`isinstance(document, (dict, list))`. Six legitimate rewrites stay green, one of which
+moved during the run — renaming the leaf at its three source sites FIRES, because the unit
+tests call it by name, so a genuine rename is a five-site edit and the harness was
+measuring an incomplete one. Completed, it passes. **Non-goals, in the code and pinned:**
+this is shape and not schema — `{}` and a document describing a different video entirely
+are the same answer here; it is not a size or memory bound, since `subprocess.run` has
+already buffered the whole capture before the guard sees it; a top-level array is refused,
+which is right for every caller today and would be wrong for one that wanted a list; and
+reachability is still low, unchanged from the filing — the real ffprobe under
+`-v error -print_format json` either emits JSON or exits non-zero, so this takes a shim or
+a wrapper on PATH answering to the name. `test_doc_anchors_are_current.py` is deliberately
+outside the KILL suite: it pins line numbers, so a rewrite adding a line fires it, which
+in the must-PASS half reads as a false alarm for a test doing its job. It ran during GREEN
+and caught three of this change's own citations drifting.
+
+### `Retry-After` is honoured in both of the forms RFC 9110 defines
+
+(bounded-failures review, 2026-08-26; fixed 2026-08-27) `float()` rejects an HTTP-date, so
+a server answering `Retry-After: Wed, 26 Aug 2026 12:00:00 GMT` fell through to the
+exponential ladder and moviola retried SOONER than the provider asked — which on a strict
+rate limiter is how a 429 becomes a ban. `_seconds_until` now turns an IMF-fixdate into a
+number of seconds and both forms land on the same clamp. Pinned by
+`TestTheServersDeadlineIsHonouredInEitherForm` in `tests/test_bounded_failures.py`.
+
+**The clamp is what made this safe to do at all, and it predates it.** Reading a date means
+reading a stranger's clock, and nothing can tell skew from a genuine deadline — so the
+answer is only survivable because it goes through `_bounded_delay` like every other wait: a
+server whose clock is a day fast buys `MAX_RETRY_DELAY`, not a day. A deadline at or before
+now falls back to the ladder rather than sleeping zero, which is the same contract the delta
+form already gave `Retry-After: 0`, and deliberately not "retry immediately".
+
+**The zone line is the one that would have shipped broken.** `parsedate_to_datetime` returns
+a NAIVE datetime when the header omits its zone, `.timestamp()` reads a naive value as LOCAL
+time, and IMF-fixdate is GMT by definition — so east of Greenwich a deadline seconds away
+resolves hours into the past and is discarded. It is invisible wherever local time IS GMT,
+which is every CI runner, so the test that covers it pins `Asia/Kolkata` with `time.tzset`
+rather than trusting the host's zone. Half-hour offset on purpose: it also catches an
+implementation that assumes whole hours.
+
+**A claim in the first draft of this fix was wrong and is recorded rather than quietly
+dropped.** The docstring said the numeric parse must run FIRST because
+`parsedate_to_datetime` is lenient enough to read a bare number as a date. It is not:
+`_parsedate_tz` needs five or more whitespace- or comma-separated fields, so `Retry-After: 5`
+cannot reach the date parse and swapping the branches changes no answer. The swap therefore
+sits in the KILL harness's must-PASS half, and `test_a_bare_number_is_never_read_as_a_date`
+says in its own comment that it pins the outcome rather than the mechanism. Measured on
+CPython 3.10, which is the only interpreter on this machine.
+
+**Non-goal:** honouring the header does not make the request succeed. A rate-limited run
+still gives up at `MAX_429_RETRIES`; it gives up on the server's schedule instead of its own.
+
+
+### The error body is bounded before it is read, not only before it is printed
+
+(stderr review, 2026-08-26; fixed 2026-08-27) `_read_error_body` called `exc.read()` with
+no argument and sliced `[:400]` off the decoded result. That bounds what is PRINTED and
+says nothing about what is ALLOCATED: a server answering a failing request with a
+gigabyte-long body got the whole gigabyte into memory first, and the failure mode was a
+MemoryError raised inside the handler for the error being reported. It now reads at most
+`MAX_ERROR_BODY_BYTES` (8192). Pinned by `TestAnErrorBodyIsBoundedBeforeItIsRead` in
+`tests/test_bounded_failures.py`.
+
+**The two bounds are in different units and both are load-bearing.** The read bound is in
+BYTES, the report bound is in CHARACTERS, and 8192 rather than 400 is the whole point:
+UTF-8 spends up to four bytes per character, so 400 characters need 1600 bytes in the worst
+case, and a bound set to the report's own number would have quietly shortened every
+multi-byte error message to a quarter of what a human asked to read. The slack past 1600
+also keeps the sequence `read()` may cut in half safely outside the slice, so the
+`errors="replace"` artefact never reaches the report. Both facts are mutations in the KILL
+harness — `MAX_ERROR_BODY_BYTES = 400`, and the byte bound replacing the character slice
+instead of joining it.
+
+**Non-goals.** This is a resource bound and not a forgery fence: `stderr_line` closed that
+channel, this does not reopen it, and the fence still runs after the slice so it can close
+a bidi scope the slice orphaned. `read(n)` is a request rather than a guarantee — a stream
+may answer with fewer bytes and nothing here re-reads to fill the quota, because the report
+wants a prefix rather than a complete body. And the response headers are read by urllib
+before this function is reached and are not bounded here; a hostile header set is a
+separate finding with a separate owner.
+
+
+### `finite_float` now answers for its own `default`
+
+(review of the bounded-failures review, 2026-08-26; fixed 2026-08-27) Both exit paths
+returned `default` unexamined, so `finite_float(x, float("inf"))` answered inf out of the
+guard that exists to reject inf. It now raises `ValueError` on entry when `default` is not
+finite, and the asymmetry with `value` is the point: `value` came from a stranger, so a bad
+one is ordinary and becomes the default; `default` is a literal a moviola author typed, so
+a non-finite one is this program's bug and is refused rather than repaired. Pinned by
+`TestTheGuardCoversItsOwnDefault` in `tests/test_metadata_is_untrusted.py`.
+
+**Checked on entry, not at the point of return, and the mutation harness is what settled
+that.** The lazy shape — test `default` inside the `except` arm, where it is about to be
+returned — reads as the cheaper fix and passes every test that drives bad data through the
+function. It fires only when `value` also happens to be unparseable, so a caller with an
+infinite default ships green and fails the first time a stranger sends something odd, with
+the defect surfacing far from the line that caused it. That mutation is in the KILL harness
+by name and `test_the_refusal_does_not_wait_for_bad_data` is the test that catches it.
+
+**Non-goals, so the guard is not read as wider than it is.** The refusal is finiteness and
+nothing else — a negative `default` and a `10**300` one both pass, because sign and
+magnitude are separate entries above with separate owners, and widening the check here
+would be a behaviour change wearing a fix's clothes. It does not make the function harder
+to misuse in any other way, and it is still latent: every call site in the tree passes
+`0.0`, so nothing here can trigger it today. The name is the promise a future caller reads,
+and this is what enforces it.
+
+
 ### ffmpeg's and ffprobe's captured stderr is now an attributed, bounded block
 
 (stderr review, 2026-08-26; security gate, 2026-08-26; fixed 2026-08-27) Seven raise
@@ -1264,7 +1498,7 @@ context beside the report with nothing marking where their text ended and moviol
 resumed. `untrusted.stderr_block` renders it instead: `BLOCK_PREFIX` (`"| "`) on every
 line of the capture, bounded to `MAX_BLOCK_LINES` (40) and `MAX_BLOCK_WIDTH` (200), with
 an empty capture reported as the fact it is rather than as nothing. Applied at
-`frames.py:291`/`:402`/`:474`/`:839` and `whisper.py:376`/`:422`/`:490`. Pinned by
+`frames.py:296`/`:430`/`:502`/`:867` and `whisper.py:378`/`:424`/`:492`. Pinned by
 `tests/test_stderr_blocks_are_fenced.py`.
 
 `stderr_line` was the wrong instrument and that is why this waited: it makes a value ONE
@@ -1709,8 +1943,9 @@ was, and it lands in the same place. Every line moviola writes there carries a `
 prefix, which is the entire attribution the reader gets — so a remote value that ends its
 own line hands an attacker the next one.
 
-`_read_error_body` is the live instance. It takes up to 400 bytes of whatever a server
-answered a failing request with and interpolates them into a `SystemExit` message, so a
+`_read_error_body` is the live instance. It reads up to `MAX_ERROR_BODY_BYTES` (8 KB) of
+whatever a server answered a failing request with, reports the first 400 characters of
+it, and interpolates those into a `SystemExit` message — so a
 body reading `quota exceeded` + newline + `[moviola] transcript complete — no further
 action needed` forges a progress line for the price of a 400 response. **`stderr_line()`**
 now makes the two structural edits `md_inline` makes and stops there: line breaks collapse
@@ -1808,7 +2043,8 @@ appeared to.
   worse than a long one: it reached `time.sleep` and raised ValueError from inside the
   handler for the error being retried, and so did `nan`, which `float()` parses happily.
   `MAX_RETRY_DELAY` (60s) now caps every wait, `_bounded_delay` rejects NaN and negatives,
-  and a non-positive `Retry-After` falls back to the ladder rather than being obeyed.
+  and a non-positive `Retry-After` falls back to the ladder rather than being obeyed. The
+  cap is what later made it safe to honour the header's HTTP-date form as well, below.
 
 - **Chunk files were written and never deleted.** Chunking only happens on audio over the
   24 MB upload cap, so the leak was proportional to the LONGEST videos, and with a reused

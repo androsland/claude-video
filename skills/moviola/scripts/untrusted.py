@@ -28,6 +28,14 @@ modules that cannot import each other — `frames.py` probes the video, `moviola
 covers the transcript-only path where there is no video to probe. A leaf module
 is the only place one definition can serve both.
 
+`json_object` is the same test one level up. `finite_float` asks whether a VALUE
+inside a document is a number; `json_object` asks whether there is a document at
+all — a question `frames.py` answered by assumption until a stdout that was not
+JSON turned a subprocess problem into a `JSONDecodeError` naming a column of a
+string nobody had seen. Neither of them decides what a failure MEANS: one
+returns the caller's default and the other returns `None`, and the policy that
+reads it stays at the call site where the consequences are known.
+
 NON-GOALS, stated here because an unstated limit reads as a claim of coverage:
 
   * **Not a sanitizer.** Nothing is stripped, shortened, or escaped. Every
@@ -79,6 +87,7 @@ NON-GOALS, stated here because an unstated limit reads as a claim of coverage:
 """
 from __future__ import annotations
 
+import json
 import math
 
 # Every character Python's own splitlines() treats as a terminator. A value
@@ -170,10 +179,29 @@ def finite_float(value: object, default: float = 0.0) -> float:
         from a right one — ffprobe answering `3.0` for a thirty-second video
         passes straight through, here and everywhere downstream.
 
-      * The guard applies to `value` alone. `default` is returned unchecked
-        from both exit paths, so `finite_float(x, float("inf"))` returns inf
-        from a function called finite_float. Every call site passes 0.0 today,
-        which is why this is latent rather than live.
+      * `default` is REFUSED, not coerced, and the asymmetry is the point.
+        `value` came from a stranger, so a bad one is ordinary and becomes the
+        default; `default` is a literal a moviola author typed, so a non-finite
+        one is this program's bug and raises ValueError. It is checked on entry
+        rather than at the point of return, because a lazy check fires only
+        when `value` happens to be unparseable too — the caller's bug would
+        then ship green and surface later, far from the line that caused it.
+        Nothing in the tree can trigger it, and the reason is worth stating
+        exactly, because "every call site passes 0.0" — which this bullet said
+        until somebody counted — is not one of the true ways to say it. There
+        are four. Three pass the literal `0.0`: `get_metadata`'s size field,
+        `moviola.py`'s transcript-only duration, and the INNER call of the
+        nested pair in `get_metadata`. The fourth is that pair's OUTER call,
+        whose default is the inner call's RESULT — safe for a stronger reason
+        than a literal is, since this same guard has already vetted it. The
+        refusal below is what makes the nesting safe rather than something the
+        nesting slips past. The name is the promise a future caller reads, and
+        this is what enforces it.
+
+      * The refusal is finiteness alone. A negative default and a very large
+        one both pass — sign and magnitude are separate findings with separate
+        owners, and widening the guard to catch them here would be a behaviour
+        change wearing a fix's clothes.
 
       * Finiteness is not magnitude, and the consequence is a dead run rather
         than a silly one. There is no ceiling here and nothing downstream
@@ -186,10 +214,105 @@ def finite_float(value: object, default: float = 0.0) -> float:
         `format_time(-1.0)` renders it as `-1:59:59`.
     """
     try:
+        default_is_finite = math.isfinite(default)
+    except (TypeError, ValueError, OverflowError):
+        # Three, and the same three the `float(value)` call below already
+        # catches, because both are the same question asked of a different
+        # argument. TypeError for a `default` that is not a number at all;
+        # OverflowError for a Python int too large for a double; ValueError
+        # from inside the `__float__` conversion `math.isfinite` performs — a
+        # signalling NaN is the reachable example, since IEEE 754 requires it
+        # to raise rather than quietly become a quiet NaN.
+        #
+        # The third was missed on the branch that wrote this guard, and what it
+        # cost is worth stating exactly, because it is small: the escaping
+        # exception is a ValueError, which is the same TYPE the raise below
+        # produces, so no caller ever saw a different class of failure and no
+        # value ever came back wrong. What changed was the message — the guard
+        # exists so a caller reads one sentence naming `default`, and the
+        # escape handed them the math module's words instead.
+        #
+        # All three answer False rather than escaping as themselves, so the
+        # refusal below is the single exit for a default this function will not
+        # accept.
+        default_is_finite = False
+    if not default_is_finite:
+        raise ValueError(
+            f"finite_float() was given a non-finite default: {default!r}. "
+            "`value` is coerced because a stranger wrote it; `default` is this "
+            "program's own literal, so a non-finite one is a bug here and is "
+            "refused rather than repaired."
+        )
+
+    try:
         number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError, OverflowError):
         return default
     return number if math.isfinite(number) else default
+
+
+def json_object(text: object) -> dict | None:
+    """A JSON object parsed out of somebody else's output, or None for anything else.
+
+    `json.loads` is the wrong call to make directly on a captured stdout,
+    because it fails in two shapes and only one of them looks like a failure.
+    It RAISES `ValueError` when the text is not JSON at all — a shim on PATH, a
+    wrapper that prints a warning first, a proxy answering with an HTML error
+    page. And it SUCCEEDS, handing back a list or a number or `None`, when the
+    text is valid JSON that is not an object: `[]`, `3`, `"text"`, `null` and
+    `true` all parse cleanly. The second is the dangerous one precisely because
+    the parse worked — the failure lands at the caller's first `.get()` as an
+    `AttributeError` naming a dict method, a frame away from the subprocess that
+    produced the document.
+
+    A third belongs to the parser rather than to the input: a document nested
+    past the interpreter's recursion limit raises `RecursionError`, which is
+    neither a `ValueError` nor caught by anybody expecting one, and about a
+    thousand opening brackets reach it. Catching it is narrow enough to be safe
+    here — there is no `object_hook` and no `parse_float`, so the only recursion
+    this can swallow is the JSON scanner's own.
+
+    All three answer `None`, and `None` is a question rather than a decision. A
+    caller that can carry on without the document reads it as "nothing to read";
+    a caller that cannot reads it as evidence about what is on PATH. Choosing
+    between those is policy, and it belongs at the call site that knows the
+    consequences — this function decides only whether the bytes are the shape
+    the caller was promised.
+
+    NON-GOALS:
+
+      * **Shape, not schema, and certainly not truth.** `{}` and a document
+        missing every expected key are the same answer here, and so is one
+        describing a different video entirely. What the fields mean is
+        `finite_float`'s problem and the caller's.
+
+      * **Not a size or a memory bound.** A hundred-megabyte object parses and
+        is returned whole. Whatever produced `text` already bounded it or did
+        not — `subprocess.run` has buffered the entire capture before this is
+        called — and that bound is not this function's to give.
+
+      * **A `dict` is the only container it recognises.** A document whose top
+        level is legitimately an array is refused, which is correct for every
+        caller there is today and would be wrong for one that wanted a list.
+        That caller wants its own function, not a widened return type here.
+
+      * **One level of shape, and the level below it is somebody else's.** A
+        right-shaped document with wrong-typed fields passes whole:
+        `{"format": "a string"}` IS an object, so it is returned, and
+        `get_metadata`'s `data.get("format", {})` then hands back that string.
+        Measured: the next line raises `AttributeError: 'str' object has no
+        attribute 'get'` — the very failure this function exists to prevent,
+        arriving one level deeper than the one it prevents. `{"streams": "ab"}`
+        does the same through the generator. Filed rather than fixed, and
+        filed as a schema question: the fix is a walk that knows what an
+        ffprobe document is supposed to contain, which is knowledge a leaf
+        module deliberately does not have.
+    """
+    try:
+        document = json.loads(text)  # type: ignore[arg-type]
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return document if isinstance(document, dict) else None
 
 
 def balance_bidi(text: str) -> str:

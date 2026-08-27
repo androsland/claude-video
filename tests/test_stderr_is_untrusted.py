@@ -46,13 +46,23 @@ NON-GOALS, so a green run here is not read as "stderr is trusted now":
     tool for them and its docstring says so: collapsing a forty-line diagnostic
     into one line destroys the only reason it is printed. They take a fenced
     BLOCK instead (`untrusted.stderr_block`), applied at
-    `frames.py:291`/`:402`/`:474`/`:839` and `whisper.py:376`/`:422`/`:490`, and
+    `frames.py:296`/`:430`/`:502`/`:867` and `whisper.py:378`/`:424`/`:492`, and
     `tests/test_stderr_blocks_are_fenced.py` is what pins that shape. Nothing in
     THIS file would notice if every one of those fences were removed tomorrow —
     the two files divide the surface by the shape of the fence, not by the
     origin of the value.
 
-    Two of the seven run ffmpeg at `-loglevel info` (`frames.py:450` and `:820`),
+    Seven is the count of `.stderr` sites and NOT the count of `stderr_block`
+    callers, and the two stopped being the same number. There are eight: an
+    ffprobe **stdout** capture is fenced the same way when `get_metadata`
+    refuses a document that is not JSON. It is not in the list above because
+    that list is what the anchor test re-derives, and both AST sweeps that walk
+    for these sites — here and in `test_stderr_blocks_are_fenced.py` — key on
+    the attribute name `stderr`, so neither can see a `.stdout` one. The stdout
+    fence is pinned by `tests/test_metadata_is_untrusted.py` instead. A ninth
+    site reading some third attribute would be invisible to all three.
+
+    Two of the seven run ffmpeg at `-loglevel info` (`frames.py:478` and `:848`),
     where the metadata block is printed on every run, and the other five run at
     `-loglevel error`, where the author's text appears only if ffmpeg quotes it
     back inside an error. An earlier draft of this bullet called the first pair

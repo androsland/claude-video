@@ -47,8 +47,10 @@ Every value written below is inert filler. Nothing here reads a real credential.
 from __future__ import annotations
 
 import email.message
+import email.utils
 import io
 import os
+import time
 import urllib.error
 from pathlib import Path
 
@@ -74,6 +76,47 @@ def audio(tmp_path: Path) -> Path:
     path = tmp_path / "audio.mp3"
     path.write_bytes(b"filler audio bytes")
     return path
+
+
+class _CountingBody:
+    """A response body that serves what it is asked for and counts it.
+
+    A real socket-backed body answers `read()` with no argument by accumulating
+    everything the far end sends into one bytes object. This one cannot: an
+    endless stream would hang the suite, so the unbounded call is answered with
+    `_UNBOUNDED` bytes — large enough that reading it whole is unmistakable in
+    `served`, small enough that the test costs nothing. That substitution is the
+    only artificial thing here, and it is the reason `served` rather than a
+    MemoryError is what gets asserted on.
+    """
+
+    _UNBOUNDED = 4 * 1024 * 1024
+
+    def __init__(self, unit: bytes = b"x") -> None:
+        self.unit = unit
+        self.served = 0
+        self.sizes: list[int | None] = []
+        self.closes = 0
+
+    def read(self, size: int | None = None) -> bytes:
+        self.sizes.append(size)
+        want = self._UNBOUNDED if size is None or size < 0 else size
+        out = (self.unit * (want // len(self.unit) + 1))[:want]
+        self.served += len(out)
+        return out
+
+    def close(self) -> None:
+        # Counted rather than ignored. `addbase` does NOT close the fp it was
+        # handed at construction — verified — so this counter answers exactly
+        # one question: did anything ever close the response, or was it left
+        # for the garbage collector.
+        self.closes += 1
+
+
+def _http_error_with_body(body: _CountingBody) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://example.invalid/x", 500, "boom", email.message.Message(), body
+    )
 
 
 @pytest.fixture
@@ -332,3 +375,317 @@ class TestTheHookTestsDoNotDamageTheProcessTheyRunIn:
         # environment". Seeing it here would mean the parent's variable reached
         # the child, and every hook test would be reading the developer's shell.
         assert "An API key is set in this environment" not in result.stdout
+
+
+class TestAnErrorBodyIsBoundedBeforeItIsRead:
+    """The read is bounded, not only the report.
+
+    `_read_error_body` sliced `[:400]` off the DECODED body, which bounds what
+    gets printed and says nothing about what gets allocated. `exc.read()` with
+    no argument pulls the whole response into memory first — a server answering
+    a 500 with a gigabyte-long body gets the whole gigabyte in before Python
+    takes 400 characters off the front. It is on an error path, so a healthy run
+    never touches it, and the failure is a MemoryError raised inside the handler
+    for the error being reported rather than anything silent. That is still a
+    failure mode a stranger chooses.
+
+    NON-GOALS:
+
+      * This is a resource bound and not a forgery fence. `stderr_line` closed
+        that channel and nothing here reopens it — a body is fenced whether it
+        arrived truncated or whole, and the fence still runs after the slice so
+        it can close a bidi scope the slice orphaned.
+      * `read(n)` is a request, not a guarantee. A stream is free to answer with
+        fewer bytes, and nothing here re-reads to fill the quota, because the
+        report wants a prefix rather than a complete body.
+      * Bounding the read says nothing about the rest of the response. Headers
+        are read by urllib before this function is reached and are not bounded
+        here; a hostile header set is a separate finding with a separate owner.
+      * The 4 MB an unbounded read serves in these tests is a stand-in chosen to
+        terminate. It is not a claim about how large a real hostile body would
+        be — the real number is whatever the far end feels like sending, which
+        is exactly the problem.
+    """
+
+    def test_the_read_asks_for_a_bound(self) -> None:
+        body = _CountingBody()
+        whisper._read_error_body(_http_error_with_body(body))
+        assert body.sizes, "the body was never read at all"
+        # `None` or a negative is the unbounded call. Anything else is a number
+        # this program chose, which is the whole property.
+        assert all(
+            size is not None and size > 0 for size in body.sizes
+        ), f"an unbounded read reached the stream: {body.sizes}"
+
+    def test_the_response_is_closed_even_though_the_read_stopped_short(
+        self,
+    ) -> None:
+        # The regression this bound introduced, and the reason a resource fix
+        # needs a resource test rather than only a size assertion.
+        #
+        # `HTTPResponse` releases its socket from `_close_conn()`, which runs
+        # when a read reaches EOF. The unbounded `exc.read()` this replaced
+        # always reached EOF, so the socket came back on its own. A partial
+        # read never does. Measured against a local server answering 429 with
+        # a 1 MB body: `read()` left the connection released, `read(8192)`
+        # left it held with 1,040,384 bytes still owed.
+        #
+        # It matters here rather than nowhere because `_post_whisper` keeps the
+        # exception alive deliberately — `last_exc, last_detail = exc, detail`
+        # — across the whole retry ladder, including a clamped sleep of up to
+        # MAX_RETRY_DELAY, and past the final SystemExit. Refcounting collects
+        # it eventually, so this is fd lifetime rather than an unbounded leak;
+        # what it costs is a connection held open per chunk, with the far end
+        # still holding a response nobody will ever read.
+        # The exception is held in a local for the length of the assertion,
+        # and that is load-bearing rather than incidental. Written first as
+        # `_read_error_body(_http_error_with_body(body))`, this test PASSED
+        # against the unfixed code: the HTTPError went unreferenced at the end
+        # of the expression, refcounting collected it, and `addbase`'s
+        # finalizer closed the fp. It was measuring the garbage collector.
+        #
+        # Holding the reference is also the production shape. `_post_whisper`
+        # keeps the exception alive on purpose — `last_exc, last_detail = exc,
+        # detail` — precisely so it can be re-reported after the ladder ends,
+        # which is exactly the window in which the socket must not be held.
+        body = _CountingBody()
+        exc = _http_error_with_body(body)
+        whisper._read_error_body(exc)
+        assert body.closes == 1, (
+            "the bounded read left the response open; a partial read never "
+            f"reaches EOF, so nothing released the socket (closes={body.closes})"
+        )
+        assert exc.code == 500, "keeps `exc` alive past the assertion above"
+
+    def test_a_body_that_raises_is_still_closed(self) -> None:
+        # The close has to survive the failure path too, or the one case that
+        # most wants its socket back — a stream that errored mid-read — is the
+        # one case that does not get it.
+        class _Angry(_CountingBody):
+            def read(self, size: int | None = None) -> bytes:
+                raise OSError("connection reset")
+
+        body = _Angry()
+        exc = _http_error_with_body(body)
+        assert whisper._read_error_body(exc) == ""
+        assert body.closes == 1, "a stream that raised was left open"
+        assert exc.code == 500, "keeps `exc` alive past the assertion above"
+
+    def test_a_gigantic_body_does_not_all_reach_memory(self) -> None:
+        body = _CountingBody()
+        whisper._read_error_body(_http_error_with_body(body))
+        assert body.served <= whisper.MAX_ERROR_BODY_BYTES, (
+            f"{body.served} bytes were pulled in for a 400-character report"
+        )
+
+    def test_the_bound_is_wide_enough_for_the_whole_report(self) -> None:
+        # The report is 400 CHARACTERS and the bound is in BYTES, so the bound
+        # has to clear 400 times UTF-8's widest encoding or the fix would have
+        # quietly shortened every multi-byte error message. This is the
+        # must-not-fire half: a bound of 400 passes the two tests above and
+        # fails this one.
+        assert whisper.MAX_ERROR_BODY_BYTES >= 400 * 4
+
+    def test_four_hundred_wide_characters_survive_intact(self) -> None:
+        # Four-byte characters, which is the worst case the arithmetic above is
+        # sized for. All 400 must come back — the bound must not be visible in
+        # the output for any body a human would actually want to read.
+        #
+        # U+1F680 alone, and the "alone" is the correction. This read
+        # `unit="☃🚀"` and called it four-byte characters, which the snowman is
+        # not: U+2603 is three, so the pair averaged 3.5 and 400 of them cost
+        # 1400 bytes rather than the 1600 the comment claims to be exercising.
+        # One codepoint makes the sentence true and makes the arithmetic the
+        # worst case it says it is: 400 × 4 = 1600, against a bound of 8192.
+        body = _CountingBody(unit="🚀".encode())
+        out = whisper._read_error_body(_http_error_with_body(body))
+        assert out.count("🚀") == 400
+
+    def test_a_sequence_cut_by_the_bound_cannot_reach_the_report(self) -> None:
+        # `read(n)` can stop mid-character, and `errors="replace"` turns that
+        # tail into U+FFFD. It is harmless only because the bound clears 400
+        # characters with room to spare, so the damaged tail is always past the
+        # slice. Pinned rather than assumed: a bound tightened to near 400 bytes
+        # would put the replacement character inside the report.
+        #
+        # U+2603, and the width is the whole test rather than decoration. This
+        # used the four-byte rocket, and 8192 is divisible by four — so nothing
+        # was EVER cut mid-character and the assertion below passed for a
+        # reason that had nothing to do with the property it names. It would
+        # have stayed green against a slice that damaged the report. The
+        # snowman is three bytes, 8192 % 3 == 2, and the cut is guaranteed.
+        unit = "☃".encode()
+        body = _CountingBody(unit=unit)
+        out = whisper._read_error_body(_http_error_with_body(body))
+
+        # The anti-vacuity half, asserted rather than reasoned about, so this
+        # cannot silently go hollow again if the bound is ever retuned to a
+        # multiple of three. Measured today: U+FFFD lands at character 2730 of
+        # the decoded capture, which is 2330 past the end of the report.
+        whole = (unit * (whisper.MAX_ERROR_BODY_BYTES // len(unit) + 1))[
+            : whisper.MAX_ERROR_BODY_BYTES
+        ].decode("utf-8", errors="replace")
+        assert "�" in whole, (
+            f"MAX_ERROR_BODY_BYTES ({whisper.MAX_ERROR_BODY_BYTES}) now divides "
+            f"{len(unit)} evenly, so no sequence is cut and the assertion below "
+            "proves nothing — pick a unit width that does not divide it"
+        )
+        assert "�" not in out
+
+    def test_an_empty_body_is_still_reported_as_nothing(self) -> None:
+        # The bound is the only change. A server that says nothing still gets
+        # an empty string rather than a dangling em-dash on the diagnostic.
+        class _Empty(_CountingBody):
+            def read(self, size: int | None = None) -> bytes:
+                self.sizes.append(size)
+                return b""
+
+        assert whisper._read_error_body(_http_error_with_body(_Empty())) == ""
+
+    def test_a_stream_that_raises_is_still_survivable(self) -> None:
+        # The bound sits inside the same try. A body that raises on read gets
+        # an empty report, not an exception thrown from inside the handler for
+        # the exception being reported.
+        class _Angry(_CountingBody):
+            def read(self, size: int | None = None) -> bytes:
+                raise OSError("connection reset")
+
+        assert whisper._read_error_body(_http_error_with_body(_Angry())) == ""
+
+
+# A fixed point to measure deadlines from. Any value works; a literal keeps the
+# tests reading as arithmetic rather than as a race against the wall clock.
+FAKE_NOW = 1_800_000_000.0
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> float:
+    """Pin `time.time` so an HTTP-date has a deadline that does not move."""
+    monkeypatch.setattr(whisper.time, "time", lambda: FAKE_NOW)
+    return FAKE_NOW
+
+
+@pytest.fixture
+def local_zone_is_not_utc() -> object:
+    """Run the body under a local zone that is NOT GMT.
+
+    Without this the naive-datetime test is a no-op wherever the host happens to
+    be at UTC — which is every CI runner. `.timestamp()` on a naive value reads
+    it as local time, so the bug it exists to catch is invisible unless local
+    time and GMT actually differ. Asia/Kolkata is UTC+5:30, chosen because a
+    half-hour offset also catches an implementation that assumes whole hours.
+
+    `time.tzset` is POSIX-only, which matches the rest of this package.
+    """
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is not available on this platform")
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Kolkata"
+    time.tzset()
+    try:
+        if time.timezone == 0 and time.altzone == 0:
+            pytest.skip("this host has no zone database; local time is GMT")
+        yield
+    finally:
+        if before is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = before
+        time.tzset()
+
+
+def _http_date(offset_seconds: float) -> str:
+    return email.utils.formatdate(FAKE_NOW + offset_seconds, usegmt=True)
+
+
+class TestTheServersDeadlineIsHonouredInEitherForm:
+    """RFC 9110 allows `Retry-After` to be a delta OR an HTTP-date.
+
+    `float()` rejects a date, so `Retry-After: Wed, 26 Aug 2026 12:00:00 GMT`
+    fell through to the exponential ladder. The ladder is bounded and correct,
+    so nothing broke — but moviola retried SOONER than the provider asked, and
+    on a strict rate limiter retrying early is how a 429 becomes a ban. Both
+    forms now resolve to the same thing: a number of seconds, clamped by
+    `_bounded_delay` exactly as the delta form already was.
+
+    NON-GOALS, so a green run is not read as more than it is:
+
+      * A date is read against THIS machine's clock, and nothing here can tell
+        clock skew from a genuine deadline. That is survivable only because the
+        answer is clamped: a server whose clock is a day ahead buys
+        `MAX_RETRY_DELAY`, not a day. The clamp is the safety property; the
+        parse is only an improvement in politeness.
+      * A date at or before now falls back to the ladder rather than sleeping
+        zero, which is the same contract `Retry-After: 0` already had. It is
+        deliberately NOT "retry immediately" — a server naming a deadline that
+        has passed is not evidence its rate limiter agrees.
+      * Honouring the header does not make the request succeed. A rate-limited
+        run still gives up at `MAX_429_RETRIES`; it just gives up on the
+        server's schedule instead of its own.
+      * This says nothing about any other date-valued header. `Retry-After` is
+        the only one this program reads.
+    """
+
+    def test_a_date_in_the_future_is_read_as_a_delay(
+        self, frozen_clock: float
+    ) -> None:
+        exc = _http_error(429, {"Retry-After": _http_date(30)})
+        assert whisper._retry_after(exc) == pytest.approx(30.0, abs=1.0)
+
+    def test_a_date_far_out_is_clamped_like_any_other_delay(
+        self, frozen_clock: float
+    ) -> None:
+        # The clamp is what makes reading a stranger's clock safe at all.
+        exc = _http_error(429, {"Retry-After": _http_date(86_400)})
+        assert whisper._retry_after(exc) == whisper.MAX_RETRY_DELAY
+
+    def test_a_date_with_no_zone_is_read_as_gmt(
+        self, frozen_clock: float, local_zone_is_not_utc: object
+    ) -> None:
+        # RFC 9110's IMF-fixdate is GMT by definition, and `parsedate_to_datetime`
+        # hands back a NAIVE datetime when the zone is missing. Calling
+        # `.timestamp()` on a naive value silently interprets it as LOCAL time,
+        # so on a machine at UTC+5:30 a deadline 30 seconds out reads as five and
+        # a half hours in the PAST and falls back to the ladder. This test is the
+        # reason the zone is attached explicitly rather than left to the default,
+        # and the reason it pins the local zone rather than trusting the host's:
+        # on a UTC runner — which is every CI runner — local time and GMT agree
+        # and the bug is invisible.
+        stamped = _http_date(30).replace(" GMT", "")
+        exc = _http_error(429, {"Retry-After": stamped})
+        assert whisper._retry_after(exc) == pytest.approx(30.0, abs=1.0)
+
+    def test_a_date_already_past_falls_back_to_the_ladder(
+        self, frozen_clock: float
+    ) -> None:
+        # Same contract as `Retry-After: 0`, and deliberately not "retry now".
+        exc = _http_error(429, {"Retry-After": _http_date(-3600)})
+        assert whisper._retry_after(exc) is None
+
+    def test_a_header_that_is_neither_form_still_falls_back(self) -> None:
+        exc = _http_error(429, {"Retry-After": "soon-ish"})
+        assert whisper._retry_after(exc) is None
+
+    def test_the_seconds_form_is_untouched(self) -> None:
+        # The must-not-fire half. Adding a second parse must not disturb the
+        # first one, and the delta form is the one every real provider sends.
+        assert whisper._retry_after(_http_error(429, {"Retry-After": "5"})) == 5.0
+        assert whisper._retry_after(_http_error(429, {"Retry-After": "0"})) is None
+        assert (
+            whisper._retry_after(_http_error(429, {"Retry-After": "86400"}))
+            == whisper.MAX_RETRY_DELAY
+        )
+
+    def test_a_bare_number_is_never_read_as_a_date(
+        self, frozen_clock: float
+    ) -> None:
+        # Pins the OUTCOME, not the mechanism, and the distinction is worth
+        # stating: `_parsedate_tz` needs five or more whitespace- or
+        # comma-separated fields before it produces a date, so a bare number
+        # cannot parse as one and the branch order is not what saves this.
+        # Under a frozen clock, so a header that somehow did resolve as a date
+        # would land nowhere near 5.0 and this would say so.
+        assert whisper._retry_after(_http_error(429, {"Retry-After": "5"})) == 5.0
+
+    def test_a_missing_header_is_still_no_answer_at_all(self) -> None:
+        assert whisper._retry_after(_http_error(429)) is None

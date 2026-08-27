@@ -21,7 +21,12 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-from untrusted import finite_float, stderr_block, stderr_line  # noqa: E402
+from untrusted import (  # noqa: E402
+    finite_float,
+    json_object,
+    stderr_block,
+    stderr_line,
+)
 
 
 MAX_FPS = 2.0
@@ -291,7 +296,30 @@ def get_metadata(video_path: str) -> dict:
             + stderr_block(result.stderr, source="ffprobe")
         )
 
-    data = json.loads(result.stdout or "{}")
+    # ffprobe's stdout is a value this program did not write, and until this
+    # guard it was read as though it were: `json.loads(...)` straight into
+    # `.get()`. `json_object` answers None for all three ways that goes wrong —
+    # text that is not JSON, valid JSON that is not an object, and a document
+    # nested past the recursion limit — and this site treats None as fatal.
+    #
+    # Fatal rather than empty, because carrying on means a report stating a
+    # duration of zero as a fact about a video nothing successfully probed. It
+    # is the same call the returncode guard four lines above makes, for the same
+    # reason: a probe answering in a format that is not its own is evidence
+    # about what is on PATH, not evidence about the video.
+    #
+    # `or "{}"` predates this and survives it — a probe that exits 0 and writes
+    # NOTHING is a different claim from one that writes something else, and only
+    # the second is what changed here. `.strip()` puts whitespace-only output on
+    # the "nothing" side of that line, where it belongs and where it also keeps
+    # `stderr_block`'s empty-capture branch (which names stderr, not stdout)
+    # unreachable from this call.
+    data = json_object(result.stdout.strip() or "{}")
+    if data is None:
+        raise SystemExit(
+            "ffprobe exited 0 but did not write a JSON object:\n"
+            + stderr_block(result.stdout, source="ffprobe")
+        )
     streams = data.get("streams", [])
     fmt = data.get("format", {})
     video_stream = next((s for s in streams if s.get("codec_type") == "video"), {})

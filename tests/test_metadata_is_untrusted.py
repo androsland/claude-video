@@ -33,7 +33,7 @@ third arrived last. A Python int has no maximum, `float()` raises
 `json.loads` produces exactly that shape from a bare JSON integer literal. So
 the guard raised the very exception it exists to prevent, on the one producer
 whose input is real JSON rather than a string: `_read_info` at
-`download.py:178`. `TestTheGuardItself::test_an_oversized_int_becomes_the_default`
+`download.py:200`. `TestTheGuardItself::test_an_oversized_int_becomes_the_default`
 is the pin, and it asserts the premise (`float(10**400)` is an `OverflowError`)
 alongside the fix so a future Python that changed that would fail loudly here.
 
@@ -88,9 +88,11 @@ Every value written below is inert filler. Nothing here reads a real credential.
 """
 from __future__ import annotations
 
+import decimal
 import json
 import math
 import subprocess
+import sys
 import types
 from pathlib import Path
 
@@ -166,7 +168,7 @@ class TestTheGuardItself:
         # guard written to prevent it.
         #
         # Reachable, and only on the yt-dlp half: `_read_info` is
-        # `json.loads` over `video.info.json` (download.py:178), and a bare
+        # `json.loads` over `video.info.json` (download.py:200), and a bare
         # JSON integer literal becomes an unbounded Python int. ffprobe's JSON
         # writer emits `duration` and `size` as strings, and a long digit
         # STRING is safe by a different route — `float()` returns `inf` and
@@ -185,6 +187,58 @@ class TestTheGuardItself:
 
     def test_the_default_defaults_to_zero(self):
         assert untrusted.finite_float("N/A") == 0.0
+
+
+class TestTheGuardCoversItsOwnDefault:
+    """A function named for finiteness must not hand back a non-finite number.
+
+    `default` was returned unexamined from both exit paths, so
+    `finite_float(x, float("inf"))` answered inf out of the guard that exists to
+    reject inf. Latent rather than live — every call site in the tree passes
+    `0.0`, and the one that passes a computed value nests a `finite_float` call
+    the same guard already vetted — but the name is the promise the next caller
+    reads, and nothing enforced it.
+    """
+
+    @pytest.mark.parametrize(
+        "bad",
+        [float("inf"), float("-inf"), float("nan")],
+        ids=["inf", "neg-inf", "nan"],
+    )
+    def test_a_non_finite_default_is_refused(self, bad):
+        # ValueError, not a coerced 0.0. `value` is a stranger's string and gets
+        # coerced; `default` is a literal a moviola author typed, so a bad one
+        # is this program's bug and silently repairing it hides the bug at the
+        # only moment anyone could see it.
+        with pytest.raises(ValueError, match="default"):
+            untrusted.finite_float("N/A", bad)
+
+    def test_the_refusal_does_not_wait_for_bad_data(self):
+        # Checked on entry, not at the point of return. A lazy check only fires
+        # when `value` also happens to be unparseable, so a caller with an
+        # infinite default would ship green and fail the first time a stranger
+        # sent something odd — the defect surfacing far from the line that
+        # caused it, which is exactly the shape this module exists to stop.
+        with pytest.raises(ValueError, match="default"):
+            untrusted.finite_float("1.5", float("inf"))
+
+    @pytest.mark.parametrize(
+        "good", [0.0, 7.5, -4.0, 0, 10**300], ids=["zero", "float", "negative", "int", "large"]
+    )
+    def test_every_finite_default_still_passes(self, good):
+        # The refusal is finiteness and nothing else. Negative and very large
+        # defaults are legitimate and must not be caught by it: magnitude and
+        # sign are separate findings with separate owners, and a guard that
+        # quietly took them too would be a behaviour change wearing a fix's
+        # clothes.
+        assert untrusted.finite_float("N/A", good) == good
+
+    def test_a_default_that_is_not_a_number_at_all_is_refused(self):
+        # `math.isfinite(None)` raises TypeError, which would escape as a
+        # different exception naming the math module. The guard answers for its
+        # own parameter rather than letting stdlib do it in a worse voice.
+        with pytest.raises(ValueError, match="default"):
+            untrusted.finite_float("N/A", "0.0")
 
 
 class TestFfprobeMetadata:
@@ -331,3 +385,361 @@ class TestTheReachabilityCorrection:
         assert "-print_format" in seen[0]
         assert seen[0][seen[0].index("-print_format") + 1] == "json"
         assert "-show_optional_fields" not in seen[0]
+
+
+def _stub_stdout(monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
+    """Like `_stub_ffprobe`, but the stdout is a RAW string rather than a payload.
+
+    `_stub_ffprobe` takes a dict and serialises it, so it can only ever produce
+    valid JSON objects — which is precisely the assumption under test here.
+    """
+    monkeypatch.setattr(frames.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(
+        frames.subprocess,
+        "run",
+        lambda *a, **k: types.SimpleNamespace(
+            returncode=0, stdout=stdout, stderr=""
+        ),
+    )
+
+
+class TestTheDefaultGuardCatchesEveryWayItsOwnCheckCanFail:
+    """`math.isfinite` raises three things, and the guard named two.
+
+    The guard reads `except (TypeError, OverflowError)` and its comment states
+    that pair as the complete set: "Both answer False rather than escaping as
+    themselves". There is a third. `math.isfinite` converts its argument via
+    `__float__`, and a type whose conversion itself fails raises from inside
+    that conversion — `Decimal("sNaN")` is the reachable example, because IEEE
+    754 requires a signalling NaN to raise rather than quietly become a quiet
+    NaN.
+
+    What it costs is small and worth stating exactly: the escaping exception is
+    a `ValueError`, which is the same TYPE the guard would have raised anyway,
+    so no caller sees a different class of failure and no value comes back
+    wrong. What changes is the message. The guard exists so that a caller
+    debugging this reads one sentence naming `default`; the escape hands them
+    `cannot convert signaling NaN to float` from the math module instead, which
+    names neither the parameter nor the function that refused it.
+
+    NON-GOALS:
+
+      * **Not a claim that anything in the tree passes a Decimal.** Nothing
+        does; every `default` is the literal 0.0 or a nested `finite_float`
+        result. This pins the guard's own completeness, not a live call path.
+      * **Not an argument that the guard should return False here.** Refusing
+        is right — a non-finite default is this program's bug. The property is
+        that the refusal comes from the raise below, with its message, rather
+        than from the conversion inside the check.
+      * **It does not enumerate every type with a failing `__float__`.** A
+        custom class raising anything at all from `__float__` is the general
+        case and this catches one instance of it. The fix is the tuple, so the
+        general case is covered by the code even though the test names one.
+    """
+
+    def test_a_signalling_nan_default_is_refused_by_the_guard_not_by_math(
+        self,
+    ) -> None:
+        # Both paths raise ValueError, so the type alone proves nothing — the
+        # message is the assertion, because the message is what differs.
+        with pytest.raises(ValueError) as caught:
+            untrusted.finite_float("1.5", decimal.Decimal("sNaN"))
+        assert "non-finite default" in str(caught.value), (
+            "the check's own conversion raised before the guard could, so the "
+            f"caller reads the math module's words instead: {caught.value}"
+        )
+
+    def test_an_oversized_int_default_is_still_refused(self) -> None:
+        # The arm that already worked, kept beside the new one so a fix that
+        # widened the tuple by REPLACING a member instead of adding to it
+        # cannot pass. `math.isfinite(10**400)` raises OverflowError.
+        with pytest.raises(ValueError, match="non-finite default"):
+            untrusted.finite_float("1.5", 10**400)
+
+
+class TestTheDocumentIsUntrustedAndNotOnlyItsFields:
+    """One trust boundary up from everything above.
+
+    `finite_float` asks whether a VALUE inside ffprobe's document is a number.
+    Nothing asked whether there was a document. `get_metadata` read
+    `json.loads(result.stdout or "{}")` and called `.get()` on the result, and
+    two shapes went through:
+
+      * `json.loads` RAISES `ValueError` when stdout is not JSON at all — a
+        shim, a wrapper printing a warning, a busybox applet, anything on PATH
+        answering to the name. Nothing caught it, so the run died of a
+        `JSONDecodeError` naming a column of a string the user never saw.
+      * `json.loads` SUCCEEDS on `[]`, `3`, `"text"`, `null` and `true`. All
+        are valid JSON and none is an object. This is the shape that reads as
+        safe — the parse worked — and the failure lands one line later as
+        `AttributeError: 'list' object has no attribute 'get'`, naming a dict
+        method rather than the subprocess that wrote the document.
+
+    A third arrived with the guard rather than before it: `json.loads` raises
+    `RecursionError`, not `ValueError`, on a document nested past the
+    interpreter's limit, which is roughly a thousand deep and costs a
+    two-kilobyte string to reach.
+
+    All three now answer the same thing — this is not the document ffprobe
+    promised — and the run stops rather than carrying on, with what was
+    actually written fenced and attributed. Stopping is the same call the
+    returncode guard four lines above already makes: a probe that answers with
+    something other than its own format is not evidence about the video, it is
+    evidence about what is on PATH, and a report built from `{}` would state a
+    duration of zero as a fact.
+
+    NON-GOALS, so a green run is not read as more than it is:
+
+      * **Empty stdout is unchanged and still means an empty document.**
+        `or "{}"` predates this and survives it: a probe that exits 0 and says
+        nothing yields metadata with everything defaulted, exactly as before.
+        That is a different claim from "said something that is not JSON", and
+        conflating them would have changed a behaviour this finding is not
+        about. The zero-duration report it produces is filed separately.
+
+      * **Shape, not contents.** A document that IS an object passes here
+        whatever is inside it. `{"streams": "not a list"}` is somebody else's
+        problem — `next((s for s in ...))` over a string yields characters —
+        and this test says nothing about it.
+
+      * **It cannot see a probe that lies consistently.** A shim emitting a
+        well-formed ffprobe document describing a different video passes every
+        assertion below. The guard is about whether the bytes are the shape
+        that was promised, never about whether they are true.
+
+      * **The reachability story is unchanged and is still low.** A real
+        ffprobe under `-v error -print_format json` either writes JSON or exits
+        non-zero, and the returncode guard already owns the second half. This
+        is defence in depth on the same footing as the `finite_float` guards,
+        and TODOS.md records it that way.
+    """
+
+    NOT_JSON = "ffprobe: unrecognized option '-show_streams'"
+
+    def test_stdout_that_is_not_json_is_refused_rather_than_raised_through(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            _stub_stdout(mp, self.NOT_JSON)
+            with pytest.raises(SystemExit) as caught:
+                frames.get_metadata(str(tmp_path / "video.mp4"))
+        message = str(caught.value)
+        assert "ffprobe" in message, message
+        # The point of the guard is that the diagnostic names the subprocess,
+        # not the json module. A traceback naming `json/decoder.py` is what
+        # this replaces.
+        assert "JSONDecodeError" not in message, message
+
+    def test_the_refusal_shows_what_was_actually_written(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            _stub_stdout(mp, self.NOT_JSON)
+            with pytest.raises(SystemExit) as caught:
+                frames.get_metadata(str(tmp_path / "video.mp4"))
+        assert self.NOT_JSON in str(caught.value)
+
+    def test_the_capture_is_fenced_like_every_other_foreign_block(
+        self, tmp_path: Path
+    ) -> None:
+        # Same instrument the seven stderr sites use, on the one stdout that
+        # ever reaches a diagnostic. A foreign line must not reach column zero.
+        with pytest.MonkeyPatch.context() as mp:
+            _stub_stdout(mp, self.NOT_JSON)
+            with pytest.raises(SystemExit) as caught:
+                frames.get_metadata(str(tmp_path / "video.mp4"))
+        lines = str(caught.value).split("\n")
+        assert not lines[0].startswith(untrusted.BLOCK_PREFIX), lines[0]
+        assert "ffprobe" in lines[1], lines[1]
+        assert any(
+            line.startswith(untrusted.BLOCK_PREFIX) and self.NOT_JSON in line
+            for line in lines
+        ), lines
+
+    def test_a_forged_line_cannot_reach_column_zero(self, tmp_path: Path) -> None:
+        # The reason the fence is here and not a plain f-string: the capture is
+        # multi-line and a stranger chose every line of it.
+        forged = "not json\nffprobe failed:\n{}"
+        with pytest.MonkeyPatch.context() as mp:
+            _stub_stdout(mp, forged)
+            with pytest.raises(SystemExit) as caught:
+                frames.get_metadata(str(tmp_path / "video.mp4"))
+        body = str(caught.value).split("\n")[2:]
+        assert body, str(caught.value)
+        for line in body:
+            assert line.startswith(untrusted.BLOCK_PREFIX) or line.startswith("--"), (
+                f"a foreign line reached column zero: {line!r}"
+            )
+
+    @pytest.mark.parametrize(
+        "stdout",
+        ["[]", '["a", "b"]', "3", "3.5", '"a string"', "null", "true"],
+        ids=["array", "array-of-strings", "int", "float", "string", "null", "bool"],
+    )
+    def test_valid_json_that_is_not_an_object_is_refused(
+        self, stdout: str, tmp_path: Path
+    ) -> None:
+        # The half that reads as safe. The parse SUCCEEDS; `.get()` is what
+        # fails, one line later, naming a dict method.
+        with pytest.MonkeyPatch.context() as mp:
+            _stub_stdout(mp, stdout)
+            with pytest.raises(SystemExit) as caught:
+                frames.get_metadata(str(tmp_path / "video.mp4"))
+        assert "ffprobe" in str(caught.value)
+
+    def test_the_failure_is_not_an_attribute_error(self, tmp_path: Path) -> None:
+        # Pinned by name, because `AttributeError` is what a reader of the
+        # original code would have to guess at from a traceback.
+        #
+        # `pytest.raises` rather than a `try` with a clause for `SystemExit` and
+        # a clause for `AttributeError`. That shape looks like it covers the
+        # same ground and has no branch for the third outcome — no exception at
+        # all — so it falls out of both clauses and passes with nothing
+        # asserted. Measured rather than reasoned: degrading the refusal in
+        # `get_metadata` to `data = {}` makes this input return a metadata dict,
+        # and under exactly that mutation the sibling above fired on all seven
+        # ids while this test stayed green.
+        #
+        # `raises` covers the missing branch and the named one together: no
+        # exception is `Failed`, and an `AttributeError` propagates out of the
+        # block as itself rather than being caught. The two assertions below
+        # cover the remaining shape — a `.get()` failure caught somewhere and
+        # re-raised as a `SystemExit`, which would satisfy `raises` while being
+        # the exact defect this is named for.
+        with pytest.MonkeyPatch.context() as mp:
+            _stub_stdout(mp, "[]")
+            with pytest.raises(SystemExit) as caught:
+                frames.get_metadata(str(tmp_path / "video.mp4"))
+        assert not isinstance(caught.value.__cause__, AttributeError), caught.value
+        assert not isinstance(caught.value.__context__, AttributeError), caught.value
+
+    def test_a_document_nested_past_the_interpreters_limit_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        # `json.loads` raises RecursionError here, not ValueError, so a guard
+        # catching only the latter would let this through unchanged. Two
+        # kilobytes of brackets is enough — the limit is ~1000 and the parse
+        # bails in well under a millisecond.
+        depth = sys.getrecursionlimit() * 2
+        bomb = "[" * depth + "]" * depth
+        with pytest.MonkeyPatch.context() as mp:
+            _stub_stdout(mp, bomb)
+            with pytest.raises(SystemExit) as caught:
+                frames.get_metadata(str(tmp_path / "video.mp4"))
+        assert "ffprobe" in str(caught.value)
+
+    def test_an_empty_stdout_still_means_an_empty_document(
+        self, tmp_path: Path
+    ) -> None:
+        # The must-not-fire half, and the behaviour this change deliberately
+        # leaves alone. `or "{}"` is older than the guard and outlives it.
+        with pytest.MonkeyPatch.context() as mp:
+            _stub_stdout(mp, "")
+            meta = frames.get_metadata(str(tmp_path / "video.mp4"))
+        assert meta["duration_seconds"] == 0.0
+        assert meta["width"] is None
+        assert meta["has_audio"] is False
+
+    def test_whitespace_only_stdout_counts_as_nothing_written(
+        self, tmp_path: Path
+    ) -> None:
+        # The seam between "wrote nothing" and "wrote something else". A newline
+        # is not a claim about the video, so it belongs on the empty side — and
+        # it has to be put there explicitly, because `"\n" or "{}"` is `"\n"`.
+        # It is also what keeps `stderr_block`'s empty-capture branch out of
+        # reach from this call site: that branch says "wrote nothing to stderr",
+        # which is the wrong stream for the one stdout that reaches a
+        # diagnostic here.
+        for blank in ("\n", "   ", "\r\n\t "):
+            with pytest.MonkeyPatch.context() as mp:
+                _stub_stdout(mp, blank)
+                meta = frames.get_metadata(str(tmp_path / "video.mp4"))
+            assert meta["duration_seconds"] == 0.0, blank
+            assert meta["width"] is None, blank
+
+    def test_an_object_is_read_exactly_as_before(self, tmp_path: Path) -> None:
+        # The other must-not-fire half. A guard that started refusing real
+        # documents would fail here rather than pass quietly.
+        with pytest.MonkeyPatch.context() as mp:
+            _stub_ffprobe(
+                mp,
+                {
+                    "format": {"duration": "12.5", "size": "4096"},
+                    "streams": [
+                        {
+                            "codec_type": "video",
+                            "codec_name": "h264",
+                            "width": 640,
+                            "height": 480,
+                        },
+                        {"codec_type": "audio", "codec_name": "aac"},
+                    ],
+                },
+            )
+            meta = frames.get_metadata(str(tmp_path / "video.mp4"))
+        assert meta == {
+            "duration_seconds": 12.5,
+            "width": 640,
+            "height": 480,
+            "codec": "h264",
+            "size_bytes": 4096,
+            "has_audio": True,
+        }
+
+
+class TestTheGuardIsALeafAndDecidesNothing:
+    """`untrusted.json_object` answers the shape question and no other.
+
+    It lives beside `finite_float` for the reason AGENTS.md gives: a guarded
+    parse of somebody else's output belongs in the leaf module, not in the
+    caller that happens to need it first. What it deliberately does NOT do is
+    choose what a failure means — it answers `None`, and `get_metadata` decides
+    that `None` is fatal. A caller that wanted to carry on with no metadata
+    would read the same `None` and do the opposite, which is why the policy is
+    not in here.
+
+    NON-GOALS:
+
+      * **It is not a schema check.** `{}` and a document with every key
+        missing are the same answer. What is INSIDE an object is
+        `finite_float`'s problem and the caller's.
+      * **It is not a size bound.** A hundred-megabyte JSON object parses and
+        is returned. The bound that matters for this program is the one on
+        `subprocess.run`'s capture, which is upstream of here and is not this
+        function's to give.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        ["{}", '{"a": 1}', '{"nested": {"deep": [1, 2, 3]}}'],
+        ids=["empty", "flat", "nested"],
+    )
+    def test_an_object_comes_back_as_a_dict(self, text: str) -> None:
+        assert untrusted.json_object(text) == json.loads(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        ["", "   ", "not json", "{", '{"a": }', "[]", "3", '"s"', "null", "true"],
+        ids=[
+            "empty", "blank", "prose", "truncated", "malformed",
+            "array", "number", "string", "null", "bool",
+        ],
+    )
+    def test_anything_else_is_none(self, text: str) -> None:
+        assert untrusted.json_object(text) is None
+
+    def test_a_value_that_is_not_text_at_all_is_none(self) -> None:
+        # `json.loads(None)` raises TypeError rather than ValueError, and a
+        # caller reading an absent attribute is how it arrives.
+        assert untrusted.json_object(None) is None
+        assert untrusted.json_object(object()) is None
+
+    def test_a_nesting_bomb_is_none_rather_than_a_recursion_error(self) -> None:
+        depth = sys.getrecursionlimit() * 2
+        assert untrusted.json_object("[" * depth + "]" * depth) is None
+
+    def test_the_bytes_form_is_accepted(self) -> None:
+        # `json.loads` takes bytes, and a caller reading a pipe rather than a
+        # `text=True` capture would hand it bytes. Answering None for a valid
+        # object would be a false alarm, not a refusal.
+        assert untrusted.json_object(b'{"a": 1}') == {"a": 1}

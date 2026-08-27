@@ -13,6 +13,8 @@ this module keeps working when that package is absent.
 """
 from __future__ import annotations
 
+import datetime
+import email.utils
 import io
 import json
 import math
@@ -582,6 +584,19 @@ RETRY_BASE_DELAY = 2.0
 # `Retry-After: 86400` is a real answer that real services give.
 MAX_RETRY_DELAY = 60.0
 
+# The most of an error body this program will pull into memory. `exc.read()`
+# with no argument accumulates the whole response first and slices afterwards,
+# so a server answering a failing request with a gigabyte-long body gets the
+# whole gigabyte in before 400 characters are taken off the front — a
+# MemoryError raised inside the handler for the error being reported.
+#
+# In BYTES, while the report is in CHARACTERS, and the gap between them is the
+# whole reason this is not 400. UTF-8 spends up to four bytes on one character,
+# so 400 characters need 1600 bytes in the worst case; 8 KB clears that with
+# room to spare, which is also what keeps the sequence `read()` may cut in half
+# safely past the slice rather than inside it.
+MAX_ERROR_BODY_BYTES = 8192
+
 
 def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> dict:
     fields = {
@@ -690,11 +705,54 @@ def _read_error_body(exc: urllib.error.HTTPError) -> str:
     body cut at 400 characters can lose the terminator for a bidi scope opened
     inside the first 400, and closing what the truncated text opens is exactly
     what `balance_bidi` is for.
+
+    The READ is bounded as well as the report, and they are separate bounds
+    doing separate jobs. `MAX_ERROR_BODY_BYTES` decides what is allocated;
+    `[:400]` decides what is printed. Slicing alone bounded only the second, so
+    the size of the allocation was the far end's choice.
+
+    The bound is why the close is here. A bounded read buys a memory ceiling
+    and, on its own, pays for it with a held connection — see the `finally`
+    below. The two belong together and neither is complete alone.
+
+    NON-GOALS:
+
+      * `read(n)` asks for n bytes and is free to be given fewer, and this does
+        not re-read to fill the quota. The report wants a prefix, not a
+        complete body, and a short read on a failing connection is the ordinary
+        case rather than an error to recover from.
+      * Only the ERROR path is bounded. `_post_whisper`'s success path still
+        reads the 2xx body whole, and the same argument applies to it verbatim
+        — it is a deliberate, filed gap rather than a claim of coverage, and it
+        is on the branch that reads the response, not here.
     """
     try:
-        body = exc.read()
+        body = exc.read(MAX_ERROR_BODY_BYTES)
     except Exception:
         return ""
+    finally:
+        # `HTTPResponse` releases its socket from `_close_conn()`, which runs
+        # when a read reaches EOF. The unbounded `exc.read()` this replaced
+        # always reached EOF, so the connection came back without anyone
+        # asking; `read(n)` stops short by design and never does. Bounding the
+        # allocation therefore traded a memory ceiling for a held connection,
+        # and this is the other half of that trade rather than tidiness.
+        #
+        # Measured against a local server answering 429 with a 1 MB body:
+        # `read()` left the socket released, `read(8192)` left it held with
+        # 1,040,384 bytes still owed. `_post_whisper` keeps the exception alive
+        # across the whole ladder — `last_exc, last_detail = exc, detail` — so
+        # the window is a clamped sleep of up to MAX_RETRY_DELAY per attempt,
+        # once per chunk, not a moment.
+        #
+        # In a `finally` because the stream that raised mid-read is the one
+        # that most wants its socket back. Under its own `except` because this
+        # is best-effort cleanup on an error path: a close that fails must not
+        # replace the caller's diagnostic with a traceback about the cleanup.
+        try:
+            exc.close()
+        except Exception:
+            pass
     if not body:
         return ""
     try:
@@ -719,13 +777,78 @@ def _bounded_delay(seconds: float) -> float:
     return min(seconds, MAX_RETRY_DELAY)
 
 
+def _seconds_until(http_date: str) -> float | None:
+    """An HTTP-date read as a number of seconds from now, or None.
+
+    RFC 9110 allows `Retry-After` to be either a delta or an IMF-fixdate, and
+    only the delta form is a number. This turns the other form into one.
+
+    The zone is attached explicitly when the header omits it, and that line is
+    load-bearing rather than defensive. `parsedate_to_datetime` hands back a
+    NAIVE datetime for a zoneless date, `.timestamp()` reads a naive value as
+    LOCAL time, and IMF-fixdate is GMT by definition — so on a machine east of
+    Greenwich a deadline seconds away would resolve hours into the past and be
+    discarded. The bug is invisible wherever local time IS GMT, which is every
+    CI runner, so the test that covers it pins a non-UTC zone of its own.
+
+    NON-GOAL: **the second `except` below is unreachable, and it is unreachable
+    BECAUSE of that zone line rather than independently of it.** Once a value is
+    aware, `datetime.timestamp()` is `(self - epoch).total_seconds()` — pure
+    arithmetic over a range that ends at year 9999, with no call into the
+    platform's clock. Measured on CPython 3.10 / x86_64 / Linux with the C
+    accelerator: `datetime.min` and `datetime.max` both answer, at UTC and at
+    the ±14h offset extremes, and only the NAIVE form raises. The other end is
+    closed too — `parsedate_to_datetime` refuses `year 99999` with `ValueError`
+    before this is reached at all. So it is not the 32-bit `time_t` guard it
+    looks like; it is the coupling guard for the two lines above, and what it
+    catches is a future edit that makes the zone attachment conditional. It is
+    deliberately unexercised: a test for it would have to construct a naive
+    out-of-range datetime that this function cannot receive.
+    """
+    try:
+        deadline = email.utils.parsedate_to_datetime(http_date)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=datetime.timezone.utc)
+    try:
+        return deadline.timestamp() - time.time()
+    except (OverflowError, OSError, ValueError):
+        # A year outside the platform's epoch range. Unrepresentable is not
+        # "retry now" — it is no usable answer, which is what None means here.
+        return None
+
+
 def _retry_after(exc: urllib.error.HTTPError) -> float | None:
     """The server's requested wait, clamped — or None to use our own ladder.
 
-    NON-GOAL: RFC 9110 also allows an HTTP-date here. `float()` rejects one, so
-    a date-form header falls back to the exponential ladder rather than being
-    honoured. That is a deliberate under-read: the ladder is bounded and correct,
-    and a date needs a clock comparison this function has no business doing.
+    Both of RFC 9110's forms are honoured: a delta in seconds, and an IMF-fixdate
+    naming the moment the wait expires. The delta is tried first because it is
+    the form every real provider sends and the cheaper parse.
+
+    That order is NOT what makes `Retry-After: 5` mean five seconds. Checked
+    rather than assumed: `_parsedate_tz` needs at least five whitespace- or
+    comma-separated fields before it will produce a date, so a bare number
+    cannot parse as one and swapping the two branches changes no answer. The
+    ordering is for whoever reads this next, and the KILL harness records the
+    swap in its must-PASS half rather than pretending it is a defect. Measured
+    on CPython 3.10; the field-count requirement is structural to that parser
+    rather than version-specific, but 3.10 is the version actually run here.
+
+    NON-GOALS:
+
+      * A date is read against THIS machine's clock, and nothing here can tell
+        clock skew from a genuine deadline. That is survivable only because the
+        answer goes through `_bounded_delay` like any other: a server whose clock
+        is a day fast buys `MAX_RETRY_DELAY`, not a day. The clamp is the safety
+        property; the parse is an improvement in politeness.
+      * A deadline at or before now falls back to the ladder rather than sleeping
+        zero — the same contract the delta form already gave `Retry-After: 0`. It
+        is deliberately not "retry immediately": a server naming a deadline that
+        has already passed is not evidence that its rate limiter agrees.
+      * Honouring the header does not make the request succeed. A rate-limited
+        run still gives up at MAX_429_RETRIES; it gives up on the server's
+        schedule instead of its own.
     """
     header = exc.headers.get("Retry-After") if getattr(exc, "headers", None) else None
     if not header:
@@ -733,7 +856,10 @@ def _retry_after(exc: urllib.error.HTTPError) -> float | None:
     try:
         seconds = float(header)
     except ValueError:
-        return None
+        parsed = _seconds_until(header.strip())
+        if parsed is None:
+            return None
+        seconds = parsed
     if seconds != seconds or seconds <= 0:
         return None
     return _bounded_delay(seconds)
