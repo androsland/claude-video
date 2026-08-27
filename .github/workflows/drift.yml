@@ -1,0 +1,114 @@
+name: Dependency drift
+
+# The other half of requirements-ci.txt, and the reason pinning does not mean
+# ignoring. tests.yml installs a hash-pinned set, so a red run there is this
+# repository's own doing and nothing else's. This job installs the same two
+# packages UNPINNED, weekly, so upstream movement is still detected — reported
+# on its own schedule rather than landing in somebody's pull request.
+#
+# It must never gate a pull request, which is why there is no `pull_request`
+# trigger and no `push` trigger here. A red run is news about PyPI, not a
+# verdict on a diff, and wiring it into a merge decision hands the merge button
+# to whoever publishes upstream next. tests/test_ci_runs_the_whole_suite.py
+# holds the other end: this file is named in NOT_THE_SUITE_WORKFLOW with that
+# reason, which is what keeps it from being read as the gate.
+#
+# `workflow_dispatch` is here so the question can be asked deliberately — after
+# a yt-dlp release, or before bumping the pins — without waiting for Monday.
+#
+# NON-GOALS. It cannot tell WHICH dependency moved: it installs both unpinned
+# and runs one suite, so a red run means "something upstream changed", and
+# `pip list` in the install step is what names the versions to whoever reads
+# the log. It says nothing about a dependency that moved without breaking
+# anything, which is most of them. And nothing here opens an issue or notifies
+# anybody — a scheduled workflow's failure is visible in the Actions tab and
+# in GitHub's own scheduled-run email, and that is the whole notification
+# story until somebody wants more.
+
+on:
+  # No `push` and no `pull_request` here, deliberately — and the absence is
+  # ASSERTED by test_it_does_not_gate_a_pull_request rather than left to this
+  # comment to promise. This job installs UNPINNED, so a red run is news about
+  # PyPI rather than a verdict on a diff; gating on it would hand the merge
+  # button to whoever publishes upstream next. `pull_request_target` is out for
+  # the same reason twice over — it is the more dangerous spelling of the same
+  # mistake, running against the base repository's token.
+  schedule:
+    # 06:00 UTC on Mondays. Weekly rather than nightly because what it watches
+    # moves on the order of weeks — yt-dlp publishes roughly that often — and a
+    # scheduled job nobody reads is worse than no scheduled job.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  # Not keyed on the ref: this only ever runs on the default branch, and two
+  # overlapping drift runs would be answering the same question twice.
+  group: drift
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  unpinned:
+    name: pytest against the latest published dependencies
+    runs-on: ubuntu-latest
+    # The same cap as tests.yml and the same arithmetic — GitHub's default is
+    # 360 MINUTES, which is what a hung apt mirror actually consumes before
+    # anybody notices. Restated rather than cross-referenced because this job's
+    # slow case is a DIFFERENT one: it resolves versions over the network
+    # instead of installing a fixed set, so a slow PyPI resolve is the thing
+    # ten minutes has to leave room for. It still does, by an order of
+    # magnitude, on a job that runs in about twenty seconds.
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        # This SHA and the setup-python one below are duplicated from tests.yml
+        # and nothing couples them — bumping one leaves the other pinned to the
+        # older action, silently, until somebody diffs the two files. Noted
+        # rather than solved: the alternatives are a composite action or a
+        # reusable workflow, and both cost more indirection than two lines of
+        # duplication are worth at this size. Bump them together.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Python
+        # The floor rung only. This job asks one question — did the
+        # dependencies move under us — and asking it on two interpreters
+        # doubles the runs without doubling the answer. The matrix in tests.yml
+        # is where interpreter coverage lives.
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.10"
+
+      - name: Install ffmpeg
+        # Same reason as in tests.yml: conftest.py synthesizes every fixture
+        # clip by shelling out to ffmpeg, so without it the fixtures raise.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install the latest published test dependencies
+        # Unpinned ON PURPOSE, and the only place the SUITE'S OWN dependencies
+        # are. Not the only unpinned install in the repository, which this
+        # comment claimed for a revision: `--upgrade pip` on the next line is
+        # unpinned here and in tests.yml, and so is the `apt-get install ffmpeg`
+        # step above, in both files. Those are unpinned for their own reasons
+        # and are not what this job measures.
+        #
+        # No --require-hashes and no requirements-ci.txt: the point is to
+        # resolve whatever PyPI publishes today and find out whether the suite
+        # still passes against it. `pip list` is this job's real output — it is
+        # what names the versions that produced the result.
+        # `TestTheExemptedDriftJob` in tests/test_ci_runs_the_whole_suite.py
+        # asserts both halves of that, because this file is named in
+        # NOT_THE_SUITE_WORKFLOW and is therefore invisible to every other check
+        # in that file.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest yt-dlp
+          python -m pip list
+
+      - name: Run the suite
+        # -rs for the same reason as in tests.yml: an unexpected skip is
+        # visible to whoever reads the log rather than hidden behind an exit 0.
+        run: python -m pytest -q -rs
