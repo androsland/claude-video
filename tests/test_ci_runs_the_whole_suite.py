@@ -908,9 +908,16 @@ class TestTheWholeSuiteRunsInCI:
     def test_the_documented_interpreters_are_the_ones_the_matrix_runs(self, doc):
         # Both files state which interpreters CI runs, in prose, and until this
         # test nothing read either. The workflow comment goes further and
-        # asserts a result per rung — "993 passed on 3.10.12 and 993 on CPython
-        # 3.13.13" — so dropping a rung leaves three separate places claiming a
-        # run that no longer happens.
+        # asserts a result per rung — "1013 passed on 3.10.12 and 1013 on
+        # CPython 3.13.13" — so dropping a rung leaves three separate places
+        # claiming a run that no longer happens.
+        #
+        # This test reads the VERSIONS out of that sentence's neighbourhood and
+        # deliberately not the counts. A rung is a lasting claim; a pass count is
+        # a measurement with a date, and pinning one would fail every commit that
+        # adds a test. The counts went stale inside this very branch — which is
+        # the argument for not asserting them here, not an argument for leaving
+        # them unwritten.
         #
         # Asserted in BOTH directions. A version in the matrix and not in the
         # sentence is a doc that undersells its own coverage; a version in the
@@ -1620,3 +1627,60 @@ class TestTheRuleItself:
 
     def test_a_missing_block_reads_as_empty_not_as_absent_evidence(self):
         assert top_level_block("name: x\njobs:\n  a:\n", "on") == ""
+
+    def test_a_doc_with_no_ci_sentence_reads_as_none_not_as_no_versions(self):
+        # `documented_ci_versions` has two failure shapes and the consumer
+        # treats them differently: None is "this file no longer says what CI
+        # runs", [] is "it says something, and names no version". Both real docs
+        # carry the sentence today, so nothing constructed either branch.
+        #
+        # Collapsing None into [] is the mistake this pins. The consumer would
+        # then compare [] against the matrix and report a doc/matrix
+        # DISAGREEMENT — sending the reader to reconcile two lists when the
+        # actual problem is that one of them is missing.
+        assert documented_ci_versions("moviola\n\nNo claim about CI here.\n") is None
+        assert documented_ci_versions("CI runs nothing in particular\n") == []
+
+    def test_the_ci_sentence_stops_at_the_semicolon(self):
+        # README.md's real sentence continues "; 3.11 and 3.12 are not tested" —
+        # versions named precisely because CI does NOT run them, and reading
+        # them would invert the sentence into a claim of four rungs.
+        #
+        # Pinned on a synthetic string rather than on README, so it still holds
+        # when somebody rewords the very file this slice exists to read. That is
+        # the whole reason this test is here and not satisfied by the consumer.
+        assert documented_ci_versions(
+            "CI runs the suite on 3.10 and 3.13; 3.11 and 3.12 are not tested.\n"
+        ) == ["3.10", "3.13"]
+
+    @pytest.mark.parametrize(
+        "matrix",
+        [
+            '    matrix:\n      python-version:\n        - "3.10"\n        - "3.13"\n',
+            "    matrix:\n      python-version: []\n",
+        ],
+        ids=["block-sequence", "empty-flow-sequence"],
+    )
+    def test_a_matrix_shape_this_reader_cannot_see_reads_as_no_versions(self, matrix):
+        # `matrix_python_versions` reads ONE shape: a flow sequence on one line.
+        # Its docstring claims a block sequence "fails loud in the test that
+        # consumes this rather than quietly returning a subset", and until this
+        # test nothing checked that claim in either direction.
+        #
+        # [] is the correct answer, not a defect, and loudness is why: the
+        # consumer asserts `len(matrix) >= 2`, so an unreadable shape fails
+        # there naming what it could not find. A reader that returned the FIRST
+        # rung of a block sequence would be the bad outcome — one version, no
+        # error, and a doc naming one version would agree with it.
+        assert matrix_python_versions(matrix) == []
+
+    def test_the_matrix_reader_ignores_a_commented_out_rung(self):
+        # The negative half: a version present in the file that must NOT read as
+        # declared. `without_comments` runs first, so a rung somebody commented
+        # out while bisecting is not a rung — and since the regex takes the
+        # FIRST match, skipping that step would return the abandoned pair and
+        # nothing downstream would notice.
+        assert matrix_python_versions(
+            '        # python-version: ["3.8", "3.9"]\n'
+            '        python-version: ["3.10", "3.13"]\n'
+        ) == ["3.10", "3.13"]

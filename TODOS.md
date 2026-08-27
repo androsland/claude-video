@@ -906,6 +906,28 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `README.md:136` still points at a 404. Nothing in the suite can tell the difference;
   see the new NON-GOALS bullet in `test_the_docs_are_checked.py` saying so directly.
 
+- **Three duplications in the CI meta-test and workflows, judged not worth removing.**
+  (forgeward gate, maintainability reviewer, 2026-08-27) Filed because they were found and
+  deliberately left, not because they are urgent — all three are Low and the reviewer
+  marked two of them optional and the third as needing nothing.
+  (1) `expand_requirements` and `referenced_requirement_paths` in
+  `tests/test_ci_runs_the_whole_suite.py` share a four-line loop and differ only in which
+  half of `_walk_requirements`'s tuple they keep. Left alone because the recursive core is
+  already factored out — which was the part worth unifying — and because the KILL harness
+  anchors a mutation on one of those two lines, so folding them would cost the mutation its
+  distinct target to save two lines.
+  (2) `test_a_chain_deeper_than_the_cap_raises_this_module_s_error` and
+  `test_a_chain_at_the_cap_is_followed` build their synthetic chain with the same three
+  lines, differing only in the depth. Left alone on purpose: a test whose fixture is a
+  helper somewhere else is a test you cannot read in one screen, and this file's house
+  style buys legibility with exactly this kind of repetition.
+  (3) The pinned `actions/checkout` and `actions/setup-python` SHAs are duplicated between
+  `tests.yml` and `drift.yml` with nothing coupling them. Already disclosed in `drift.yml`'s
+  own comment, which is a better place for it than this file — the person who bumps one SHA
+  is reading that file, not this one. The alternatives are a composite action or a reusable
+  workflow, and both cost more indirection than two duplicated lines are worth at this size.
+  Revisit (3) if a third workflow ever needs the same two steps.
+
 - **pip itself is unpinned in both workflows, and the reason given for that was wrong.**
   (fix/ci-dependency-posture review, 2026-08-27) `python -m pip install --upgrade pip` runs
   unpinned in `tests.yml` and in `drift.yml`. The comment in tests.yml justified it by
@@ -1353,10 +1375,13 @@ The Python range is now declared rather than inferred: **3.10+** in `README.md` 
 `AGENTS.md`, and a two-rung matrix on 3.10 and 3.13. 3.10 is the TOOLCHAIN floor, not the
 language floor — moviola's own scripts parse under 3.7; pytest 9.1.1 and yt-dlp 2026.8.19
 both declare `Requires-Python >= 3.10`. Both rungs were run locally before the workflow
-claimed them rather than published as a guess: 993 passed on 3.10.12 and 993 on CPython
-3.13.13, each against exactly the pinned set, and the 3.13 install was checked to resolve
-six packages with `exceptiongroup`, `tomli` and `typing-extensions` correctly excluded by
-their `python_version < "3.11"` markers. 3.11 and 3.12 are deliberately untested and the
+claimed them rather than published as a guess: 1013 passed on 3.10.12 and 1013 on
+CPython 3.13.13, each against exactly the pinned set, and the 3.13 install was checked to
+resolve six packages with `exceptiongroup`, `tomli` and `typing-extensions` correctly
+excluded by their `python_version < "3.11"` markers. That count is a snapshot with a date,
+not an invariant: it read 993 for the first commit of this branch and was falsified by the
+branch's own review commit, which added twenty tests. Nothing asserts it — the VERSIONS
+are asserted, the count is not, for the reason the workflow comment gives. 3.11 and 3.12 are deliberately untested and the
 workflow says so. The day-one ONE-job rule is broken on purpose and the reason is in the
 file: that rule is about the meter, this repository is public so minutes are free, and the
 second rung buys COVERAGE, which is a different axis from parallelism.

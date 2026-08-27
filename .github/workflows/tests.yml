@@ -63,10 +63,25 @@ jobs:
         # will not install. AGENTS.md and README.md declare 3.10+ to match.
         #
         # Both rungs were run locally before this landed rather than published
-        # as a guess: 993 passed on 3.10.12 and 993 on CPython 3.13.13, each
+        # as a guess: 1013 passed on 3.10.12 and 1013 on CPython 3.13.13, each
         # against exactly the hash-pinned set below, and the 3.13 install was
         # checked to resolve six packages — `exceptiongroup`, `tomli` and
         # `typing-extensions` correctly excluded by their markers.
+        #
+        # That count is a SNAPSHOT of this branch, not an invariant, and it went
+        # stale once INSIDE the branch that introduced it: the first commit
+        # measured 993, the review commit added twenty tests and left this
+        # sentence alone, so for one commit it vouched for a run that covered a
+        # fiftieth less than it claimed. If `pytest -q` prints a different
+        # number today, the likely reason is that somebody added tests, not that
+        # a rung broke.
+        #
+        # Nothing asserts this number and nothing should. A test pinning the
+        # suite's own size fails on every commit that adds a test, which teaches
+        # people to edit the expected value without reading what it meant — the
+        # opposite of what it was for. What IS asserted is the pair of VERSIONS,
+        # by test_the_documented_interpreters_are_the_ones_the_matrix_runs: a
+        # rung is a lasting claim, a pass count is a measurement with a date.
         #
         # NON-GOAL: 3.11 and 3.12 are deliberately untested. These two are the
         # floor and the ceiling; a version in between failing while both ends
