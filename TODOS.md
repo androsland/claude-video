@@ -105,9 +105,9 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 - **Four stderr sites interpolate an exception raised while handling remote data, and the
   channel is latent rather than live.** (security gate, 2026-08-26; anchors re-verified
-  2026-08-27) `download.py:208` (`info.json parse failed`), `moviola.py:369` and `:501`
-  (`subtitle parse failed`), and `moviola.py:534-535` (`whisper fallback failed`, the
-  `except Exception` arm at `:527`) each print
+  2026-08-28) `download.py:208` (`info.json parse failed`), `moviola.py:401` and `:533`
+  (`subtitle parse failed`), and `moviola.py:566-567` (`whisper fallback failed`, the
+  `except Exception` arm at `:559`) each print
   `{exc}` raw. A gate reviewer first flagged three of these as already-itemized uncovered
   surfaces; they are itemized nowhere, so they were audited from scratch. Every exception
   class reachable at these four builds its message from fixed strings and numbers:
@@ -150,6 +150,17 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   covers sites that interpolate an *exception* and says nothing about a future site
   interpolating remote data directly. And the audit is a snapshot of third-party message
   formats reachable today, not a guarantee about them.
+  **One class the audit did not enumerate, found 2026-08-28 while fencing the work
+  directory:** an `OSError` at either `subtitle parse failed` site carries the FULL path
+  in `strerror`-plus-filename form, and `parse_vtt` is handed a path built from
+  `out_dir / "video.%(ext)s"` — so while the entry is right that the yt-dlp template
+  keeps the remote *title* out of the filename, the directory it sits in is `--out-dir`
+  verbatim, which the user types and which may legally contain a line break. That does
+  not make the channel remote — `--out-dir` is local input, not a stranger's — but it is
+  a second reason the cheap fix is the right one, and it is the reason
+  `moviola.py`'s `[moviola] working dir:` line was fenced on its own while these four
+  were left. Fixing them needs no RED test that a network download can reach; it needs
+  the four-site sweep this entry already describes.
 
 - **`stderr_block` bounds what it RENDERS, not what it reads.** (performance review,
   2026-08-27) `splitlines()` materializes every line of the capture before `max_lines`
@@ -1483,6 +1494,36 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   here.
 
 ## Completed
+
+### The work directory reached stderr with no fence at all
+
+(fix/two-messages-that-disagree sweep, 2026-08-28)
+
+- **`--out-dir` is user input, and it was interpolated raw into a `[moviola] ` line.**
+  Every remote value this process puts on one of those lines already went through
+  `untrusted.stderr_line` — an API error body, an `HTTPError`'s server-chosen reason
+  phrase, a huggingface_hub failure — and the working directory did not. A directory
+  named `work` + newline + `[moviola] transcript complete - no further action needed`
+  produced exactly that second line, at column zero, indistinguishable from something
+  moviola wrote. Now `stderr_line(work)`: the break collapses, no backticks are added,
+  and an ordinary path comes out byte-identical, which is load-bearing rather than
+  cosmetic — `test_the_work_directory_is_private.py` parses this line with a regex and
+  calls `Path()` on the capture, so a fence that quoted or escaped an ordinary path
+  would have broken the private-directory audit silently. Both shapes are asserted.
+
+- **This is the bullet the branch's first commit did NOT close, and the distinction was
+  worth catching.** That commit fenced the report's `_Work dir:` line with `md_inline`
+  and named this stderr copy as an explicit NON-GOAL — "a different fence with a
+  different rule". The two are the same path through two channels with two rules, and
+  reading the queue item as already answered by the markdown fix would have left the
+  stderr half open behind a green suite.
+
+- **Not established.** The same path reaches stderr by a second route that is NOT fenced
+  here: an `OSError` at either `subtitle parse failed` site carries the whole path, and
+  `parse_vtt` is handed `out_dir / "video.%(ext)s"`. That route needs a network download
+  to drive, so it takes no RED test of its own — it belongs to the existing four-site
+  sweep entry under `## Report as an untrusted document`, which now records it and
+  carries re-verified anchors.
 
 ### The README's two `/releases/latest` links, closed by tagging and not by editing
 

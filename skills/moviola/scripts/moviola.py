@@ -367,7 +367,14 @@ def main() -> int:
     # ambient umask. tests/test_the_work_directory_is_private.py pins what IS covered
     # and carries all three in its NON-GOALS.
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
-    print(f"[moviola] working dir: {work}", file=sys.stderr)
+    # `--out-dir` is whatever the user typed, so this is a foreign value on a
+    # line moviola wrote: unfenced, a directory name containing a line break
+    # puts whatever follows at column zero, indistinguishable from the next
+    # thing this program says. `stderr_line` collapses the break and adds no
+    # backticks — stderr is not markdown, and an ordinary path must come out
+    # byte-identical because test_the_work_directory_is_private.py parses this
+    # line and calls Path() on the capture.
+    print(f"[moviola] working dir: {stderr_line(work)}", file=sys.stderr)
     # Before anything is written into it. Two runs sharing one --out-dir do not
     # collide loudly — they overwrite each other's video.* and frame_*.jpg, and
     # the (mtime, size) stale-file guard reads the other run's fresh files as
