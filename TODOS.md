@@ -426,10 +426,10 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `local_whisper.py`'s hub-failure line now slices 400, and `str(HTTPError)` is bounded
   only by `http.client._MAXLINE` — 65536 bytes of status line, an underscore-private
   constant this program neither sets nor should rely on. On stdout, `md_inline` calls
-  `stderr_line` and caps nothing: `moviola.py:441` and `:443` interpolate `info['title']`
+  `stderr_line` and caps nothing: `moviola.py:571` and `:573` interpolate `info['title']`
   and `info['uploader']`, which are `raw.get("title")` / `raw.get("uploader")` off
-  yt-dlp's JSON with no cap anywhere between that site and the report, and `:451` does the
-  same for the container's codec string out of ffprobe. `moviola.py:439` is `args.source`,
+  yt-dlp's JSON with no cap anywhere between that site and the report, and `:581` does the
+  same for the container's codec string out of ffprobe. `moviola.py:569` is `args.source`,
   a local CLI argument rather than a remote value. With `balance_bidi` linear these cost
   time proportional to their length rather than to its square, so this is report bloat and
   context flooding and NOT the denial of service that was fixed — a multi-megabyte title
@@ -611,19 +611,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   decision — a duration of exactly `0.0` is already the unknown sentinel, so a rejected
   negative would land on the same value and be indistinguishable from an absent key. Filed
   with the sentinel entry it depends on rather than fixed alongside it.
-
-- **`get_metadata` parses ffprobe's stdout with an unguarded `json.loads`.** (review of the
-  bounded-failures review, 2026-08-26) `frames.py:294` is
-  `json.loads(result.stdout or "{}")` and nothing catches `JSONDecodeError`. The `or "{}"`
-  handles empty output and nothing else, so a returncode of 0 with non-JSON on stdout takes
-  the run down with a traceback naming the json module. It is the same class as the
-  `finite_float` findings — a value this program did not write, parsed as though it had —
-  but one level up: the guards protect the FIELDS inside a document that was already assumed
-  to be a document. Reachability is low and is the reason this is filed rather than fixed:
-  the real ffprobe under `-v error -print_format json` either emits JSON or exits non-zero,
-  so it takes a shim or a wrapper on PATH answering to the name `ffprobe`. Non-goal: this is
-  not the `_read_info` half — `download.py:178` reads a file yt-dlp wrote and has the same
-  shape with its own reachability story.
 
 - **The reachability evidence reads `format` only, so a stream-level `N/A` is invisible to
   it.** (review of the bounded-failures review, 2026-08-26) `test_the_json_writer_omits_the_key_instead`
@@ -1227,6 +1214,54 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Completed
 
+### ffprobe's stdout is checked for being a document before its fields are read
+
+(review of the bounded-failures review, 2026-08-26; fixed 2026-08-27) `get_metadata` read
+`json.loads(result.stdout or "{}")` straight into `.get()`, which is the `finite_float`
+class of finding one level up: the field guards protect values inside a document that was
+itself only ever assumed to be one. `untrusted.json_object` now answers that question, and
+it answers `None` to three failures rather than the one that was obvious. `json.loads`
+RAISES on text that is not JSON — a shim on PATH, a wrapper printing a warning first, a
+proxy answering with an HTML error page. It SUCCEEDS on valid JSON that is not an object:
+`[]`, `3`, `"text"`, `null` and `true` all parse cleanly, and that is the dangerous shape
+precisely because the parse worked, landing the failure at the caller's first `.get()` as
+an `AttributeError` naming a dict method a frame away from the subprocess that produced
+it. And it raises `RecursionError` — neither a `ValueError` nor caught by anyone expecting
+one — past about a thousand opening brackets, reachable with a 2 KB string in well under a
+millisecond. All three were probed rather than assumed before the docstring claimed them.
+
+The guard lives in `untrusted.py` beside `finite_float` because AGENTS.md says a new parse
+of somebody else's output belongs in the leaf, and it returns `None` rather than raising
+because the leaf answers the shape question while the caller owns the policy — the same
+split `_seconds_until` took in the commit before it. `frames.py:317` reads that `None` as
+FATAL, matching the returncode guard four lines above: a probe answering in a format that
+is not its own is evidence about what is on PATH, not evidence about the video, and
+degrading to `{}` would put a duration of zero in the report as a fact about a video
+nothing successfully probed. The capture goes through `stderr_block(..., source="ffprobe")`
+like every other foreign block, so a stdout line reading `ffprobe failed:` cannot reach
+column zero of a message moviola signs.
+
+31 new tests across two classes — one at the call site, one on the leaf — and one of them
+covers a seam the fix created rather than the finding: `.strip()` was added so that
+whitespace-only stdout stays on the "wrote nothing" side of `or "{}"`, and without a test
+its removal would have been an unkilled mutation. The KILL harness runs nine mutations,
+all of which fail the suite, including the two half-fixes worth naming: catching only the
+decode and leaving the type (so `[]` still reaches `.get()`), and widening the check to
+`isinstance(document, (dict, list))`. Six legitimate rewrites stay green, one of which
+moved during the run — renaming the leaf at its three source sites FIRES, because the unit
+tests call it by name, so a genuine rename is a five-site edit and the harness was
+measuring an incomplete one. Completed, it passes. **Non-goals, in the code and pinned:**
+this is shape and not schema — `{}` and a document describing a different video entirely
+are the same answer here; it is not a size or memory bound, since `subprocess.run` has
+already buffered the whole capture before the guard sees it; a top-level array is refused,
+which is right for every caller today and would be wrong for one that wanted a list; and
+reachability is still low, unchanged from the filing — the real ffprobe under
+`-v error -print_format json` either emits JSON or exits non-zero, so this takes a shim or
+a wrapper on PATH answering to the name. `test_doc_anchors_are_current.py` is deliberately
+outside the KILL suite: it pins line numbers, so a rewrite adding a line fires it, which
+in the must-PASS half reads as a false alarm for a test doing its job. It ran during GREEN
+and caught three of this change's own citations drifting.
+
 ### `Retry-After` is honoured in both of the forms RFC 9110 defines
 
 (bounded-failures review, 2026-08-26; fixed 2026-08-27) `float()` rejects an HTTP-date, so
@@ -1329,7 +1364,7 @@ context beside the report with nothing marking where their text ended and moviol
 resumed. `untrusted.stderr_block` renders it instead: `BLOCK_PREFIX` (`"| "`) on every
 line of the capture, bounded to `MAX_BLOCK_LINES` (40) and `MAX_BLOCK_WIDTH` (200), with
 an empty capture reported as the fact it is rather than as nothing. Applied at
-`frames.py:291`/`:402`/`:474`/`:839` and `whisper.py:378`/`:424`/`:492`. Pinned by
+`frames.py:296`/`:430`/`:502`/`:867` and `whisper.py:378`/`:424`/`:492`. Pinned by
 `tests/test_stderr_blocks_are_fenced.py`.
 
 `stderr_line` was the wrong instrument and that is why this waited: it makes a value ONE

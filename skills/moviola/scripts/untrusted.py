@@ -28,6 +28,14 @@ modules that cannot import each other — `frames.py` probes the video, `moviola
 covers the transcript-only path where there is no video to probe. A leaf module
 is the only place one definition can serve both.
 
+`json_object` is the same test one level up. `finite_float` asks whether a VALUE
+inside a document is a number; `json_object` asks whether there is a document at
+all — a question `frames.py` answered by assumption until a stdout that was not
+JSON turned a subprocess problem into a `JSONDecodeError` naming a column of a
+string nobody had seen. Neither of them decides what a failure MEANS: one
+returns the caller's default and the other returns `None`, and the policy that
+reads it stays at the call site where the consequences are known.
+
 NON-GOALS, stated here because an unstated limit reads as a claim of coverage:
 
   * **Not a sanitizer.** Nothing is stripped, shortened, or escaped. Every
@@ -79,6 +87,7 @@ NON-GOALS, stated here because an unstated limit reads as a claim of coverage:
 """
 from __future__ import annotations
 
+import json
 import math
 
 # Every character Python's own splitlines() treats as a terminator. A value
@@ -219,6 +228,58 @@ def finite_float(value: object, default: float = 0.0) -> float:
     except (TypeError, ValueError, OverflowError):
         return default
     return number if math.isfinite(number) else default
+
+
+def json_object(text: object) -> dict | None:
+    """A JSON object parsed out of somebody else's output, or None for anything else.
+
+    `json.loads` is the wrong call to make directly on a captured stdout,
+    because it fails in two shapes and only one of them looks like a failure.
+    It RAISES `ValueError` when the text is not JSON at all — a shim on PATH, a
+    wrapper that prints a warning first, a proxy answering with an HTML error
+    page. And it SUCCEEDS, handing back a list or a number or `None`, when the
+    text is valid JSON that is not an object: `[]`, `3`, `"text"`, `null` and
+    `true` all parse cleanly. The second is the dangerous one precisely because
+    the parse worked — the failure lands at the caller's first `.get()` as an
+    `AttributeError` naming a dict method, a frame away from the subprocess that
+    produced the document.
+
+    A third belongs to the parser rather than to the input: a document nested
+    past the interpreter's recursion limit raises `RecursionError`, which is
+    neither a `ValueError` nor caught by anybody expecting one, and about a
+    thousand opening brackets reach it. Catching it is narrow enough to be safe
+    here — there is no `object_hook` and no `parse_float`, so the only recursion
+    this can swallow is the JSON scanner's own.
+
+    All three answer `None`, and `None` is a question rather than a decision. A
+    caller that can carry on without the document reads it as "nothing to read";
+    a caller that cannot reads it as evidence about what is on PATH. Choosing
+    between those is policy, and it belongs at the call site that knows the
+    consequences — this function decides only whether the bytes are the shape
+    the caller was promised.
+
+    NON-GOALS:
+
+      * **Shape, not schema, and certainly not truth.** `{}` and a document
+        missing every expected key are the same answer here, and so is one
+        describing a different video entirely. What the fields mean is
+        `finite_float`'s problem and the caller's.
+
+      * **Not a size or a memory bound.** A hundred-megabyte object parses and
+        is returned whole. Whatever produced `text` already bounded it or did
+        not — `subprocess.run` has buffered the entire capture before this is
+        called — and that bound is not this function's to give.
+
+      * **A `dict` is the only container it recognises.** A document whose top
+        level is legitimately an array is refused, which is correct for every
+        caller there is today and would be wrong for one that wanted a list.
+        That caller wants its own function, not a widened return type here.
+    """
+    try:
+        document = json.loads(text)  # type: ignore[arg-type]
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return document if isinstance(document, dict) else None
 
 
 def balance_bidi(text: str) -> str:
