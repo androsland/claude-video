@@ -779,8 +779,10 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 - **`MOVIOLA_WHISPER_CPU_THREADS` is read by the code and named in no shipped document.**
   (docs/release-notes-and-stale-claims, 2026-08-27) `local_whisper.py:159` reads it and
   `:165` raises a named error on a bad value, but `git grep` over `*.md` and `*.sh` finds
-  it only inside a non-goal in this file — not in README.md, not in SKILL.md, and not in
-  the `.env` scaffold `setup.py` writes. Being process-env-only is deliberate (it is a
+  it in no settings surface — not in README.md, not in SKILL.md, and not in the `.env`
+  scaffold `setup.py` writes. (An earlier draft of this bullet said the grep found it
+  "only inside a non-goal in this file", which the next clause contradicts and which is
+  false at HEAD: `CHANGELOG.md:10` and `:23` name it, both added by this branch.) Being process-env-only is deliberate (it is a
   benchmarking knob, not a setting), and the 0.3.0 changelog now says so; that is the
   minimum, not the fix. Decide whether it belongs in SKILL.md's settings table or should
   stay undocumented on purpose, and say which in the code.
@@ -1473,8 +1475,11 @@ entry itself recorded, which is why it gets its own note rather than a one-line 
 ### CI's ffmpeg major version, and the pass counts that named it
 
 (docs/release-notes-and-stale-claims, 2026-08-27) Two entries close on the same
-evidence: run **33109063305** (headSha `cbf6696`), the run that measured this branch.
-Two further findings are recorded below without closing anything.
+evidence: run **33109063305** (headSha `cbf6696`), the last run on PR #26's branch
+before it merged — `cbf6696` is the second parent of `3dab2cb`, which is this branch's
+BASE, so it measured the work immediately preceding this branch and not this branch
+itself. Nothing has measured this branch: it has not been pushed. Two further findings
+are recorded below without closing anything.
 
 **Corrected during review of this branch:** this intro said "the first CI run the
 workflow ever made", which was false when written. `tests.yml` has **17** runs and
