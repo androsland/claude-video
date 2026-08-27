@@ -19,7 +19,7 @@ written:
 
   * **A module beside the symlink shadows the package's own.** CPython already sets
     `sys.path[0]` to the REAL script's directory — it resolves the symlink itself —
-    so the sibling imports on lines 18-40 never actually broke, and `--help` through
+    so the sibling imports on lines 18-42 never actually broke, and `--help` through
     a symlink exited 0 the whole time. What the insert did was prepend a SECOND
     directory ahead of the correct one. A `config.py` dropped next to the symlink
     therefore wins over the real `config.py`, and the same holds for `download`,
@@ -31,10 +31,15 @@ written:
 
   * **`SCRIPT_DIR / "setup.py"` points at nothing.** `moviola.py:552` and `:698`
     build the installer path from `SCRIPT_DIR`, so through a symlink they addressed
-    a `setup.py` beside the symlink, which does not exist. (These two numbers have
-    been wrong twice: 539/685 shipped in the commit whose own new comment moved them,
-    and the correction to 547/693 was stale before it was committed for the same
-    reason. Re-read from the file, not recomputed from a diff.)
+    a `setup.py` beside the symlink, which does not exist.
+
+EVERY line number this docstring cites into `moviola.py` has been wrong at least once,
+which is now four corrections across three citations and a property of the practice
+rather than a run of bad luck: 539/685 shipped in the commit whose own new comment moved
+them; the correction to 547/693 was stale before it was committed for the same reason;
+"lines 18-40" above was 18-42 the day it was written; and the import block was cited as
+"line 17" below, which is a blank line. Re-read them from the file before touching this
+docstring — never recompute one from a diff, and never carry one forward unchecked.
 
 The fix is the one-line spelling change. It does NOT make the insert redundant, and
 the insert is deliberately kept: under `-P` or `PYTHONSAFEPATH=1` (3.11+) CPython
@@ -160,9 +165,9 @@ class TestASymlinkedEntryPointDoesNotTrustItsOwnDirectory:
     """Running through a symlink must search the real script's directory, not the link's.
 
     NON-GOALS: it drives `--help`, which is the cheapest path that still performs
-    every sibling import on line 17. It does not exercise a download, a frame
-    extraction or a transcript, and a directory-resolution bug that only bites
-    further into a run would not appear here.
+    every sibling import at the top of `moviola.py`. It does not exercise a
+    download, a frame extraction or a transcript, and a directory-resolution bug
+    that only bites further into a run would not appear here.
     """
 
     def test_a_symlinked_entry_point_runs(

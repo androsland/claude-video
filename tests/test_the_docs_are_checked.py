@@ -334,6 +334,28 @@ class TestTheFileSweepReadsOnlyWhatTheRepositoryShips:
             repo_files.tracked_text_files()
 
 
+def _archive_names(treeish: str) -> list[str]:
+    """The file list `git archive` would produce for `treeish`, or a skip.
+
+    Two classes below ask this question of two different tree-ishs — the bundle root
+    (`HEAD:skills/moviola`) and the whole repository (`HEAD`) — which is exactly the
+    two install surfaces `.gitattributes` has to serve, and the reason the parameter
+    exists rather than two functions. The skip is part of the contract: `git archive`
+    is unavailable in a source tarball with no `.git`, and a missing tool must not read
+    as an empty archive, which would pass every exclusion assertion below.
+    """
+    try:
+        archive = subprocess.run(
+            ["git", "-C", str(REPO), "archive", "--format=zip", treeish],
+            capture_output=True,
+            check=True,
+            timeout=60,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.skip(f"git archive cannot run here: {exc}")
+    return zipfile.ZipFile(io.BytesIO(archive)).namelist()
+
+
 class TestThePublishedBundleShipsWhatGitattributesClaims:
     """`.gitattributes` says two dev files stay out of the claude.ai bundle. They did not.
 
@@ -356,17 +378,7 @@ class TestThePublishedBundleShipsWhatGitattributesClaims:
     """
 
     def test_the_bundle_excludes_the_files_export_ignore_names(self) -> None:
-        try:
-            archive = subprocess.run(
-                ["git", "-C", str(REPO), "archive", "--format=zip", "HEAD:skills/moviola"],
-                capture_output=True,
-                check=True,
-                timeout=60,
-            ).stdout
-        except (OSError, subprocess.SubprocessError) as exc:
-            pytest.skip(f"git archive cannot run here: {exc}")
-
-        names = zipfile.ZipFile(io.BytesIO(archive)).namelist()
+        names = _archive_names("HEAD:skills/moviola")
         assert "SKILL.md" in names, f"the bundle lost its SKILL.md: {names}"
         for dev_only in ("scripts/build-skill.sh", ".skillignore", ".gitattributes"):
             assert dev_only not in names, (
@@ -447,21 +459,9 @@ class TestThePluginInstallArchiveShipsNoScannerConfig:
         "hooks/scripts/check-setup.sh",
     )
 
-    def _archive_names(self) -> list[str]:
-        try:
-            archive = subprocess.run(
-                ["git", "-C", str(REPO), "archive", "--format=zip", "HEAD"],
-                capture_output=True,
-                check=True,
-                timeout=60,
-            ).stdout
-        except (OSError, subprocess.SubprocessError) as exc:
-            pytest.skip(f"git archive cannot run here: {exc}")
-        return zipfile.ZipFile(io.BytesIO(archive)).namelist()
-
     def test_the_archive_is_the_one_plugin_install_would_fetch(self) -> None:
         """The positive control, so the exclusion assertions cannot pass over nothing."""
-        names = self._archive_names()
+        names = _archive_names("HEAD")
 
         assert names, "git archive produced an empty full-repo archive"
         for required in self.MUST_SHIP:
@@ -473,7 +473,7 @@ class TestThePluginInstallArchiveShipsNoScannerConfig:
             )
 
     def test_no_skillignore_ships_in_the_plugin_archive(self) -> None:
-        names = self._archive_names()
+        names = _archive_names("HEAD")
 
         shipped = [name for name in names if Path(name).name == ".skillignore"]
         assert not shipped, (
