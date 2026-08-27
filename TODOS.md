@@ -298,7 +298,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   (quiet-failures review, 2026-08-27) `pair_with_timestamps`'s docstring justifies
   ignoring a surplus because `-frames:v` caps the files written while showinfo keeps
   reporting. True for the public API, where `extract_scene_candidates(max_frames=100)`
-  emits `-frames:v` at `frames.py:367`. Not true on the product path:
+  emits `-frames:v` at `frames.py:465`. Not true on the product path:
   `extract_scene_or_uniform` calls it with `max_frames=None`, so no cap is emitted and a
   surplus there means the muxer refused frames showinfo had already reported. That is the
   same class of evidence as a shortfall and it is discarded without a word. Same fix as
@@ -606,7 +606,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   review, 2026-08-26) Both exit paths return `default` unexamined, so
   `finite_float(x, float("inf"))` returns inf out of a function named for finiteness. It is
   latent rather than live — every call site in the tree passes `0.0`, and the two that pass
-  a computed value (`frames.py:156` nests one call as the other's default) pass a value the
+  a computed value (`frames.py:305` nests one call as the other's default) pass a value the
   same guard already vetted. Filed because the name is the promise a future caller will read,
   and nothing enforces it. Non-goal: this is not the magnitude entry below; a checked
   `default` still would not bound `1e300`.
@@ -641,7 +641,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   with the sentinel entry it depends on rather than fixed alongside it.
 
 - **`get_metadata` parses ffprobe's stdout with an unguarded `json.loads`.** (review of the
-  bounded-failures review, 2026-08-26) `frames.py:146` is
+  bounded-failures review, 2026-08-26) `frames.py:294` is
   `json.loads(result.stdout or "{}")` and nothing catches `JSONDecodeError`. The `or "{}"`
   handles empty output and nothing else, so a returncode of 0 with non-JSON on stdout takes
   the run down with a traceback naming the json module. It is the same class as the
@@ -971,6 +971,53 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   the subtree. Fixing it without extending that test to the root archive would be an
   unpinned change at the tail of a branch that is otherwise ready.
 
+- **A gate finding was wrong, and the mutation harness is what said so.** (testing
+  review, 2026-08-27; refuted 2026-08-27) The review reported that
+  `TestTheFenceReachesEverySite`'s `failing_run` fixture patches `frames.shutil.which`
+  but not `whisper.shutil.which`, leaving three tests dependent on a real ffmpeg being
+  on PATH. It is not true. Both modules do `import shutil`, so both names are bound to
+  the one stdlib module object — `frames.shutil is whisper.shutil` is True — and
+  `monkeypatch.setattr` sets the attribute on that shared object. Measured by running
+  the whisper site test with `PATH` pointed at an empty directory, with and without the
+  added patch: it passes both ways. The change was applied, refuted, and reverted; the
+  reason now sits in a comment at the fixture so the next reader does not re-file it.
+
+  Two things this cost, worth naming. The refutation came from the KILL step, not from
+  reading — the finding was verified as *describing the code accurately* (the second
+  patch really was absent) without checking whether its absence *mattered*, which is a
+  different question and the one that decides whether there is a defect. And the first
+  attempt to prove it used `PATH=""`, which breaks pytest's own startup and reports as a
+  failure that proves nothing; an empty DIRECTORY is the instrument. Non-goal: this is
+  not an argument for adding a PATH-emptying guard to the fixture. There is no defect to
+  guard against today, so such a test would have no RED, and the comment is what a
+  future rebinding of the name rather than the attribute would need anyway.
+
+- **Most `file.py:NNN` anchors in this repository are checked by nothing, and four were
+  wrong.** (anchor review, 2026-08-27) `tests/test_doc_anchors_are_current.py` now
+  re-derives two classes from the AST every run — the seven fenced raise sites, and the
+  two `-loglevel info` arguments — across `TODOS.md` and
+  `tests/test_stderr_is_untrusted.py`. Everything else is on trust. Measured while
+  writing it: three anchors in this file had drifted by roughly +148 and gone unnoticed
+  across several reviews (`frames.py:146` for a `json.loads` that is at 294, `:156` for
+  a nested `finite_float` default at 305, `:367` for the `-frames:v` in
+  `extract_scene_candidates` at 465), and a fourth, `untrusted.py:350` in
+  `tests/test_stderr_blocks_are_fenced.py`, was stale within its own branch. All four
+  are fixed by hand in the same commit, and none is covered going forward.
+
+  The durable fix is not more signatures. Each of the four needed a bespoke one, and
+  every signature is a new way for the check to go quiet on a rewrap — the failure the
+  `test_the_signature_still_matches_something` guards exist for. **Prefer citing a
+  SYMBOL where prose can afford to** (`get_metadata`'s `json.loads`, not
+  `frames.py:294`): a symbol survives every edit above it, and grep finds it. Reserve a
+  line number for a claim that is genuinely about a position in a file.
+
+  Non-goals: this is NOT a request to strip the existing anchors — a bulk rewrite of
+  dozens of citations is a large unreviewable diff for a problem that bites one entry at
+  a time, and the numbers that are right today are useful today. It does not cover the
+  case the new test cannot see either: an anchor whose number is a real line saying
+  something entirely unrelated, which is exactly what all three `frames.py` ones were.
+  Set equality has no opinion about meaning.
+
 ## Housekeeping
 
 - **Every action in both workflows is now SHA-pinned, and ALL THREE of those pins are
@@ -1180,7 +1227,7 @@ context beside the report with nothing marking where their text ended and moviol
 resumed. `untrusted.stderr_block` renders it instead: `BLOCK_PREFIX` (`"| "`) on every
 line of the capture, bounded to `MAX_BLOCK_LINES` (40) and `MAX_BLOCK_WIDTH` (200), with
 an empty capture reported as the fact it is rather than as nothing. Applied at
-`frames.py:290`/`:401`/`:473`/`:838` and `whisper.py:376`/`:422`/`:490`. Pinned by
+`frames.py:291`/`:402`/`:474`/`:839` and `whisper.py:376`/`:422`/`:490`. Pinned by
 `tests/test_stderr_blocks_are_fenced.py`.
 
 `stderr_line` was the wrong instrument and that is why this waited: it makes a value ONE

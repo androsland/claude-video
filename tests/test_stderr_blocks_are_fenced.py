@@ -65,9 +65,12 @@ NON-GOALS, stated so a green run here is not read as more than it proves:
     three families — ANSI CSI, OSC, and the implicit marks U+200E/U+200F/U+061C
     — that repaint or reorder a terminal without opening any scope to close.
 
-  * **The notices are informational, and only the prefix is structural.** A
-    foreign line cannot produce a line without the prefix, which is what makes
-    "unprefixed means moviola wrote it" hold. It cannot produce a *believable*
+  * **The notices are informational, and only the prefix is structural — and
+    only in the STRING.** A foreign line cannot produce a line without the
+    prefix, which is what makes "unprefixed means moviola wrote it" hold for
+    the agent reading it. On a terminal it holds less: the families named in
+    the bullet above repaint at physical column zero, and a run of C0
+    backspace overstrikes the prefix without an escape sequence at all. It cannot produce a *believable*
     truncation notice either, but nothing here proves that — a hostile capture
     can certainly contain the text `(8 earlier line(s) not shown)` inside a
     prefixed line, and the per-line width marker sits inside foreign territory
@@ -146,7 +149,6 @@ import os
 import shutil
 import stat
 import subprocess
-import sys
 import unicodedata
 from pathlib import Path
 
@@ -177,8 +179,34 @@ def assert_fenced(message: str, *, source: str, tail: str) -> None:
         f"a captured line reached the reader unattributed: {carrying!r}"
     )
     assert tail in message, "the tool's own diagnosis survived the bound"
-    assert message.splitlines()[0].endswith(":"), (
-        "moviola's own opening line is no longer at column zero unprefixed"
+    # The header is the block's only statement about WHO wrote the capture, and
+    # it was unchecked here until the gate that caught it: this helper took a
+    # `source` keyword and never read it, so all eight callers shared an
+    # assertion that could not tell ffmpeg from ffprobe. Two of the seven sites
+    # really do run ffprobe, so a copy-paste that mislabels one is a live
+    # mistake, not a hypothetical.
+    #
+    # Found by POSITION, and neither of the two easier spellings works. A bare
+    # `source in message` passes on a mislabelled block, because every raise
+    # site's own opening line already names the tool -- the message would say
+    # "ffprobe failed:" above a block headed "ffmpeg output", and the assertion
+    # would see "ffprobe" and be satisfied. Pinning the header's full wording
+    # catches it but re-introduces exactly what the truncation tests below
+    # refuse to do. The header is whatever `stderr_block` emits first, so it is
+    # the line after the opener, and that is structural.
+    header = message.split("\n")[1]
+    assert source in header, (
+        f"the block header does not attribute the capture to {source}: {header!r}"
+    )
+    # Both halves of the boundary, on purpose. `endswith(":")` alone is what
+    # this assertion used to be, under a message claiming the line was
+    # "unprefixed" — but the first line is the caller's own literal, built
+    # outside `stderr_block`, so it ends with a colon whether the fence works
+    # or not. The prefix check is the one that means what the message says.
+    first = message.split("\n")[0]
+    assert first.endswith(":"), f"moviola's own opening line changed: {first!r}"
+    assert not first.startswith(untrusted.BLOCK_PREFIX), (
+        f"moviola's own opening line is now prefixed as if foreign: {first!r}"
     )
 
 
@@ -303,7 +331,7 @@ class TestTheBlockFenceExists:
         widest = max(len(ln) for ln in block.splitlines())
         # Against the CONSTANT, not a literal. `< 1000` passed with 780
         # characters of slack and stayed green if MAX_BLOCK_WIDTH quadrupled,
-        # which is precisely the "bound nobody can check" untrusted.py:99 warns
+        # which is precisely the "bound nobody can check" untrusted.py:107 warns
         # about. The rendered allowance is the content slice, the prefix and the
         # direction anchor, the width marker, and at most one terminator per
         # opened scope (a 200-char slice can open at most 200).
@@ -408,12 +436,18 @@ class TestTheBlockFenceExists:
         )
         kept = [ln for ln in block.splitlines() if ln.startswith(untrusted.BLOCK_PREFIX)]
         assert len(kept) == 3
-        assert "(7 earlier line(s) not shown)" in block
-        assert "+15 char(s)" in block
+        # The arithmetic, not the sentence. Its siblings at the default bound
+        # check `"not shown" in block` and `"char(s))" in block` for exactly
+        # this reason, and pinning the full phrasing here would have made a
+        # cosmetic reword of the notice fail a test about truncation counts.
+        dropped, over = 10 - 3, 20 - 5
+        assert str(dropped) in block, f"{dropped} dropped line(s) unannounced"
+        assert str(over) in block, f"{over} trimmed char(s) unannounced"
 
     def test_a_truncated_line_still_closes_the_scope_it_opened(self) -> None:
-        # The slice-then-balance order at untrusted.py:350 is called
-        # load-bearing, and it was asserted only on the branch that never
+        # The slice-then-balance order at untrusted.py:430 exists because a
+        # slice can cut a bidi scope in half, so balancing has to see what
+        # survives it. That order was asserted only on the branch that never
         # slices: the bidi test fed short lines, which take the `else` arm.
         block = untrusted.stderr_block(
             "\u202e" + "z" * 400, source="ffmpeg", max_width=50
@@ -574,11 +608,27 @@ class TestTheFenceReachesEverySite:
 
         monkeypatch.setattr(frames.subprocess, "run", fake_run)
         monkeypatch.setattr(whisper.subprocess, "run", fake_run)
+        # ONE patch, covering both modules, and deliberately not two. `frames`
+        # and `whisper` each `import shutil`, so both names are bound to the
+        # single stdlib module object -- `frames.shutil is whisper.shutil` is
+        # True -- and setting `which` on it is a global change that whisper's
+        # three presence checks see as well. A gate review read this as a
+        # missing patch and filed it; adding the second line changed nothing,
+        # measured with an empty PATH directory, which is why this comment is
+        # here instead of that line.
+        #
+        # It stops being true if anyone rebinds the NAME rather than the
+        # attribute -- `monkeypatch.setattr(frames, "shutil", fake)` swaps
+        # frames' own binding and leaves whisper on the real module. Patch the
+        # attribute, not the name.
         monkeypatch.setattr(frames.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
         return fake_run
 
-    def _assert_fenced(self, message: str) -> None:
-        assert_fenced(message, source="ffprobe/ffmpeg", tail="Conversion failed!")
+    def _assert_fenced(self, message: str, source: str) -> None:
+        # `source` is per-site now. It used to be the literal "ffprobe/ffmpeg",
+        # which no block can ever contain, which is how it went eight tests
+        # without anyone noticing the helper ignored it.
+        assert_fenced(message, source=source, tail="Conversion failed!")
 
     def test_get_metadata_asks_ffprobe_to_speak(self, tmp_path: Path) -> None:
         # A real ffprobe, no monkeypatch. `-v quiet` silences ffprobe's stderr
@@ -631,49 +681,49 @@ class TestTheFenceReachesEverySite:
         clip.write_bytes(b"not really a video")
         with pytest.raises(SystemExit) as caught:
             frames.get_metadata(str(clip))
-        self._assert_fenced(str(caught.value))
+        self._assert_fenced(str(caught.value), "ffprobe")
 
     def test_extract(self, failing_run, tmp_path: Path) -> None:
         clip = tmp_path / "clip.mp4"
         clip.write_bytes(b"not really a video")
         with pytest.raises(SystemExit) as caught:
             frames.extract(str(clip), tmp_path / "out", fps=1.0)
-        self._assert_fenced(str(caught.value))
+        self._assert_fenced(str(caught.value), "ffmpeg")
 
     def test_extract_scene_candidates(self, failing_run, tmp_path: Path) -> None:
         clip = tmp_path / "clip.mp4"
         clip.write_bytes(b"not really a video")
         with pytest.raises(SystemExit) as caught:
             frames.extract_scene_candidates(str(clip), tmp_path / "out")
-        self._assert_fenced(str(caught.value))
+        self._assert_fenced(str(caught.value), "ffmpeg")
 
     def test_extract_keyframes(self, failing_run, tmp_path: Path) -> None:
         clip = tmp_path / "clip.mp4"
         clip.write_bytes(b"not really a video")
         with pytest.raises(SystemExit) as caught:
             frames.extract_keyframes(str(clip), tmp_path / "out")
-        self._assert_fenced(str(caught.value))
+        self._assert_fenced(str(caught.value), "ffmpeg")
 
     def test_extract_audio(self, failing_run, tmp_path: Path) -> None:
         clip = tmp_path / "clip.mp4"
         clip.write_bytes(b"not really a video")
         with pytest.raises(SystemExit) as caught:
             whisper.extract_audio(str(clip), tmp_path / "a.mp3")
-        self._assert_fenced(str(caught.value))
+        self._assert_fenced(str(caught.value), "ffmpeg")
 
     def test_audio_duration(self, failing_run, tmp_path: Path) -> None:
         audio = tmp_path / "a.mp3"
         audio.write_bytes(b"not really audio")
         with pytest.raises(SystemExit) as caught:
             whisper.audio_duration(audio)
-        self._assert_fenced(str(caught.value))
+        self._assert_fenced(str(caught.value), "ffprobe")
 
     def test_split_audio(self, failing_run, tmp_path: Path) -> None:
         audio = tmp_path / "a.mp3"
         audio.write_bytes(b"x" * 4096)
         with pytest.raises(SystemExit) as caught:
             whisper.split_audio(audio, tmp_path, [(0.0, 30.0)])
-        self._assert_fenced(str(caught.value))
+        self._assert_fenced(str(caught.value), "ffmpeg")
 
     def test_split_audio_reports_a_zero_exit_honestly(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

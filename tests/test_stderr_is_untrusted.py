@@ -46,13 +46,13 @@ NON-GOALS, so a green run here is not read as "stderr is trusted now":
     tool for them and its docstring says so: collapsing a forty-line diagnostic
     into one line destroys the only reason it is printed. They take a fenced
     BLOCK instead (`untrusted.stderr_block`), applied at
-    `frames.py:290`/`:401`/`:473`/`:838` and `whisper.py:376`/`:422`/`:490`, and
+    `frames.py:291`/`:402`/`:474`/`:839` and `whisper.py:376`/`:422`/`:490`, and
     `tests/test_stderr_blocks_are_fenced.py` is what pins that shape. Nothing in
     THIS file would notice if every one of those fences were removed tomorrow —
     the two files divide the surface by the shape of the fence, not by the
     origin of the value.
 
-    Two of the seven run ffmpeg at `-loglevel info` (`frames.py:449` and `:819`),
+    Two of the seven run ffmpeg at `-loglevel info` (`frames.py:450` and `:820`),
     where the metadata block is printed on every run, and the other five run at
     `-loglevel error`, where the author's text appears only if ffmpeg quotes it
     back inside an error. An earlier draft of this bullet called the first pair

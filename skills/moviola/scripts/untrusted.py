@@ -65,9 +65,14 @@ NON-GOALS, stated here because an unstated limit reads as a claim of coverage:
     respect — which is the argument for `md_fence` eventually calling in here,
     and not an argument that it already does.
 
-  * **`stderr_block`'s attribution is structural; its notices are not.** No
-    foreign line can produce a line without the prefix, and that is the whole
-    guarantee: unprefixed means moviola wrote it. The header and the
+  * **`stderr_block`'s attribution is structural IN THE STRING; its notices are
+    not structural at all.** No foreign line can produce a line without the
+    prefix, and inside the string an agent ingests that is the whole guarantee:
+    unprefixed means moviola wrote it. It does not survive a TERMINAL — the
+    families two bullets above repaint at physical column zero, and a run of C0
+    backspace overstrikes the prefix with no escape sequence at all, so a human
+    reading this directly gets a weaker promise than an agent does. See
+    `stderr_block`'s own NON-GOALS for that half. The header and the
     "not shown" line are ordinary text a hostile capture can imitate INSIDE a
     prefixed line, and so is the per-line width marker. They exist so a bound
     is never silent, not so a reader can trust their arithmetic.
@@ -105,7 +110,8 @@ _BIDI_CLOSERS = ("\u202c", "\u2069")
 #
 # The prefix is the only structural part. It goes on every line of the capture,
 # so a reader's rule is "unprefixed means moviola wrote it", and no foreign line
-# can satisfy that rule no matter what it contains.
+# can satisfy that rule no matter what it contains -- in the STRING. On a
+# terminal it can, and the module NON-GOALS above say how.
 BLOCK_PREFIX = "| "
 
 # `| ` is ON + WS — it holds no STRONG character, and UAX#9 P2/P3 take a line's
