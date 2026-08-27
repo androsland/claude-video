@@ -868,6 +868,78 @@ class TestTheLockFileIsNotSomebodyElsesFile:
         assert "pid 4321" in described
         assert len(described) < 1000
 
+    def test_an_enormous_pid_does_not_become_the_message(
+        self, tmp_path: Path
+    ) -> None:
+        # `started` is sliced; `pid` was not, and both come off the same record
+        # written by whoever got here first. `isinstance(pid, int)` says the
+        # value is the right TYPE, never that it is the right SIZE — and an
+        # int has no length until something renders it, which is precisely
+        # what the f-string below it did.
+        #
+        # 4_000 digits, well under the record cap, so this is a WELL-FORMED
+        # record rather than one the size check catches a layer earlier. The
+        # measured line before the fix was 4,535 characters.
+        lock = tmp_path / workdir.LOCK_NAME
+        lock.write_text(json.dumps({"pid": int("9" * 4_000), "started": "now"}))
+
+        described = workdir._describe_holder(lock)
+
+        assert len(described) < 200, "the pid became the message"
+        assert "9999999999" not in described
+        assert "another moviola run" in described
+        assert "started now" in described, "the rest of the record is still said"
+
+    def test_a_pid_too_large_to_render_does_not_raise(self, tmp_path: Path) -> None:
+        # The bound cannot be a slice of `str(pid)`: since 3.10.7 CPython
+        # raises ValueError converting an int over `sys.get_int_max_str_digits()`
+        # (4300 by default), so rendering-then-truncating crashes on exactly the
+        # input the cap exists for. It has to be compared as a NUMBER. And the
+        # limit is not a defence to lean on either — it is absent before 3.10.7
+        # and settable at runtime, so on a 3.10.0 host the old code's ceiling
+        # was the 64KB record cap, not 4,299 digits.
+        lock = tmp_path / workdir.LOCK_NAME
+        lock.write_text('{"pid": ' + "9" * 20_000 + "}")
+
+        described = workdir._describe_holder(lock)  # must not raise
+
+        assert "another moviola run" in described
+        assert len(described) < 200
+
+    def test_an_ordinary_pid_is_still_named(self, tmp_path: Path) -> None:
+        # The must-not-fire half. A real pid is four or five digits and the
+        # refusal's whole job is to name it, so a cap that swallowed it would
+        # be a worse bug than the one it fixes.
+        lock = tmp_path / workdir.LOCK_NAME
+        lock.write_text(json.dumps({"pid": 31337, "started": "now"}))
+
+        assert "pid 31337" in workdir._describe_holder(lock)
+
+    def test_the_ansi_non_goal_is_still_the_truth(self, tmp_path: Path) -> None:
+        # This pins a documented LIMIT rather than a behaviour, and it is meant
+        # to fail the day someone closes it: `workdir`'s NON-GOALS say a planted
+        # `started` can carry ANSI, so if `stderr_line` starts stripping it, the
+        # prose becomes a false claim of a gap that no longer exists. Whoever
+        # makes that change should be made to come here and delete this.
+        lock = tmp_path / workdir.LOCK_NAME
+        lock.write_text(json.dumps({"pid": 4321, "started": "\x1b[2Kwiped"}))
+
+        assert "\x1b[2K" in workdir._describe_holder(lock)
+        assert "ANSI" in (workdir.__doc__ or ""), "the NON-GOAL that documents this is gone"
+
+    def test_a_boolean_is_not_reported_as_a_pid(self, tmp_path: Path) -> None:
+        # `bool` is a subclass of `int`, so `isinstance(pid, int)` is True for
+        # `true` in the JSON and the line read "pid True". Nothing crashes; it
+        # just states something false about somebody else's process in a
+        # message whose only purpose is to be believed.
+        lock = tmp_path / workdir.LOCK_NAME
+        lock.write_text(json.dumps({"pid": True, "started": "now"}))
+
+        described = workdir._describe_holder(lock)
+
+        assert "True" not in described
+        assert "started now" in described
+
 
     def test_the_file_is_removed_before_the_lock_is_released(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -693,3 +693,106 @@ class TestAFunctionReturnsWhatItSaysItReturns:
                 f"its annotation declares {arity}"
             )
         assert checked, "no function documents its return tuple any more"
+
+
+class TestNoDocstringIsWrittenWhereNothingReadsIt:
+    """A string nothing binds is a discarded expression, not documentation.
+
+    Every other test in this file compares a claim to the code it describes.
+    This one asks a prior question: is the claim anywhere a reader will find
+    it? `_describe_holder` acquired a second triple-quoted block when a fix
+    rewrote its docstring without deleting the old one. Python evaluates a
+    bare string statement and throws the value away, so `help()`, `__doc__`,
+    every IDE hover and every doc generator showed the FIRST block while the
+    second sat in the file looking authoritative — the reader in the editor
+    and the reader in the terminal were being told different things, and the
+    one in the terminal could not tell.
+
+    It is the same failure mode as a stale comment, with one difference that
+    makes it worse: a stale comment is at least displayed. This is prose that
+    is present, plausible, maintained by nobody, and invisible to everything
+    that reads documentation programmatically.
+
+    NON-GOALS, so a green run is not read as more than it is:
+
+      * It cannot see whether a docstring is TRUE, only whether it is reachable.
+        The rest of this file does the other half.
+      * It exempts the PEP 258 attribute-docstring convention — a string
+        directly after an assignment: `TIMEOUT = 30` followed by a bare
+        string. That is a discarded expression too, but Sphinx reads it and it
+        is a
+        legitimate way to document a module constant. `scripts/` uses none
+        today, so the exemption exists for code written later; without it this
+        test would fire on correct work the first time someone reached for it.
+      * It scans `scripts/` — what the skill ships. `tests/` and `hooks/` are
+        out of scope, and a stray literal there stays invisible here.
+      * A string statement is only findable when it is a plain literal. One
+        built by concatenation at runtime, or an f-string, is not a `Constant`
+        and is not seen — nor should it be, since neither was ever going to be
+        a docstring.
+      * It says nothing about a docstring that is MISSING. Requiring one is a
+        house-style rule; this is a defect check.
+    """
+
+    @staticmethod
+    def _orphans(path: Path) -> list[tuple[int, str]]:
+        """Every string statement in `path` that no name and no `__doc__` binds."""
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        found: list[tuple[int, str]] = []
+        for node in ast.walk(tree):
+            if not isinstance(
+                node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                continue
+            body = node.body
+            # `body[1:]`: position 0 IS the docstring, which is the one case
+            # here that is bound to anything.
+            for index, stmt in enumerate(body[1:], start=1):
+                if not (
+                    isinstance(stmt, ast.Expr)
+                    and isinstance(stmt.value, ast.Constant)
+                    and isinstance(stmt.value.value, str)
+                ):
+                    continue
+                if isinstance(body[index - 1], (ast.Assign, ast.AnnAssign)):
+                    continue  # PEP 258 attribute docstring — see NON-GOALS
+                found.append((stmt.lineno, getattr(node, "name", "<module>")))
+        return found
+
+    def test_no_shipped_module_carries_a_string_nothing_reads(self) -> None:
+        scripts = sorted((REPO / "skills" / "moviola" / "scripts").glob("*.py"))
+        assert scripts, "the scan found no modules to check"
+        offenders = [
+            f"{path.name}:{line} in {owner}"
+            for path in scripts
+            for line, owner in self._orphans(path)
+        ]
+        assert not offenders, (
+            "a string statement is evaluated and discarded, so this prose is in "
+            "no `__doc__` and no `help()` output: " + ", ".join(offenders)
+        )
+
+    def test_it_finds_a_second_docstring_and_spares_the_first(self, tmp_path: Path) -> None:
+        # The must-fire half, and the boundary beside it: one docstring is the
+        # normal case and has to stay silent, or the test above is vacuous.
+        one = tmp_path / "one.py"
+        one.write_text('def f():\n    """Real."""\n    return 1\n', encoding="utf-8")
+        assert self._orphans(one) == []
+
+        two = tmp_path / "two.py"
+        two.write_text(
+            'def f():\n    """Real."""\n    """Orphan."""\n    return 1\n',
+            encoding="utf-8",
+        )
+        assert [line for line, _ in self._orphans(two)] == [3]
+
+    def test_an_attribute_docstring_is_not_an_orphan(self, tmp_path: Path) -> None:
+        # The must-not-fire half, stated as a test rather than only as prose:
+        # this shape is a discarded expression too, and it is correct code.
+        module = tmp_path / "attr.py"
+        module.write_text(
+            '"""Module."""\nTIMEOUT = 30\n"""How long to wait."""\n',
+            encoding="utf-8",
+        )
+        assert self._orphans(module) == []
+

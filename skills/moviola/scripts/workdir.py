@@ -47,6 +47,16 @@ NON-GOALS, stated because an unstated limit reads as a claim of coverage:
     about the parent being swapped underneath the run, which needs `dir_fd`
     relative opens throughout and is a different design. Nothing here detects
     it.
+  * **The refusal is fenced against line forgery, not against a terminal.**
+    `stderr_line` neutralizes line breaks and balances bidi marks; it does not
+    touch ANSI, so a planted `started` field carrying `ESC[2K ESC[1G` can erase
+    the line it was printed on and write something else over it. This is the
+    first caller to feed `stderr_line` a value an attacker can plant BEFORE the
+    run — everywhere else it fences the stderr of a subprocess moviola itself
+    launched. Stripping ANSI belongs in `untrusted` if it belongs anywhere, and
+    it is not obviously free: yt-dlp and ffmpeg colour their own output, and
+    four other call sites pass it through today. Bounded, so the damage is one
+    line rather than a screen; deliberately not fixed here.
   * **Refusals are for the WRONG KIND OF THING, not for ordinary failure.** A
     write that fails on ENOSPC or EIO still surfaces as a traceback: that is
     the user's own machine telling them something true, and dressing it up as a
@@ -84,6 +94,15 @@ LOCK_NAME = ".moviola.lock"
 _MAX_RECORD = 64 * 1024
 _MAX_STARTED = 200
 
+# A pid is compared against this as a NUMBER and never rendered first. Since
+# 3.10.7 CPython raises converting an int over `sys.get_int_max_str_digits()`
+# to a string, so slicing `str(pid)` would crash on exactly the value the bound
+# exists for — and that limit is no defence in its own right: it is absent
+# before 3.10.7 and settable at runtime, which on an older 3.10 left the real
+# ceiling at `_MAX_RECORD`, a 64KB stderr line. 20 digits covers every pid a
+# 64-bit kernel can issue with room to spare.
+_MAX_PID = 10 ** 20
+
 # How many times to start over when the lock file is replaced underneath the
 # acquire. Five is "a couple of unlucky interleavings", not a retry budget —
 # anything that loses this race five times running is not the accidental second
@@ -101,6 +120,11 @@ def _describe_holder(lock_path: Path) -> str:
     rather than a traceback. A refusal that crashes while explaining itself is
     worse than the collision it was refusing.
 
+    Absent is the ORDINARY case rather than the pathological one: the holder
+    writes its record just AFTER taking the lock, so a run arriving inside that
+    window finds an empty file and still has to say something useful. None of
+    the branches below is an error path; every one of them returns prose.
+
     The parse stays here rather than moving into `untrusted`, and AGENTS.md
     can be read as forbidding that, so: `untrusted` holds edits and parses that
     are about the SHAPE of a foreign value — a line break, a bidi scope, a float
@@ -111,15 +135,6 @@ def _describe_holder(lock_path: Path) -> str:
     nothing about moviola. The pieces that ARE shape-level — the line fence, and
     the length bound this record needs before it reaches it — do come from
     there.
-    """
-    """Who says they hold `lock_path`, phrased for a stderr line.
-
-    The record is read back off a directory this run does NOT own — that is the
-    entire premise — so it is somebody else's output even though moviola wrote
-    the last one, and it is fenced and parsed guardedly like any other. A record
-    that is missing, truncated, or not JSON is the normal case rather than an
-    error: the holder writes it just AFTER taking the lock, so a run arriving in
-    that window finds an empty file and must still say something useful.
     """
     # `O_NOFOLLOW` and a bounded read rather than `read_text()`: the path is
     # somebody else's to point wherever they like, and a symlink to /dev/zero
@@ -147,8 +162,14 @@ def _describe_holder(lock_path: Path) -> str:
     pid = record.get("pid")
     started = record.get("started")
     parts = []
-    if isinstance(pid, int):
-        parts.append(f"pid {pid}")
+    # `bool` is a subclass of `int`, so a bare `isinstance` check reports
+    # `"pid": true` as "pid True" — a false statement about somebody else's
+    # process, in a sentence whose only job is to be believed.
+    if isinstance(pid, int) and not isinstance(pid, bool):
+        # Out of range is not truncated to a plausible prefix: the first twenty
+        # digits of a nonsense number READ like a pid, and a refusal that
+        # invents one is worse than a refusal that admits it has nothing.
+        parts.append(f"pid {pid}" if -_MAX_PID < pid < _MAX_PID else "an implausible pid")
     if isinstance(started, str) and started:
         parts.append(f"started {stderr_line(started[:_MAX_STARTED])}")
     if not parts:
