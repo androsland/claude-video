@@ -299,6 +299,22 @@ class TestTheGapsMoveWithTheTimeline:
 # --------------------------------------------------------------------------
 
 
+def _frames_line(out: str) -> str:
+    """The Frames bullet alone — a count elsewhere in the report is not it.
+
+    Scoping matters more here than it looks. The report prints, unconditionally
+    whenever any frame renders, that "`t=MM:SS` is the absolute timestamp in the
+    source video" — so an assertion for the word "timestamp" against the whole
+    report is true on every run that produced a frame, including one where the
+    shortfall sentence never rendered at all. Asserting against `out` is how a
+    test about disclosure ends up asserting only that frames exist.
+    """
+    for line in out.splitlines():
+        if line.startswith("- **Frames:**"):
+            return line
+    raise AssertionError("the report has no Frames bullet")
+
+
 def _stub_ffmpeg(monkeypatch, out_dir: Path, frame_count: int, ts_count: int):
     """An ffmpeg that writes `frame_count` frames but reports `ts_count` times.
 
@@ -447,8 +463,11 @@ class TestTheDroppedFramesReachTheReport:
         assert moviola.main() == 0
         out = capsys.readouterr().out
 
-        assert "2 dropped" in out
-        assert "timestamp" in out.lower()
+        line = _frames_line(out)
+        assert "2 dropped" in line
+        # Scoped to the bullet: the report's standing "`t=MM:SS` is the absolute
+        # timestamp" line satisfies this word against `out` on any run at all.
+        assert "timestamp" in line.lower()
 
     def test_the_default_engine_puts_the_count_where_the_report_looks(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -552,14 +571,6 @@ class TestTheFallbackReportsItsOwnFrames:
         assert moviola.main() == 0
         return capsys.readouterr().out
 
-    @staticmethod
-    def _frames_line(out: str) -> str:
-        """The Frames bullet alone — a count elsewhere in the report is not it."""
-        for line in out.splitlines():
-            if line.startswith("- **Frames:**"):
-                return line
-        raise AssertionError("the report has no Frames bullet")
-
     FALLBACK_META = {
         "engine": "uniform", "candidate_count": 7, "deduped_count": 0,
         "selected_count": 1, "fallback": True, "fallback_from": "scene",
@@ -585,7 +596,7 @@ class TestTheFallbackReportsItsOwnFrames:
         cut_clip: Path,
     ) -> None:
         """Dropping the false sentence must not drop the fact under it."""
-        line = self._frames_line(
+        line = _frames_line(
             self._report(monkeypatch, capsys, cut_clip, dict(self.FALLBACK_META))
         )
 
@@ -599,7 +610,7 @@ class TestTheFallbackReportsItsOwnFrames:
         cut_clip: Path,
     ) -> None:
         """"Uniform fallback" reads as "static video". Here it was not."""
-        line = self._frames_line(
+        line = _frames_line(
             self._report(monkeypatch, capsys, cut_clip, dict(self.FALLBACK_META))
         )
 
@@ -621,9 +632,11 @@ class TestTheFallbackReportsItsOwnFrames:
         meta.update(candidate_count=2, untimed_before_fallback=1,
                     untimed_caused_fallback=False)
         out = self._report(monkeypatch, capsys, cut_clip, meta)
-        line = self._frames_line(out)
+        line = _frames_line(out)
 
-        assert "1" in line
+        # The renderer computes the noun; nothing pinned it until now.
+        assert "1 frame " in line
+        assert "1 frames" not in line
         assert "scene" in line.lower()
         assert "static" not in line.lower()
         assert "misaligned" not in out
@@ -638,7 +651,7 @@ class TestTheFallbackReportsItsOwnFrames:
         meta = dict(self.FALLBACK_META)
         meta.update(candidate_count=2, untimed_before_fallback=0,
                     untimed_caused_fallback=False)
-        line = self._frames_line(self._report(monkeypatch, capsys, cut_clip, meta))
+        line = _frames_line(self._report(monkeypatch, capsys, cut_clip, meta))
 
         assert "timestamp" not in line.lower()
         assert "static" not in line.lower()

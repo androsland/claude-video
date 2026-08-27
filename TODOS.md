@@ -276,6 +276,23 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   stop joining on position: pair on the frame number ffmpeg reports (`n:` in the same
   showinfo line) rather than on list index. Filed for `fix/quiet-failures-iii`.
 
+- **Dropping an untimed frame lowers the count the engine floors are compared against,
+  so a showinfo gap can buy a second full ffmpeg re-decode.** (forgeward performance
+  reviewer, 2026-08-27) `pair_with_timestamps` returns fewer candidates than were
+  extracted, and both engines then test that reduced count against a floor —
+  `scene_count + untimed >= SCENE_MIN_FRAMES` in `extract_scene_or_uniform`,
+  `len(candidates) + untimed >= KEYFRAME_MIN` in the keyframe path. The `+ untimed` term
+  is there precisely so the report can say the shortfall CAUSED the fallback, which means
+  the fallback genuinely happens in that case: a video with enough real scene changes
+  falls back to uniform sampling and re-decodes the source from scratch. Cost is one extra
+  full pass over the video, and it scales with duration, not with the size of the gap —
+  one missing showinfo line on a two-hour source is the same price as fifty. This is the
+  right behaviour given a positional join, not a defect on top of it: the alternative is
+  keeping frames whose timestamps are invented. It stops being a cost at all once pairing
+  moves to the reported frame number (entry above), because a frame with a real `n:` is
+  never dropped for lack of a match. Filed as the cost half of `fix/quiet-failures-iii`,
+  not as separate work.
+
 - **A timestamp SURPLUS is documented as ordinary, and through `moviola.py` it is not.**
   (quiet-failures review, 2026-08-27) `pair_with_timestamps`'s docstring justifies
   ignoring a surplus because `-frames:v` caps the files written while showinfo keeps
@@ -1027,6 +1044,30 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `AGENTS.md` as constraints rather than leaving as narrative — the `find_spec`
   rejection and the ambient-key rule are both in that class. Nothing verifies that
   extraction step, so a pass that archives without lifting them is a silent regression.
+
+- **Five maintainability items from the gate on `fix/quiet-failures-ii`.** (forgeward
+  maintainability reviewer, 2026-08-27) All PASS-with-debt — none blocks, and they are
+  recorded together because they were found together and share one cause: the branch
+  added disclosure in four places at once and the fourth copy is where a shape becomes a
+  duplication.
+  1. `moviola.py:52` and `moviola.py:114` carry a byte-identical line —
+     `spans = ", ".join(f"{format_time(s)}–{format_time(e)}" for s, e in gaps.ranges)`.
+     Two callers is the threshold where extracting a `_format_spans(gaps)` helper stops
+     being premature; a third would make it overdue.
+  2. The four `untimed_dropped` / `fallback` metadata blocks in `frames.py` are assembled
+     inline at each return, so a new key has to be added in four places and the compiler
+     will not say which one was missed. A constructor for the meta dict would make the
+     set of keys a single fact.
+  3. The showinfo parse (`SHOWINFO_TS_RE.finditer` over `result.stderr`) is a guarded
+     parse of output this program did not write, which is exactly what `untrusted.py`
+     exists to hold. It sits in `frames.py` for historical reasons only. Moving it is
+     mechanical and would put the surplus/shortfall reasoning beside the other fences.
+  4. `render_report`'s ordering is now load-bearing — the Frames bullet must be built
+     before the transcript block-quote because both read shared state — and nothing says
+     so. A comment is the cheap fix; a explicit render-order list is the real one.
+  5. `whisper.py:1017` builds a stderr line from a raw tuple, so a `TranscriptGaps` prints
+     as `(([1.0, 2.0]), 1, 4)` rather than as spans. It is stderr and it is diagnostic, but
+     it is the one place on the branch where a range reaches a human unformatted.
 
 ## Completed
 
