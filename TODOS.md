@@ -41,26 +41,8 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Report as an untrusted document
 
-- **ffmpeg's and ffprobe's captured stderr is remote-controlled and still unfenced.**
-  (stderr review, 2026-08-26) `whisper.py:330`/`:373`/`:439` and `frames.py:136`/`:235`/
-  `:299`/`:654` interpolate `result.stderr.strip()` into a `SystemExit` message. That is a
-  banner echoing container metadata the video's author wrote, so it is as remote as the
-  API bodies `stderr_line` now fences — but unlike them it is legitimately MULTI-LINE,
-  and collapsing a forty-line diagnostic into one line destroys the only reason it is
-  printed. So it was left alone rather than half-fixed: this surface needs a fenced
-  BLOCK (a delimiter, or a prefix on every line) and not `stderr_line`. Deciding that
-  shape is the work; the sites are already enumerated above. **Two of the seven are the
-  live vector and five are conditional** (security review, 2026-08-26): `frames.py:299`
-  and `:654` run ffmpeg at `-loglevel info`, which prints the container's
-  `Metadata: title/comment` block verbatim on every run, so the author's text reaches
-  stderr whether or not anything failed. The other five run at `-loglevel error` and
-  carry it only when ffmpeg quotes the value back inside an error message. Start with
-  the two. The three `whisper.py` sites also reach the agent a SECOND way, re-printed
-  by `moviola.py:396`; fencing them at the raise closes both routes, and fencing the
-  re-print site closes neither properly — see the entry on that below.
-
 - **yt-dlp's own output is structurally unreachable from inside this process.** (stderr
-  review, 2026-08-26) `download.py:133` and `:209` run `subprocess.run(cmd,
+  review, 2026-08-26) `download.py:173` and `:249` run `subprocess.run(cmd,
   stdout=sys.stderr, stderr=sys.stderr)`, so yt-dlp inherits the file descriptor and
   writes to it directly. Not one of those bytes passes through Python, and no helper
   that edits an interpolated value can touch them — `stderr_line` covers exactly zero of
@@ -108,32 +90,24 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   means stripping or escaping, and `untrusted.py` is deliberately not a sanitizer: the
   value is reported in full because a caller debugging a failed request needs to read
   what the server actually said. Recorded as a known hole with a stated reason, not a
-  plan. Non-goal: none of these forge a LINE, which is the property the tests pin, so
-  this is not a gap in the fix that shipped.
-
-- **`moviola.py:396` re-prints ffmpeg's captured stderr, which is a second path to a
-  surface already known to be uncovered.** (security gate, 2026-08-26) the handler at
-  `moviola.py:395` is `except SystemExit as exc:` and its body prints `{exc}` raw at
-  `:396`. `extract_audio`
-  (`whisper.py:330`), `audio_duration` (`:373`) and `split_audio` (`:439`) each raise
-  `SystemExit` with `result.stderr.strip()` embedded, and all three are called from
-  `transcribe_video`'s body (`:900`, `:920`, `:929`) — the only `except SystemExit` in
-  `whisper.py` is at `:793` and guards `transcribe_one()`, the upload path, which is
-  disjoint from them. So ffmpeg's and ffprobe's captured stderr reaches the agent context
-  through this handler on any extraction, probe or split failure during a Whisper
-  fallback, multi-line and unfenced. That value is already the first of the three
-  surfaces the CHANGELOG names as knowingly uncovered; what was missing is that it
-  arrives by two routes, and only the direct one was enumerated. **Do not fence it here.**
-  `stderr_line` collapses line breaks to spaces, and collapsing a forty-line ffmpeg
-  diagnostic into one line destroys the only reason it is printed. The fix belongs at the
-  three raise sites, with whatever block-safe fence the ffmpeg-stderr work adopts —
-  fixing there covers this handler, every other caller of those three functions, and the
-  case where the `SystemExit` is not caught at all and the interpreter prints it.
+  plan. Non-goal: none of these forge a LINE **in the string**, which is the property the
+  tests pin. That scoping got sharper on 2026-08-27, because `stderr_block` makes a
+  column-zero claim `stderr_line` never did: the CSI family also holds column-ADDRESSING
+  sequences — CHA (`ESC[G`), CNL (`ESC[E`) and the two-character 7-bit NEL (`ESC E`, which
+  `splitlines` correctly does not treat as a break) — and on a terminal those repaint a
+  captured line at physical column zero with no `| ` in front of it. The string an agent
+  ingests is unaffected and that is the reader the fence is built for; a human at a
+  terminal is the reader it is not. The bidi half of the same hole WAS closed there:
+  `DIR_ANCHOR` (U+200E, written by moviola) pins each rendered line's base direction to
+  LTR, so a RTL capture can no longer move the prefix to the visual right edge. U+200F
+  and U+061C inside the capture still reorder the neutral run after them, which is why
+  this entry stays open.
 
 - **Four stderr sites interpolate an exception raised while handling remote data, and the
-  channel is latent rather than live.** (security gate, 2026-08-26) `download.py:168`
-  (`info.json parse failed`), `moviola.py:233` and `:371` (`subtitle parse failed`), and
-  `moviola.py:403` (`whisper fallback failed`, the `except Exception` arm) each print
+  channel is latent rather than live.** (security gate, 2026-08-26; anchors re-verified
+  2026-08-27) `download.py:208` (`info.json parse failed`), `moviola.py:369` and `:501`
+  (`subtitle parse failed`), and `moviola.py:534-535` (`whisper fallback failed`, the
+  `except Exception` arm at `:527`) each print
   `{exc}` raw. A gate reviewer first flagged three of these as already-itemized uncovered
   surfaces; they are itemized nowhere, so they were audited from scratch. Every exception
   class reachable at these four builds its message from fixed strings and numbers:
@@ -147,32 +121,77 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   second cited `whisper.py:706-708` as a live path, and the third scoped the invariant
   to that one site. Segment dicts are subscripted rather than `.get()`-ed at three
   places, not one, and they do not share a set of feeders: `shift_segments`
-  (`whisper.py:706-708`) sees only Whisper output; `_dedupe` (`transcribe.py:75-80`)
+  (`whisper.py:757-759`) sees only Whisper output; `_dedupe` (`transcribe.py:75-80`)
   sees only caption output, being called from inside `parse_vtt` at `:68`; and
   `filter_range` (`:96`) and `format_transcript` (`:102-104`) see BOTH, which is the
   whole point of the shape and is what `whisper.py`'s module docstring means by "the
   rest of the pipeline doesn't care where the transcript came from". Three producers feed
   those three sites, and every one of them constructs `start`, `end` and `text`
-  unconditionally: `_segments_from_response` (`whisper.py:766`, and the whole-text
-  fallback at `:774`), `local_whisper._collect` (`:392`), and `parse_vtt`
+  unconditionally: `_segments_from_response` (`whisper.py:817`, and the whole-text
+  fallback at `:825`), `local_whisper._collect` (`:392`), and `parse_vtt`
   (`transcribe.py:55`). So a key a server omitted is defaulted long before anything
   indexes it. That invariant is what makes the class unreachable, it has to hold across
   all three producers because two of the three indexing sites are shared, and it is
-  recorded here so whoever adds a fourth knows what it has to hold. `moviola.py:403` is
+  recorded here so whoever adds a fourth knows what it has to hold. `moviola.py:534-535` is
   structurally safe from the ffmpeg value above it, because `SystemExit` subclasses
-  `BaseException` and cannot land in an `except Exception`. `transcribe.py:62`
+  `BaseException` and cannot land in an `except Exception`. `transcribe.py:63`
   interpolates `Path(path).name`, safe for a different reason — the yt-dlp output
-  template is the fixed `video.%(ext)s` (`download.py:117`, `:183`), so the filename never
+  template is the fixed `video.%(ext)s` (`download.py:157`, `:223`), so the filename never
   carries the remote title. Nothing enforces any of this: one `raise ValueError(f"bad
   cue: {line}")` added inside `parse_vtt` opens the channel silently and no test would
   notice. Wrapping all four in `stderr_line` costs nothing on a message with no remote
   text in it and is the obvious cheap fix; it was NOT taken on the branch that added
   `stderr_line`, which was already at roughly 1,250 insertions when this was found.
-  Non-goals: this is not one of the three surfaces the CHANGELOG lists — those carry
-  remote text today and these do not, and conflating them overstates what shipped. It
+  Non-goals: this is not one of the surfaces the 0.3.0 CHANGELOG entry lists — it called
+  three, of which ffmpeg's captured stderr has since been fixed and moved to
+  `## Completed`, leaving yt-dlp's inherited descriptor and `md_fence` open above. Those
+  carry remote text today and these do not, and conflating them overstates what shipped.
+  It
   covers sites that interpolate an *exception* and says nothing about a future site
   interpolating remote data directly. And the audit is a snapshot of third-party message
   formats reachable today, not a guarantee about them.
+
+- **`stderr_block` bounds what it RENDERS, not what it reads.** (performance review,
+  2026-08-27) `splitlines()` materializes every line of the capture before `max_lines`
+  is applied, so peak memory is O(lines in the capture) rather than O(`max_lines`) —
+  measured at +51MB RSS for a 10MB, 5M-line capture. Deliberately not fixed: it is an
+  amplifier, not a new unbounded read, because `subprocess.run(capture_output=True)` has
+  already buffered the whole capture into one string before this function is called, and
+  the path is about to raise anyway. A streaming rewrite would move the bound to the
+  right place and buy nothing until the capture itself is streamed, which is the fix that
+  would actually matter and is much larger. Non-goals: a single enormous LINE costs
+  nothing extra here (`len(line)` is O(1) and the slice precedes `balance_bidi`), and
+  this says nothing about the descriptor yt-dlp inherits, where no buffer of ours exists
+  at all.
+
+- **`stderr_block` walks the capture three times, not once.** (performance review,
+  2026-08-27) `text.strip("\r\n")`, then `.splitlines()`, then the per-line
+  comprehension — three O(n) passes where one would do. The reviewer raised it and
+  **declined to file it as a finding**, correctly: it is a constant factor on a path
+  that is about to raise, and the entry above bounds the same code by the same
+  argument. It is recorded here so the next reader reaches the same conclusion without
+  re-deriving it, not as work to pick up. Non-goals: this is NOT a licence to fuse the
+  passes — a hand-rolled single-pass scanner is exactly the mutation the KILL harness
+  kills, because both obvious spellings get CRLF wrong (`split("\n")` leaves a bare CR,
+  and splitting on each `LINE_BREAKS` character manufactures an empty line between the
+  pair). `splitlines()` is the correct primitive here and the cost of it is the price.
+
+- **Two tests in `test_stderr_blocks_are_fenced.py` can skip themselves into silence.**
+  (testing review, 2026-08-27; corrected 2026-08-27 after the gate) The two are
+  `TestTheFenceReachesEverySite.test_get_metadata_asks_ffprobe_to_speak`, which guards
+  on `shutil.which("ffprobe")`, and the euid-0 skip on the unwritable-directory vector,
+  because root can write to the directory that vector depends on. A green run is
+  therefore not by itself evidence either ran. CI must keep ffmpeg present and must not
+  run as root for these to mean anything, and nothing asserts either condition — `-rs`
+  is the only way to see which happened. The clean fix is a CI assertion that neither
+  skips, which belongs with the CI work rather than here. **This entry named the wrong
+  two tests until the gate that caught it**: `TestTheLiveVectorEndToEnd` was described
+  as skipping on a binary it never invokes, when in fact its `forging_clip` fixture
+  shells out to ffmpeg through `conftest._run` with no presence guard, so a host
+  without ffmpeg ERRORS the class rather than skipping it. That is the loud failure and
+  it is the suite's convention, so it is deliberately left alone. Non-goal: this is
+  about visibility, not about the skips themselves — both are correct, and a test that
+  silently passed as root would be worse than one that skips.
 
 - **Nothing stops a literal bidi control from being committed again.** (security gate,
   2026-08-26) Eighteen were removed from `untrusted.py` and fourteen more from
@@ -279,7 +298,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   (quiet-failures review, 2026-08-27) `pair_with_timestamps`'s docstring justifies
   ignoring a surplus because `-frames:v` caps the files written while showinfo keeps
   reporting. True for the public API, where `extract_scene_candidates(max_frames=100)`
-  emits `-frames:v` at `frames.py:367`. Not true on the product path:
+  emits `-frames:v` at `frames.py:465`. Not true on the product path:
   `extract_scene_or_uniform` calls it with `max_frames=None`, so no cap is emitted and a
   surplus there means the muxer refused frames showinfo had already reported. That is the
   same class of evidence as a shortfall and it is discarded without a word. Same fix as
@@ -587,7 +606,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   review, 2026-08-26) Both exit paths return `default` unexamined, so
   `finite_float(x, float("inf"))` returns inf out of a function named for finiteness. It is
   latent rather than live — every call site in the tree passes `0.0`, and the two that pass
-  a computed value (`frames.py:156` nests one call as the other's default) pass a value the
+  a computed value (`frames.py:305` nests one call as the other's default) pass a value the
   same guard already vetted. Filed because the name is the promise a future caller will read,
   and nothing enforces it. Non-goal: this is not the magnitude entry below; a checked
   `default` still would not bound `1e300`.
@@ -622,14 +641,14 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   with the sentinel entry it depends on rather than fixed alongside it.
 
 - **`get_metadata` parses ffprobe's stdout with an unguarded `json.loads`.** (review of the
-  bounded-failures review, 2026-08-26) `frames.py:146` is
+  bounded-failures review, 2026-08-26) `frames.py:294` is
   `json.loads(result.stdout or "{}")` and nothing catches `JSONDecodeError`. The `or "{}"`
   handles empty output and nothing else, so a returncode of 0 with non-JSON on stdout takes
   the run down with a traceback naming the json module. It is the same class as the
   `finite_float` findings — a value this program did not write, parsed as though it had —
   but one level up: the guards protect the FIELDS inside a document that was already assumed
   to be a document. Reachability is low and is the reason this is filed rather than fixed:
-  the real ffprobe under `-v quiet -print_format json` either emits JSON or exits non-zero,
+  the real ffprobe under `-v error -print_format json` either emits JSON or exits non-zero,
   so it takes a shim or a wrapper on PATH answering to the name `ffprobe`. Non-goal: this is
   not the `_read_info` half — `download.py:178` reads a file yt-dlp wrote and has the same
   shape with its own reachability story.
@@ -952,6 +971,90 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   the subtree. Fixing it without extending that test to the root archive would be an
   unpinned change at the tail of a branch that is otherwise ready.
 
+- **A gate finding was wrong, and the mutation harness is what said so.** (testing
+  review, 2026-08-27; refuted 2026-08-27) The review reported that
+  `TestTheFenceReachesEverySite`'s `failing_run` fixture patches `frames.shutil.which`
+  but not `whisper.shutil.which`, leaving three tests dependent on a real ffmpeg being
+  on PATH. It is not true. Both modules do `import shutil`, so both names are bound to
+  the one stdlib module object — `frames.shutil is whisper.shutil` is True — and
+  `monkeypatch.setattr` sets the attribute on that shared object. Measured by running
+  the whisper site test with `PATH` pointed at an empty directory, with and without the
+  added patch: it passes both ways. The change was applied, refuted, and reverted; the
+  reason now sits in a comment at the fixture so the next reader does not re-file it.
+
+  Two things this cost, worth naming. The refutation came from the KILL step, not from
+  reading — the finding was verified as *describing the code accurately* (the second
+  patch really was absent) without checking whether its absence *mattered*, which is a
+  different question and the one that decides whether there is a defect. And the first
+  attempt to prove it used `PATH=""`, which breaks pytest's own startup and reports as a
+  failure that proves nothing; an empty DIRECTORY is the instrument. Non-goal: this is
+  not an argument for adding a PATH-emptying guard to the fixture. There is no defect to
+  guard against today, so such a test would have no RED, and the comment is what a
+  future rebinding of the name rather than the attribute would need anyway.
+
+- **Most `file.py:NNN` anchors in this repository are checked by nothing, and four were
+  wrong.** (anchor review, 2026-08-27) `tests/test_doc_anchors_are_current.py` now
+  re-derives two classes from the AST every run — the seven fenced raise sites, and the
+  two `-loglevel info` arguments — across `TODOS.md` and
+  `tests/test_stderr_is_untrusted.py`. Everything else is on trust. Measured while
+  writing it: three anchors in this file had drifted by roughly +148 and gone unnoticed
+  across several reviews (`frames.py:146` for a `json.loads` that is at 294, `:156` for
+  a nested `finite_float` default at 305, `:367` for the `-frames:v` in
+  `extract_scene_candidates` at 465), and a fourth, `untrusted.py:350` in
+  `tests/test_stderr_blocks_are_fenced.py`, was stale within its own branch. All four
+  are fixed by hand in the same commit, and none is covered going forward.
+
+  The durable fix is not more signatures. Each of the four needed a bespoke one, and
+  every signature is a new way for the check to go quiet on a rewrap — the failure the
+  `test_the_signature_still_matches_something` guards exist for. **Prefer citing a
+  SYMBOL where prose can afford to** (`get_metadata`'s `json.loads`, not
+  `frames.py:294`): a symbol survives every edit above it, and grep finds it. Reserve a
+  line number for a claim that is genuinely about a position in a file.
+
+  Non-goals: this is NOT a request to strip the existing anchors — a bulk rewrite of
+  dozens of citations is a large unreviewable diff for a problem that bites one entry at
+  a time, and the numbers that are right today are useful today. It does not cover the
+  case the new test cannot see either: an anchor whose number is a real line saying
+  something entirely unrelated, which is exactly what all three `frames.py` ones were.
+  Set equality has no opinion about meaning.
+
+- **The anchor test shipped and three more citations in this file were still wrong.**
+  (maintainability gate, 2026-08-27) On the branch that added
+  `tests/test_doc_anchors_are_current.py`, a reviewer checked every anchor the diff
+  touched and found three the new test cannot see: `transcribe.py:62` for a
+  `Path(path).name` that is on `:63` (62 is the bare `print(`), `moviola.py:534` for an
+  `{exc}` that is on `:535` (534 is the label half of the same call), and the
+  reachability sentence in the unguarded-`json.loads` entry above, which asserted the
+  real ffprobe runs under `-v quiet` — a flag the very same commit deleted. All three
+  are fixed in the commit that files this. They are two different diseases and only the
+  first looks like an anchor problem.
+
+  **A citation paired with a quoted fragment** (`transcribe.py:63` +
+  `Path(path).name`) is checkable in principle: assert the fragment appears on the
+  cited line. It is not built, and the reason is the reason, not an omission. Pairing a
+  fragment to an anchor is only unambiguous on a prose line carrying exactly one of
+  each — and the sentence that produced BOTH of these carries four anchors and five
+  backticked fragments, so the restriction that makes the check safe excludes precisely
+  the shape that failed. Building it without the restriction means guessing which
+  fragment belongs to which anchor, and a wrong guess fires on correct prose, which is
+  worse than not checking.
+
+  **The ffprobe one is not an anchor at all**, and no signature of any shape would have
+  caught it. It is a flag name inside an argument about reachability, invalidated by a
+  change to code the sentence does not cite, in the same commit. It was found by
+  tracing the flag from `get_metadata` outward to the prose naming it. Note what sits
+  two paragraphs below it: a sentence that still says `-v quiet` and is still correct,
+  because it describes a *test* helper. Any grep-based rule broad enough to catch the
+  stale one breaks the sound one.
+
+  Non-goals: this is NOT a request for a third signature class — see the entry above,
+  where each new signature is another way for the check to go quiet on a rewrap, and the
+  standing advice is to cite a symbol instead. It does not cover a fragment spanning
+  lines, or a citation deliberately written as a range (`moviola.py:534-535` now is
+  one). And it says nothing about the dozens of anchors in this file pointing at
+  `download.py`, `whisper.py` and `local_whisper.py`, which no test reads and which
+  nobody has audited end to end.
+
 ## Housekeeping
 
 - **Every action in both workflows is now SHA-pinned, and ALL THREE of those pins are
@@ -1151,6 +1254,59 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   here.
 
 ## Completed
+
+### ffmpeg's and ffprobe's captured stderr is now an attributed, bounded block
+
+(stderr review, 2026-08-26; security gate, 2026-08-26; fixed 2026-08-27) Seven raise
+sites interpolated a whole captured `result.stderr` into a `SystemExit` message — a
+banner echoing container metadata the video's author wrote, landing in the agent's
+context beside the report with nothing marking where their text ended and moviola's
+resumed. `untrusted.stderr_block` renders it instead: `BLOCK_PREFIX` (`"| "`) on every
+line of the capture, bounded to `MAX_BLOCK_LINES` (40) and `MAX_BLOCK_WIDTH` (200), with
+an empty capture reported as the fact it is rather than as nothing. Applied at
+`frames.py:291`/`:402`/`:474`/`:839` and `whisper.py:376`/`:422`/`:490`. Pinned by
+`tests/test_stderr_blocks_are_fenced.py`.
+
+`stderr_line` was the wrong instrument and that is why this waited: it makes a value ONE
+line by collapsing every break to a space, which turns a forty-line diagnostic into forty
+joined fragments and destroys the only reason it is printed. The three defences are each
+measured rather than chosen. Attribution is per LINE because a block delimiter is just
+more text a hostile capture can contain, and a real failure put the author's text at
+lines 6 and 32 of 48. The line bound keeps the TAIL because ffmpeg diagnoses last —
+`Conversion failed!` was the final line of every failure measured — and puts the metadata
+near the front, so a head-biased cut keeps the stranger's text and drops the line anyone
+reads. The width bound exists because the widest real line was 1371 characters against a
+90th percentile of 113 (`showinfo` dumping x264's SEI user data as hex).
+
+**Two corrections to what this entry used to claim.** It said two of the seven were "the
+live vector", reaching stderr "whether or not anything failed", because they run ffmpeg
+at `-loglevel info`. Measured: all seven run under `capture_output=True`, so on a
+successful run the capture is parsed for timestamps and discarded and NOTHING reaches a
+reader. The `-loglevel` split decides whether ANY failure carries the author's text or
+only one that quotes it back — not whether it is reachable. And its anchors had gone
+stale by roughly 150 lines; the live ones are above.
+
+The separate entry for `moviola.py`'s re-print of a caught `SystemExit` (`:525`/`:526`,
+formerly `:395`/`:396`) closes with this one, exactly as it predicted: fencing at the
+three `whisper.py` raise sites covers that handler, every other caller of those three
+functions, and the case where the `SystemExit` is never caught and the interpreter prints
+it. Nothing was fenced at the re-print site, which would have covered neither.
+
+The KILL harness ran nine mutations and ten legitimate rewrites; all nine died and all
+ten stayed green. Two of the nine are worth recording because they are the shapes a
+tidy-up would produce. Balancing bidi once over the joined block instead of per line
+looks like an obvious simplification and is a hole: an override opened on line three
+reorders the display of line four including the prefix line four's attribution rests on.
+And `text.split("\n")` in place of `text.splitlines()` looks equivalent and is not —
+U+2028, U+0085 and the rest of `LINE_BREAKS` end a line for `splitlines`, so the piece
+after one of them would have inherited no prefix and arrived at column zero.
+
+Non-goals, unchanged by the fix: this is attribution, not sanitization — every character
+the capture arrived with is still there, and the ANSI/OSC/implicit-mark families
+`balance_bidi` is blind to pass through a prefixed line untouched. Only the prefix is
+structural; the header, the truncation notice and the per-line width marker are notices a
+hostile capture can imitate inside its own prefixed line. And yt-dlp's output is still
+untouched, for the structural reason its own entry gives.
 
 ### Two runs sharing one `--out-dir` are now refused rather than mixed
 

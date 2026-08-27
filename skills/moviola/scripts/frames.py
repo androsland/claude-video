@@ -21,7 +21,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-from untrusted import finite_float, stderr_line  # noqa: E402
+from untrusted import finite_float, stderr_block, stderr_line  # noqa: E402
 
 
 MAX_FPS = 2.0
@@ -269,7 +269,14 @@ def get_metadata(video_path: str) -> dict:
     result = subprocess.run(
         [
             "ffprobe",
-            "-v", "quiet",
+            # -v error, not -v quiet, for the same reason whisper.py:408 says
+            # so: quiet silences ffprobe's stderr along with its info, so the
+            # `result.stderr` fenced below on a non-zero exit was always empty
+            # and this site rendered "(ffprobe wrote nothing to stderr)" no
+            # matter what actually went wrong. stdout stays JSON either way —
+            # measured byte-identical under both flags, on a successful run
+            # and a failing one.
+            "-v", "error",
             "-print_format", "json",
             "-show_format",
             "-show_streams",
@@ -279,7 +286,10 @@ def get_metadata(video_path: str) -> dict:
         text=True,
     )
     if result.returncode != 0:
-        raise SystemExit(f"ffprobe failed: {result.stderr.strip()}")
+        raise SystemExit(
+            "ffprobe failed:\n"
+            + stderr_block(result.stderr, source="ffprobe")
+        )
 
     data = json.loads(result.stdout or "{}")
     streams = data.get("streams", [])
@@ -387,7 +397,10 @@ def extract(
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise SystemExit(f"ffmpeg frame extraction failed: {result.stderr.strip()}")
+        raise SystemExit(
+            "ffmpeg frame extraction failed:\n"
+            + stderr_block(result.stderr, source="ffmpeg")
+        )
 
     offset = start_seconds or 0.0
     frames = frames_in_order(out_dir)
@@ -456,7 +469,10 @@ def extract_scene_candidates(
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise SystemExit(f"ffmpeg scene extraction failed: {result.stderr.strip()}")
+        raise SystemExit(
+            "ffmpeg scene extraction failed:\n"
+            + stderr_block(result.stderr, source="ffmpeg")
+        )
 
     offset = start_seconds or 0.0
     timestamps = [round(offset + float(match.group(1)), 2) for match in SHOWINFO_TS_RE.finditer(result.stderr)]
@@ -818,7 +834,10 @@ def extract_keyframes(
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise SystemExit(f"ffmpeg keyframe extraction failed: {result.stderr.strip()}")
+        raise SystemExit(
+            "ffmpeg keyframe extraction failed:\n"
+            + stderr_block(result.stderr, source="ffmpeg")
+        )
 
     offset = start_seconds or 0.0
     timestamps = [round(offset + float(m.group(1)), 2) for m in SHOWINFO_TS_RE.finditer(result.stderr)]

@@ -32,24 +32,37 @@ add the backtick wrap, because stderr is not markdown.
 
 NON-GOALS, so a green run here is not read as "stderr is trusted now":
 
-  * **yt-dlp's own output is structurally unreachable.** `download.py:133` and
-    `:209` run `subprocess.run(cmd, stdout=sys.stderr, stderr=sys.stderr)`, so
+  * **yt-dlp's own output is structurally unreachable.** `download.py:173` and
+    `:249` run `subprocess.run(cmd, stdout=sys.stderr, stderr=sys.stderr)`, so
     yt-dlp inherits the file descriptor and writes to it directly. Those bytes
     never pass through this process, and no helper that edits an interpolated
     value can touch one of them. That is the single largest volume of remote
     text on this program's stderr and it is untouched.
 
-  * **ffmpeg's and ffprobe's captured stderr is deliberately NOT fenced.**
-    `whisper.py:330`/`:373`/`:439` and `frames.py:136`/`:235`/`:299`/`:654`
-    interpolate `result.stderr.strip()`, which is a banner echoing container
-    metadata the video author wrote — genuinely remote, and genuinely multi-line.
-    Two of the seven are the live vector: `frames.py:299` and `:654` run ffmpeg at
-    `-loglevel info`, which prints the container's `Metadata: title/comment`
-    block verbatim on every run. The other five run at `-loglevel error`, so the
-    author's text reaches stderr there only when ffmpeg quotes it back inside an
-    error. Collapsing a forty-line diagnostic into one line destroys the only
-    reason it is printed, so that surface needs a different shape (a fenced
-    block, not a line) and is filed rather than half-fixed here.
+  * **ffmpeg's and ffprobe's captured stderr is fenced ELSEWHERE, and this file
+    does not pin it.** Those seven sites interpolate a whole captured
+    `result.stderr` — a banner echoing container metadata the video author
+    wrote, genuinely remote and genuinely multi-line. `stderr_line` is the wrong
+    tool for them and its docstring says so: collapsing a forty-line diagnostic
+    into one line destroys the only reason it is printed. They take a fenced
+    BLOCK instead (`untrusted.stderr_block`), applied at
+    `frames.py:291`/`:402`/`:474`/`:839` and `whisper.py:376`/`:422`/`:490`, and
+    `tests/test_stderr_blocks_are_fenced.py` is what pins that shape. Nothing in
+    THIS file would notice if every one of those fences were removed tomorrow —
+    the two files divide the surface by the shape of the fence, not by the
+    origin of the value.
+
+    Two of the seven run ffmpeg at `-loglevel info` (`frames.py:450` and `:820`),
+    where the metadata block is printed on every run, and the other five run at
+    `-loglevel error`, where the author's text appears only if ffmpeg quotes it
+    back inside an error. An earlier draft of this bullet called the first pair
+    "the live vector", meaning the author's text reaches stderr whether or not
+    anything failed. **That was wrong, and the measurement is in the other
+    file's docstring:** all seven run under `capture_output=True`, so on a
+    successful run nothing reaches a reader at all — the capture is parsed for
+    timestamps and discarded. The `-loglevel` split does not decide whether the
+    text is reachable; it decides whether ANY failure carries it, or only a
+    failure that quotes it.
 
   * **Closing a bidi scope is not stopping a repaint, and the gap is not
     tested.** ANSI CSI sequences (`ESC[F`, `ESC[2K`, `ESC[2J`) move the cursor

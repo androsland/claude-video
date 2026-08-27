@@ -54,7 +54,9 @@ All notable changes to `/moviola` are documented here.
   inherited file descriptor and never passes through this process at all; and `md_fence`
   on stdout, which escapes backtick runs correctly but applies no bidi balancing, so an
   override opened inside a hostile transcript still reorders display past the closing
-  fence. All three are filed in `TODOS.md`.
+  fence. All three were filed in `TODOS.md` when this shipped; the first of them —
+  ffmpeg's captured stderr — has since been fixed and its entry moved to that file's
+  `## Completed` section, so two remain open.
 
 - **The fence added above had a denial of service inside it, and the gate caught it.**
   `balance_bidi` matched a closer by scanning the open-scope stack from the top, so a

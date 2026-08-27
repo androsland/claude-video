@@ -35,7 +35,7 @@ from urllib.request import Request, urlopen
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-from untrusted import stderr_line  # noqa: E402
+from untrusted import stderr_block, stderr_line  # noqa: E402
 
 
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions"
@@ -371,7 +371,10 @@ def extract_audio(
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise SystemExit(f"ffmpeg audio extraction failed: {result.stderr.strip()}")
+        raise SystemExit(
+            "ffmpeg audio extraction failed:\n"
+            + stderr_block(result.stderr, source="ffmpeg")
+        )
     # Not `== 0`: an -ss past the end of the video exits 0 and writes a valid but
     # empty mp3 — measured at 333 bytes for a header-only file — which sails past
     # a zero-byte check and reaches Whisper as silence. At 64 kbps mono one second
@@ -414,7 +417,10 @@ def audio_duration(audio_path: Path) -> float:
         text=True,
     )
     if result.returncode != 0:
-        raise SystemExit(f"ffprobe failed: {result.stderr.strip()}")
+        raise SystemExit(
+            "ffprobe failed:\n"
+            + stderr_block(result.stderr, source="ffprobe")
+        )
     fmt = json.loads(result.stdout or "{}").get("format", {})
     return float(fmt.get("duration") or 0.0)
 
@@ -480,7 +486,8 @@ def split_audio(
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
             raise SystemExit(
-                f"ffmpeg failed to split audio chunk {index + 1}: {result.stderr.strip()}"
+                f"ffmpeg failed to split audio chunk {index + 1}:\n"
+                + stderr_block(result.stderr, source="ffmpeg")
             )
         chunks.append(AudioChunk(out_path, offset, duration))
     return chunks
