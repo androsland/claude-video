@@ -230,24 +230,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Quiet failures
 
-- **`frames_in_order` sorts on the last run of digits in the name and cannot see a
-  directory that mixes two naming schemes.** (quiet-failures review, 2026-08-26) Every
-  caller writes `frame_%04d.jpg` into a directory it has just emptied of `frame_*.jpg`,
-  so today there is exactly one scheme and the sort is total. Nothing enforces that. If a
-  future extractor writes `frame_a_0001.jpg` alongside `frame_0001.jpg`, both parse to 1
-  and the tiebreak is the filename, which is the lexicographic bug again in a smaller
-  room. Naming the scheme in one constant that the writer and the sorter share would
-  close it.
-
-- **The stale-file guard compares (mtime, size) and cannot see a second run writing into
-  the same `--out-dir`.** (quiet-failures review, 2026-08-26) `snapshot_dir` answers "did
-  THIS run produce this file", which is the right question for a reused directory and the
-  wrong one for a shared directory: a file another moviola process writes while yt-dlp is
-  running is new-since-the-snapshot and reads as ours. Two concurrent runs pointed at one
-  `--out-dir` also clobber each other's `video.*` and `frame_*.jpg` outright, which is the
-  larger problem the guard does not address. A per-run subdirectory, or a lock file, is
-  the shape.
-
 - **`parse_vtt` warns on a caption track that is legitimately empty.** (quiet-failures
   review, 2026-08-26) The warning fires whenever a subtitle file yields zero segments,
   and a video whose caption track exists but contains no cues will trip it. That is a
@@ -360,6 +342,58 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   ~800 ceiling, and none of these is a live defect — the shipped code renders every
   span, the right ratio, formatted times, and the warning in the right place. They are
   claims nothing holds. Queued for `fix/quiet-failures-iii`.
+
+- **`FrameScheme` names the filename shape but not the SWEEP, so four call sites still
+  spell the same preamble.** (maintainability review, 2026-08-27) `frames.py` holds the
+  `for existing in out_dir.glob(SCHEME.glob): existing.unlink()` pair four times — three
+  detail engines plus the cue extractor. The constant removed the copy-pasted string; it
+  did not remove the copy-pasted loop, so a change to how a directory is emptied (say,
+  reporting what it removes) still has to land in four places and a miss in one of them
+  is invisible. A `FrameScheme.clear(out_dir)` method collapses all four. Not done on
+  `fix/quiet-failures-iii`: it touches every extraction path in the file for no change in
+  behaviour, and this branch is already carrying two security fixes that need to stay
+  legible on their own.
+
+- **The sweep unlinks foreign files silently, while the sorter that runs afterwards
+  discloses them.** (maintainability review, 2026-08-27) `frames_in_order` names a
+  `frame_a_0001.jpg` it excludes, and that is the whole point of the disclosure — but the
+  sweep two steps earlier has already deleted every `frame_*.jpg` in the directory without
+  saying a word, including that one. So the loud path only ever fires for a file written
+  BETWEEN the sweep and the read, and the common case — a user's own file matching the
+  glob in a reused `--out-dir` — is destroyed quietly. Decide whether the sweep should
+  name what it removes. It is a real question rather than an obvious yes: the sweep exists
+  precisely so a previous run's frames do not contaminate this one, and a line on every
+  ordinary re-run is the false alarm the disclosure rules warn about.
+
+- **`hold()` registers an `atexit` per call, so an in-process caller holds its flock for
+  the whole interpreter.** (maintainability review, 2026-08-27) The docstring's span is
+  "the rest of the process", which equals "the rest of the run" only because production's
+  sole caller is `raise SystemExit(main())`. Seven tests call `main()` directly
+  (`tests/test_moviola.py:238,278`, `tests/test_report_structure.py:170`,
+  `tests/test_quiet_failures_ii.py:203,467,505,574`), and each leaves a lock held until
+  pytest exits. Nothing bites today because no test reuses a `--out-dir` — a property of
+  the tests, not of the function — so a future test that calls `main()` twice on one
+  directory gets refused by its own first call, and the failure will look like a moviola
+  bug rather than a fixture one. The fix is for `hold` to be idempotent per directory, or
+  for the tests to drive `exclusive()` rather than inheriting the process-lifetime one.
+  Documented as a NON-GOAL in `workdir.hold` in the meantime.
+
+- **Decide whether `untrusted.stderr_line` should strip ANSI, or say for good that it
+  does not.** (security review, 2026-08-27) Measured, not assumed: `stderr_line` rewrites
+  line breaks and balances bidi marks, and passes CSI and OSC sequences through byte for
+  byte — `\x1b[2K\x1b[1G` in a fenced value still erases the line it was printed on and
+  writes over it in any real terminal. That was harmless while every caller fenced the
+  stderr of a subprocess moviola had just launched; `workdir._describe_holder` is the
+  first to fence a value an attacker can plant BEFORE the run, in a file whose whole
+  premise is that this run does not own it. Damage is bounded to one line by the
+  `_MAX_STARTED` slice, which is why it is filed rather than fixed. The reason it is a
+  DECISION and not a task: the fix belongs in `untrusted`, and its four other callers
+  carry yt-dlp and ffmpeg output where colour is legitimate and stripping it would change
+  what disclosure looks like on an ordinary run. Either add a separate
+  `stderr_line(..., plain=True)` for pre-plantable sources, or write the passthrough into
+  `untrusted`'s own NON-GOALS as deliberate. Pinned meanwhile by
+  `test_the_ansi_non_goal_is_still_the_truth`, which fails the day the behaviour changes
+  so the prose cannot quietly become false.
 
 ## Bounded failures
 
@@ -1117,6 +1151,81 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   here.
 
 ## Completed
+
+### Two runs sharing one `--out-dir` are now refused rather than mixed
+
+(quiet-failures review, 2026-08-26; fixed 2026-08-27) `snapshot_dir` answers "did THIS run
+produce this file", which is the right question for a REUSED directory and the wrong one
+for a SHARED one: a file another moviola process writes while yt-dlp is running is
+new-since-the-snapshot and reads as ours. The runs also overwrite each other's `video.*`
+and `frame_*.jpg` outright. `skills/moviola/scripts/workdir.py` takes an exclusive `flock`
+over `.moviola.lock` before anything is written, and `main()` holds it for the life of the
+process via `atexit`.
+
+This is the deliberate exception to moviola's disclosure-not-strictness rule. Disclosure
+cannot help here: a warning still leaves a report assembled from two films, and nothing
+downstream can separate them again. `flock` over a pid file because the kernel drops the
+lock when the fd closes — SIGKILL included — so there is no stale-lock state and nothing
+has to decide whether a recorded pid is still alive.
+
+What the KILL harness caught, all three of them tests that passed for the wrong reason:
+
+- **The refusal names `--out-dir` twice**, once explaining the collision and once as the
+  remedy. `assert "--out-dir" in message` was satisfied by the explanation, so deleting
+  the actionable half survived. Now asserts `"Pass a different --out-dir"`.
+- **`os.close(fd)` drops the kernel lock by itself**, so "the next `exclusive()` succeeds"
+  proves nothing about the cleanup path. Skipping cleanup on the raise path leaves the
+  lock FILE behind, in the directory the refusal sends the user to look at — that is what
+  is asserted now.
+- **`hold` keeps holding only because `atexit` is the last reference to the ExitStack.**
+  Remove the registration and the stack is collected the instant `hold` returns, releasing
+  the lock before the run downloads anything. Measured directly. No existing test could
+  see it: releasing too EARLY also leaves no lock behind.
+
+KILL: 10/10 mutations killed, 6/6 legitimate variations stay green. Each of the three
+mutations above dies to exactly one test, and that test is the one written for it.
+
+### A frame filename's shape had four owners that happened to agree
+
+`frames_in_order` sorted on the LAST run of digits anywhere in the name, and three
+extractors plus the cue writer each spelled `frame_%04d.jpg` / `cue_%04d.jpg` for
+themselves. Both halves were correct only because every caller empties the directory of
+its own output first, so exactly one scheme is ever present — a property nothing enforced
+and nothing would have noticed losing. `frame_a_0001.jpg` beside `frame_0001.jpg` both
+parse to 1, the tiebreak is the filename, and since every caller pairs frames with
+timestamps BY POSITION, one foreign name shifts every frame after it onto somebody else's
+timestamp.
+
+`FrameScheme` now owns the glob, the printf template and the number parse, with
+`DETAIL_FRAMES` and `CUE_FRAMES` as the two named instances; all four writers read them.
+A name matching the glob but not the scheme is EXCLUDED and named on stderr rather than
+sorted into a plausible slot, because nothing anywhere says where `frame_a_0001.jpg`
+belongs in a `frame_%04d.jpg` sequence — the old behaviour of keeping it also handed
+`pair_with_timestamps` one more file than there were timestamps, which produced a
+"frames may be misaligned" warning about ffmpeg for a file ffmpeg never wrote.
+
+Three things the KILL harness caught that the fix or the tests had wrong:
+
+- **A Python default argument silently reintroduced the split.**
+  `def frames_in_order(out_dir, scheme=DETAIL_FRAMES)` binds the object at DEFINITION
+  time, so the writer read the constant by name and the sorter read a snapshot of it —
+  the exact disagreement being removed, restored by a language default. Resolved inside
+  the body instead.
+- **`assert not (out_dir / "shot_0009.jpg").exists()` was vacuous.**
+  `pair_with_timestamps` deletes any frame it cannot time, so the stale file is gone
+  whether the sweep found it or not, and a sweep mutated back to its own literal passed
+  it. The count is what changes: `untimed` is 1 with the literal and 0 with the shared
+  constant.
+- **The source-level invariant could not see the shape it was written to outlaw.** Its
+  pattern covered `%0Nd` and `*` but not `f"cue_{len(out):04d}.jpg"`, which is what the
+  cue writer literally said before this branch — so a mutation restoring that exact line
+  SURVIVED. Broadened to cover the f-string width; concatenation is still a stated
+  NON-GOAL.
+
+KILL: 10/10 mutations killed, 6/6 legitimate variations stay green. Three of the ten —
+the uniform sweep, the keyframe pattern and the cue filename — die ONLY to the source
+invariant, because no test drives those writers end to end. That is the whole reason it
+is there rather than being decoration.
 
 ### A partial transcript and a mislabelled frame both read as ordinary output
 

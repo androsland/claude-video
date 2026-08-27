@@ -268,8 +268,15 @@ class TestFramesArePairedWithTheirOwnTimestamps:
     def test_a_name_without_a_number_does_not_crash_the_sort(self, tmp_path: Path) -> None:
         # Nothing writes these, but the helper is a shared entry point and a
         # crash here would take down a run whose frames were all fine.
+        #
+        # This used to assert the stray was KEPT and sorted last, which was the
+        # wrong contract: keeping it handed `pair_with_timestamps` one more file
+        # than there were timestamps, so a file nobody here wrote produced a
+        # "frames that remain may be misaligned" warning about ffmpeg. It is now
+        # excluded and named on stderr — pinned in full in
+        # `test_two_writers_one_directory.py`. The no-crash property, which is
+        # what this test was for, is unchanged.
         self._lay_out(tmp_path, 2)
         (tmp_path / "frame_partial.jpg").write_bytes(b"jpeg")
         names = [p.name for p in frames.frames_in_order(tmp_path)]
-        assert len(names) == 3
-        assert names[:2] == ["frame_0001.jpg", "frame_0002.jpg"]
+        assert names == ["frame_0001.jpg", "frame_0002.jpg"]
