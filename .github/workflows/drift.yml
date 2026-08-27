@@ -53,6 +53,13 @@ jobs:
   unpinned:
     name: pytest against the latest published dependencies
     runs-on: ubuntu-latest
+    # The same cap as tests.yml and the same arithmetic — GitHub's default is
+    # 360 MINUTES, which is what a hung apt mirror actually consumes before
+    # anybody notices. Restated rather than cross-referenced because this job's
+    # slow case is a DIFFERENT one: it resolves versions over the network
+    # instead of installing a fixed set, so a slow PyPI resolve is the thing
+    # ten minutes has to leave room for. It still does, by an order of
+    # magnitude, on a job that runs in about twenty seconds.
     timeout-minutes: 10
     steps:
       - name: Checkout

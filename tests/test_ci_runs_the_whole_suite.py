@@ -300,6 +300,28 @@ REQUIREMENT_FLAGS = ("-r", "--requirement")
 INSTALL_MARKERS = ("pip install", "pip3 install")
 
 
+def is_install_line(line: str) -> bool:
+    """Could this line actually install something?
+
+    One question, asked in three places that answered it two different ways.
+    Two read it positively — a `-r` is a requirements reference only on a line
+    that installs, and `--require-hashes` is enforcement only on a line that
+    installs. One reads it negatively: a line that INSTALLS pytest is not a line
+    that RUNS pytest. The negative one kept its own hardcoded `"pip install"`
+    when `pip3 install` was added here, so for one branch `pip3 install pytest`
+    counted as running the suite — a workflow credited with coverage it does not
+    have, which is the exact shape this whole file exists to refuse.
+
+    NON-GOALS: a substring test over one line, not a shell parse. An install
+    reached through a variable, a wrapper script, `uv pip install`, or a
+    backslash continuation that puts `pip` and `install` on different lines is
+    invisible to it. It does not check that the install SUCCEEDS, or that what
+    is installed matches the file it references — `workflow_claims` and the
+    reference follower own that question.
+    """
+    return any(marker in line for marker in INSTALL_MARKERS)
+
+
 class RequirementsReferenceError(Exception):
     """A workflow installs from a requirements file that cannot be read.
 
@@ -335,7 +357,7 @@ def referenced_requirements(text: str, *, only_install_lines: bool) -> list[str]
     """
     found: list[str] = []
     for line in without_comments(text).splitlines():
-        if only_install_lines and not any(m in line for m in INSTALL_MARKERS):
+        if only_install_lines and not is_install_line(line):
             continue
         tokens = line.split()
         for i, token in enumerate(tokens):
@@ -459,6 +481,37 @@ def workflow_claims(text: str, root: Path = REPO_ROOT) -> str:
     return "\n".join(kept)
 
 
+def install_lines(text: str, root: Path = REPO_ROOT) -> list[str]:
+    """Every line of a workflow that could install, read from its CLAIMS.
+
+    `workflow_claims` rather than the raw text, for the reason that function
+    exists: a step's `name:` and a comment are prose, and both have satisfied a
+    raw-text match with the install they described deleted.
+
+    What makes the filter load-bearing is the other thing `workflow_claims`
+    does — it APPENDS every requirements file the text installs from, so a
+    `--require-hashes` line sitting inside that file lands in the claims, where
+    pip never reads it as an argument. "The flag is in the claims" and "the flag
+    is on a line that installs" come apart exactly there, and
+    `test_the_hash_flag_must_be_on_the_install_line_not_merely_in_the_file`
+    drives that gap rather than trusting this docstring for it.
+
+    `root` is a parameter for the same reason `installed_by` takes one: so a
+    test can drive this against a tmp_path instead of the repository's own
+    files.
+
+    NON-GOALS: it inherits every limit of `is_install_line` and of
+    `workflow_claims` and adds no parsing of its own. It cannot tell an install
+    that runs from one inside a step guarded by an `if:` that is never true —
+    nothing here evaluates conditions — and it does not order or de-duplicate,
+    so two identical install lines come back twice.
+    """
+    return [
+        line for line in workflow_claims(text, root).splitlines()
+        if is_install_line(line)
+    ]
+
+
 def matrix_python_versions(text: str) -> list[str]:
     """Every interpreter version a `python-version:` matrix line lists.
 
@@ -500,7 +553,7 @@ def pytest_invocations(text: str) -> list[str]:
         line.strip()
         for line in without_comments(text).splitlines()
         if "pytest" in line
-        and "pip install" not in line
+        and not is_install_line(line)
         and not line.lstrip().lstrip("-").lstrip().startswith("name:")
     ]
 
@@ -745,6 +798,30 @@ def installed_by(text: str, module: str, root: Path = REPO_ROOT) -> bool:
 
 
 class TestSomethingRunsTheSuite:
+    """There is a workflow that runs the suite, and something actually fires it.
+
+    The question before the coverage question. The class below asks whether the
+    WHOLE suite runs; this one asks whether any of it does — whether exactly one
+    workflow invokes pytest, and whether the events that gate a merge are the
+    events that start it. A suite nothing triggers is green in exactly the way
+    an unrun suite is green.
+
+    NON-GOALS, deliberately:
+
+      * it cannot see whether a run ever HAPPENED. Everything here reads
+        committed text, so a workflow switched off in the repository's Actions
+        settings, or a run that never finished, is invisible from inside the
+        checkout.
+      * it does not parse YAML. `declared_triggers` and `top_level_block` are
+        indentation-scoped text readers; a trigger inside a quoted string, or an
+        `on:` key that is not at column zero, is not seen. Those two own that
+        limit and state it.
+      * it says nothing about the workflows it is not looking at.
+        `NOT_THE_SUITE_WORKFLOW` names what is exempt and why, and
+        `TestTheExemptedDriftJob` is where the exempted one is held to the
+        bargain that earned it the exemption.
+    """
+
     def test_exactly_one_workflow_runs_the_suite(self):
         # The rule and its two failure messages live in `the_suite_workflow()`,
         # which every other test here calls. Restating them is how two copies
@@ -829,6 +906,30 @@ class TestSomethingRunsTheSuite:
 
 
 class TestTheWholeSuiteRunsInCI:
+    """The gating workflow runs the WHOLE suite, against a set it really pins.
+
+    Green is worth what it covers and nothing more. Every check here exists
+    because there is a way to shrink the covered surface that leaves the badge
+    exactly as green: a pytest invocation narrowed to one path, a module the
+    suite can `skipif` past that CI never installs, an exemption outliving the
+    workflow it names, a `-r` resolving to a file that is not there, hashes pip
+    is never told to enforce, an interpreter the docs claim and the matrix does
+    not run.
+
+    NON-GOALS, deliberately:
+
+      * it cannot see a test skipped for any reason other than a missing module
+        — a bare `pytest.mark.skip`, a `skipif` on a platform or an env var, an
+        early `return`. The import-availability shape is guarded here because it
+        is the one CI itself can silently cause.
+      * it reads what the workflow CLAIMS, not what it does. A workflow that
+        installs correctly and then fails at runtime is green here and red
+        there, and that is the right split — this file is about the claim.
+      * it says nothing about the run's speed or cost, and nothing about
+        `strategy.fail-fast`, which is named in this module's own NON-GOALS list
+        rather than left to be inferred from the silence here.
+    """
+
     def test_the_scan_finds_something_to_check(self):
         # Vacuity guard. Every assertion below iterates the scan's output, so
         # a scanner that silently stopped matching would turn all of them into
@@ -934,11 +1035,7 @@ class TestTheWholeSuiteRunsInCI:
         # accepts the flag anywhere in the file — including inside the
         # requirements file it appends, where pip never reads it as an argument.
         name, text = the_suite_workflow()
-        installs = [
-            line
-            for line in workflow_claims(text).splitlines()
-            if any(m in line for m in INSTALL_MARKERS)
-        ]
+        installs = install_lines(text)
         assert installs, f"{name} has no pip install line at all"
         assert any("--require-hashes" in line for line in installs), (
             f"{name} does not pass --require-hashes on any install line. pip "
@@ -951,7 +1048,7 @@ class TestTheWholeSuiteRunsInCI:
     def test_the_documented_interpreters_are_the_ones_the_matrix_runs(self, doc):
         # Both files state which interpreters CI runs, in prose, and until this
         # test nothing read either. The workflow comment goes further and
-        # asserts a result per rung — "1019 passed on 3.10.12 and 1019 on
+        # asserts a result per rung — "1021 passed on 3.10.12 and 1021 on
         # CPython 3.13.13" — so dropping a rung leaves three separate places
         # claiming a run that no longer happens.
         #
@@ -1424,6 +1521,72 @@ class TestTheRuleItself:
         # ever driven.
         (tmp_path / "reqs.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
         assert installed_by("      - run: pip3 install -r reqs.txt\n", "yt_dlp", tmp_path)
+
+    def test_a_pip3_install_line_is_not_a_pytest_invocation(self):
+        # The other half of the test above, and the half that was missing for a
+        # branch. Adding `pip3 install` to INSTALL_MARKERS taught the reference
+        # follower and `installed_by` that the spelling exists;
+        # `pytest_invocations` kept a hardcoded `"pip install"` of its own and
+        # so read `pip3 install pytest` as a line that RUNS pytest.
+        #
+        # Reproduced by execution before anything was edited:
+        # `pytest_invocations("pip3 install pytest yt-dlp")` returned that line.
+        # What it costs is a workflow counted as the suite workflow because it
+        # INSTALLS pytest — coverage credited to a job that runs nothing, which
+        # is the one failure this whole file exists to refuse.
+        assert pytest_invocations("        pip install pytest yt-dlp\n") == []
+        assert pytest_invocations("        pip3 install pytest yt-dlp\n") == []
+        # The positive half, so a predicate that refuses every line cannot pass
+        # this test by refusing everything.
+        assert pytest_invocations("        python -m pytest -q\n") == [
+            "python -m pytest -q"
+        ]
+
+    def test_the_hash_flag_must_be_on_the_install_line_not_merely_in_the_file(
+        self, tmp_path
+    ):
+        # The discriminating case for `install_lines`, and it is NOT the one
+        # `test_the_gate_installs_a_pinned_set` leads with. A flag in a step
+        # LABEL is already handled one layer down — `workflow_claims` strips
+        # `name:` values — so that case cannot tell the two readings apart.
+        #
+        # This one can. `workflow_claims` APPENDS every requirements file the
+        # text installs from, so `--require-hashes` written INSIDE that file
+        # lands in the claims, where pip never reads it as an argument. Verified
+        # before it was written: with the flag in the referenced file, "anywhere
+        # in the claims" is True and "on an install line" is False. Weakening
+        # the filter back to "anywhere" leaves the real workflow green, because
+        # the real workflow passes the flag correctly — which is precisely why
+        # the rule needs a synthetic file to be pinned at all.
+        (tmp_path / "reqs.txt").write_text(
+            "--require-hashes\npytest==9.1.1\n", encoding="utf-8"
+        )
+        workflow = (
+            "jobs:\n  a:\n    steps:\n"
+            "      - run: python -m pip install -r reqs.txt\n"
+        )
+        assert "--require-hashes" in workflow_claims(workflow, tmp_path)
+        installs = install_lines(workflow, tmp_path)
+        assert installs, "the synthetic workflow has no install line to filter"
+        assert not any("--require-hashes" in line for line in installs)
+
+        # The other way the flag can be present without being passed, and the
+        # one that decides why this helper reads CLAIMS rather than the raw
+        # text: a trailing comment on the install line itself. `#` after
+        # whitespace is a YAML comment, so `without_comments` truncates the
+        # line before pip ever sees it — verified by running both readings over
+        # this exact string. Reading raw text here would report a flag on the
+        # install line that is not on the command.
+        commented = (
+            "jobs:\n  a:\n    steps:\n"
+            "      - run: python -m pip install -r reqs.txt  "
+            "# --require-hashes one day\n"
+        )
+        assert "--require-hashes" in commented
+        assert not any(
+            "--require-hashes" in line
+            for line in install_lines(commented, tmp_path)
+        )
 
     def test_a_trailing_dash_r_names_nothing(self):
         # `-r` as the last token has no argument to bind. The tokenizer's

@@ -1150,6 +1150,31 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `download.py`, `whisper.py` and `local_whisper.py`, which no test reads and which
   nobody has audited end to end.
 
+- **The new CI-meta helpers state their limits in prose; only two use a labelled
+  `NON-GOALS:` heading.** (testing review of `fix/ci-dependency-posture`, 2026-08-27)
+  `is_install_line`, `install_lines` and `declared_triggers` carry the labelled form;
+  `referenced_requirements`, `_walk_requirements`, `expand_requirements`,
+  `referenced_requirement_paths`, `matrix_python_versions`, `documented_ci_versions` and
+  `workflow_claims` fold the same caveats into ordinary sentences. The limits ARE stated
+  — this is a consistency gap, not a missing-disclosure one — and the reviewer's own
+  recommendation was to retrofit the busiest two (`_walk_requirements`,
+  `referenced_requirements`) on a later pass rather than inflate this branch. Non-goal:
+  this does not propose a test that checks for the heading. A grep for `NON-GOALS:` would
+  be satisfied by the string and say nothing about whether the list underneath is true or
+  complete, which is the same trap as counting occurrences of a package name.
+
+- **Nothing drives a SYMLINK escape at the requirements containment check.**
+  (security review of `fix/ci-dependency-posture`, 2026-08-27) `_walk_requirements`
+  resolves with `Path.resolve()`, which follows symlinks as well as `..`, and then tests
+  `is_relative_to(root.resolve())` before any read — so the mechanism structurally covers
+  it and the reviewer could not demonstrate an escape. What is missing is a test: the
+  three refusal cases driven today are an absolute path, `../`, and `../` through a
+  subdirectory, all textual. A symlink inside the checkout pointing out of it is the one
+  shape no case exercises. Non-goals: this is coverage, not a defect — the check was
+  read and found correct, and nothing here claims an exploit exists. It is also
+  test-harness code auditing this repository's own committed config, so anybody who can
+  plant the symlink can already edit the workflow that runs the job.
+
 ## Housekeeping
 
 - **Every action in both workflows is now SHA-pinned, and ALL THREE of those pins are
@@ -1375,7 +1400,7 @@ The Python range is now declared rather than inferred: **3.10+** in `README.md` 
 `AGENTS.md`, and a two-rung matrix on 3.10 and 3.13. 3.10 is the TOOLCHAIN floor, not the
 language floor — moviola's own scripts parse under 3.7; pytest 9.1.1 and yt-dlp 2026.8.19
 both declare `Requires-Python >= 3.10`. Both rungs were run locally before the workflow
-claimed them rather than published as a guess: 1019 passed on 3.10.12 and 1019 on
+claimed them rather than published as a guess: 1021 passed on 3.10.12 and 1021 on
 CPython 3.13.13, each against exactly the pinned set, and the 3.13 install was checked to
 resolve six packages with `exceptiongroup`, `tomli` and `typing-extensions` correctly
 excluded by their `python_version < "3.11"` markers. That count is a snapshot with a date,

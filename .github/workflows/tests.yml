@@ -63,7 +63,7 @@ jobs:
         # will not install. AGENTS.md and README.md declare 3.10+ to match.
         #
         # Both rungs were run locally before this landed rather than published
-        # as a guess: 1019 passed on 3.10.12 and 1019 on CPython 3.13.13, each
+        # as a guess: 1021 passed on 3.10.12 and 1021 on CPython 3.13.13, each
         # against exactly the hash-pinned set below, and the 3.13 install was
         # checked to resolve six packages — `exceptiongroup`, `tomli` and
         # `typing-extensions` correctly excluded by their markers.
