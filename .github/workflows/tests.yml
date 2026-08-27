@@ -102,10 +102,26 @@ jobs:
         # non-goals. Movement is not ignored, it is reported separately:
         # drift.yml installs the same two packages unpinned, weekly.
         #
-        # `--upgrade pip` is the one unpinned install in this job, deliberately:
-        # it is the tool that ENFORCES the hashes below, it never enters the
-        # environment the suite imports from, and pinning the checker with the
-        # checker is a knot rather than a guarantee.
+        # TWO installs in this job are unpinned, and this comment claimed to be
+        # the only one for a revision. `--upgrade pip` is deliberate: it is the
+        # tool that ENFORCES the hashes below, and it never enters the
+        # environment the suite imports from.
+        #
+        # It COULD be pinned. The runner's preinstalled pip is able to install a
+        # hash-pinned pip, so "pinning the checker with the checker" is a
+        # two-stage bootstrap rather than the circle this comment used to call
+        # it — the earlier wording argued the pin was impossible when it is
+        # merely a trade. It is not taken because it buys a decided pip version
+        # at the price of running the suite against a pip nobody here has run it
+        # against, and a green gate is worth more than a pinned checker.
+        # TODOS.md carries it as a deferral rather than leaving the reason
+        # sitting in a comment.
+        #
+        # The other unpinned install is `apt-get install ffmpeg`, in the step
+        # above. It is not a PyPI package and nothing in requirements-ci.txt can
+        # reach it; the file's own NON-GOALS say so, and TODOS.md carries that
+        # too. Neither is a hole this file is hiding — but "the one unpinned
+        # install" was a sentence that made a reader stop looking.
         run: |
           python -m pip install --upgrade pip
           python -m pip install --require-hashes -r requirements-ci.txt

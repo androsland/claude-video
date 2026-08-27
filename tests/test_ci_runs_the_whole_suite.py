@@ -132,15 +132,34 @@ on:
     in error — an attached spelling is refused by the tokenizer, a level
     earlier, whatever this restriction is set to.
 
-  * **Three reference spellings are followed and two legal ones are not.**
+  * **Three reference spellings are followed and ONE legal one is not.**
     `-r F`, `--requirement F` and `--requirement=F` are followed. pip's
-    attached `-rF`, and optparse's `-r=F`, are not. That is a real gap in a
-    legal spelling and it fails in the loud direction: an unfollowed reference
-    reports its packages as uninstalled, so the suite goes red rather than
-    quiet. Neither is `working-directory:` nor a `cd` inside a `run:` block
-    tracked — every top-level reference resolves against the repository root,
-    which is where the job's checkout sits, and a nested one resolves against
-    its referrer's directory, which is pip's own rule.
+    attached `-rF` is not, and that is the real gap: it is a legal spelling
+    that means "install from F", and it fails in the loud direction — an
+    unfollowed reference reports its packages as uninstalled, so the suite goes
+    red rather than quiet.
+
+    `-r=F` is NOT a second gap and this bullet claimed it was for one revision.
+    optparse binds the whole of `=F` as the value, so `-r=reqs.txt` asks pip
+    for a file literally named `=reqs.txt`. Refusing it is CORRECT; following
+    it as `reqs.txt` would be the bug. The distinction matters because "two
+    legal spellings are unsupported" is an argument for adding support, and one
+    of the two would have been a defect.
+
+    A **backslash continuation** is the third thing not seen, and it is the
+    likeliest of the three to be written by hand: `only_install_lines` keys on
+    the LINE, and the continuation line of `pip install \\` + newline + `-r F`
+    carries no `pip install`, so the reference goes unread. Loud direction
+    again, but the failure names a missing package rather than an unreadable
+    reference. Joining continued lines before tokenizing is a small change if
+    it is ever wanted; it is not made on speculation.
+
+    Neither is `working-directory:` nor a `cd` inside a `run:` block tracked —
+    every top-level reference resolves against the repository root, which is
+    where the job's checkout sits, and a nested one resolves against its
+    referrer's directory, which is pip's own rule. That root is also the
+    CONTAINMENT boundary: a reference resolving outside it is refused rather
+    than read, because a file that is not in the checkout is not on the runner.
 
   * **A referenced file that cannot be read raises; it does not read as
     False.** Missing, and in a reference cycle, are one defect from here — a
@@ -156,6 +175,7 @@ on:
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -176,9 +196,17 @@ CI_NEED_NOT_INSTALL: dict[str, str] = {}
 #
 # This exists because "exactly one workflow runs pytest" would otherwise ban the
 # hardening claim 1 argues for — giving `release.yml` its own pytest step so the
-# publish tag is gated — along with a scheduled drift job and a nightly subset.
-# The assertions below need ONE unambiguous workflow to read; they do not need
-# it to be the only one in the repository.
+# publish tag is gated — along with `drift.yml`, which now exists, and a nightly
+# subset, which does not. The assertions below need ONE unambiguous workflow to
+# read; they do not need it to be the only one in the repository.
+#
+# An exemption is keyed by FILENAME, which means naming a workflow here removes
+# it from every assertion in TestTheWholeSuiteRunsInCI at once. The reason
+# string is prose and enforces nothing on its own — `TestTheExemptedDriftJob`
+# below is what makes drift.yml's three claims checkable, and
+# `test_no_exemption_outlives_the_workflow_it_names` is what stops a dead
+# exemption sitting here silently after the workflow it names stops running
+# pytest.
 NOT_THE_SUITE_WORKFLOW: dict[str, str] = {
     "drift.yml": (
         "the scheduled unpinned-dependency check: it installs pytest and yt-dlp "
@@ -242,8 +270,10 @@ def without_comments(text: str) -> str:
 
 
 # The spellings pip accepts for "install from this file instead of from names
-# on the command line". The attached `-rFILE` and optparse's `-r=FILE` are both
-# legal and both deliberately absent — see the module docstring.
+# on the command line". The attached `-rFILE` is legal and deliberately absent
+# — see the module docstring. `-r=FILE` is NOT the same case and was grouped
+# with it in error: optparse binds `=FILE`, so that spelling asks for a file
+# named `=FILE` and refusing it is the correct answer rather than a gap.
 REQUIREMENT_FLAGS = ("-r", "--requirement")
 
 # What makes a line an install. A `-r` anywhere else is not a reference, and
@@ -260,11 +290,26 @@ INSTALL_MARKERS = ("pip install", "pip3 install")
 class RequirementsReferenceError(Exception):
     """A workflow installs from a requirements file that cannot be read.
 
-    Missing and circular are one defect from here — a `-r` whose contents are
-    unavailable — and both raise rather than resolving to "nothing installed".
-    That answer is byte-identical to the one a genuinely deleted install
-    produces, and the two need opposite fixes.
+    Missing, circular, outside the checkout, and nested past
+    `MAX_REFERENCE_DEPTH` are one defect from here — a `-r` whose contents are
+    unavailable — and all four raise rather than resolving to "nothing
+    installed". That answer is byte-identical to the one a genuinely deleted
+    install produces, and the two need opposite fixes.
+
+    All four, deliberately: this is the one exception type the module promises,
+    so every unreadable reference has to arrive as it. A deep acyclic chain
+    used to escape as `RecursionError` — true, loud, and outside the contract,
+    which made it indistinguishable from a bug in this file rather than a
+    statement about the workflow.
     """
+
+
+# How deep a chain of `-r` references may nest before it is refused. Not a
+# performance number and not tuned: the real bound is that every referenced
+# file must be tracked, and nobody commits 32 nested requirements files. It is
+# here so the recursion has a stated limit that raises the module's own
+# exception, rather than an unstated one that raises Python's.
+MAX_REFERENCE_DEPTH = 32
 
 
 def referenced_requirements(text: str, *, only_install_lines: bool) -> list[str]:
@@ -291,17 +336,51 @@ def referenced_requirements(text: str, *, only_install_lines: bool) -> list[str]
     return found
 
 
-def _requirements_body(path: Path, seen: tuple[Path, ...]) -> str:
-    """The comment-stripped contents of `path`, plus whatever it references.
+def _walk_requirements(path: Path, seen: tuple[Path, ...], root: Path):
+    """Yield `(resolved path, comment-stripped body)` for `path` and its refs.
+
+    A generator rather than a string because the traversal has two consumers
+    that want different halves of it — `expand_requirements` wants the bodies,
+    `referenced_requirement_paths` wants the paths — and a recursion written
+    twice is a recursion with two places to drift.
 
     A nested reference resolves against the REFERRING file's directory rather
-    than the repository root, which is pip's own rule.
+    than against `root`, which is pip's own rule. The two are only
+    distinguishable when the referring file is ITSELF in a subdirectory; a
+    fixture that puts the subdirectory on the referenced side instead makes
+    both rules produce the same path, which is how this went a revision
+    untested.
+
+    `root` is the containment boundary, not the resolution base — see the
+    check below for why the distinction matters.
     """
     resolved = path.resolve()
+    # Containment first, before the file is read or even stat'd for existence.
+    # `root / name` DISCARDS root when `name` is absolute — `Path("/repo") /
+    # "/etc/passwd"` is `/etc/passwd` — so without this a workflow line reading
+    # `pip install -r /etc/passwd` opened that file, and `-r ../../../x` walked
+    # out of the checkout. Not an escalation: the only text this parses is
+    # committed workflow YAML, and anyone who can edit that already runs
+    # arbitrary code in the job. It is refused because a requirements file CI
+    # installs from must ship with the checkout to exist on the runner at all,
+    # which `test_every_referenced_requirements_file_is_tracked` already
+    # demands — so containment refuses no legitimate case.
+    if not resolved.is_relative_to(root.resolve()):
+        raise RequirementsReferenceError(
+            f"a workflow installs from {path}, which resolves to {resolved}, "
+            f"outside {root}. A requirements file that is not in the checkout "
+            "is not on the runner either."
+        )
     if resolved in seen:
         chain = " -> ".join(p.name for p in seen + (resolved,))
         raise RequirementsReferenceError(
             f"requirements files reference each other in a cycle: {chain}"
+        )
+    if len(seen) >= MAX_REFERENCE_DEPTH:
+        chain = " -> ".join(p.name for p in seen + (resolved,))
+        raise RequirementsReferenceError(
+            f"requirements references nest more than {MAX_REFERENCE_DEPTH} "
+            f"deep: {chain}"
         )
     if not resolved.is_file():
         raise RequirementsReferenceError(
@@ -310,10 +389,12 @@ def _requirements_body(path: Path, seen: tuple[Path, ...]) -> str:
             "time rather than at test time — so the reference is checked as a "
             "reference rather than reported as a missing package."
         )
-    parts = [without_comments(resolved.read_text(encoding="utf-8"))]
-    for name in referenced_requirements(parts[0], only_install_lines=False):
-        parts.append(_requirements_body(resolved.parent / name, seen + (resolved,)))
-    return "\n".join(parts)
+    body = without_comments(resolved.read_text(encoding="utf-8"))
+    yield resolved, body
+    for name in referenced_requirements(body, only_install_lines=False):
+        yield from _walk_requirements(
+            resolved.parent / name, seen + (resolved,), root
+        )
 
 
 def expand_requirements(text: str, root: Path = REPO_ROOT) -> str:
@@ -326,8 +407,22 @@ def expand_requirements(text: str, root: Path = REPO_ROOT) -> str:
     """
     parts = [text]
     for name in referenced_requirements(text, only_install_lines=True):
-        parts.append(_requirements_body(root / name, ()))
+        parts.extend(body for _, body in _walk_requirements(root / name, (), root))
     return "\n".join(parts)
+
+
+def referenced_requirement_paths(text: str, root: Path = REPO_ROOT) -> list[Path]:
+    """Every requirements file `text` installs from, transitively, resolved.
+
+    The transitive part is the point. `referenced_requirements` answers what a
+    single text NAMES, which for the tracked-file check is the top level only —
+    and a nested reference is exactly as absent from a clean checkout as a
+    top-level one if nobody tracked it.
+    """
+    found: list[Path] = []
+    for name in referenced_requirements(text, only_install_lines=True):
+        found.extend(p for p, _ in _walk_requirements(root / name, (), root))
+    return found
 
 
 def workflow_claims(text: str, root: Path = REPO_ROOT) -> str:
@@ -349,6 +444,41 @@ def workflow_claims(text: str, root: Path = REPO_ROOT) -> str:
         if not line.lstrip().lstrip("-").lstrip().startswith("name:")
     ]
     return "\n".join(kept)
+
+
+def matrix_python_versions(text: str) -> list[str]:
+    """Every interpreter version a `python-version:` matrix line lists.
+
+    Regex rather than a YAML parse, for the reason the whole file is regex
+    rather than a YAML parse: this suite installs no YAML library, and the one
+    shape being read here — a flow sequence on one line — is the shape the
+    workflow uses. A block sequence would read as no versions at all, which
+    fails loud in the test that consumes this rather than quietly returning a
+    subset.
+    """
+    match = re.search(r"python-version:\s*\[([^\]]*)\]", without_comments(text))
+    if not match:
+        return []
+    return [v.strip().strip("'\"") for v in match.group(1).split(",") if v.strip()]
+
+
+def documented_ci_versions(text: str) -> list[str] | None:
+    """The versions a doc's "CI runs …" sentence names, or None if it has none.
+
+    The slice runs from `CI runs` to the first `;` or newline. That boundary is
+    doing real work in README.md, where the sentence continues "; 3.11 and 3.12
+    are not tested" — versions that are named precisely because CI does NOT run
+    them, and reading them as a claim would invert the sentence.
+    """
+    start = text.find("CI runs")
+    if start == -1:
+        return None
+    rest = text[start + len("CI runs"):]
+    end = min(
+        (i for i in (rest.find(";"), rest.find("\n")) if i != -1),
+        default=len(rest),
+    )
+    return re.findall(r"\b\d+\.\d+\b", rest[:end])
 
 
 def pytest_invocations(text: str) -> list[str]:
@@ -700,15 +830,31 @@ class TestTheWholeSuiteRunsInCI:
         # the working tree — and is absent from a clean checkout, where the job
         # fails at install time. Skips rather than guesses when git cannot
         # answer, for the reason `repo_files` documents.
+        #
+        # TRANSITIVELY. This walked only top-level references for one revision,
+        # which left the one shape the rule is actually for — a nested `-r`
+        # pointing at a file nobody added — passing a check written to catch
+        # exactly that. A nested file is as absent from a clean checkout as a
+        # top-level one.
         listed = git_listed_paths()
         if listed is None:
             pytest.skip("git cannot list this checkout")
+        checked = 0
         for name, text in workflow_files().items():
-            for ref in referenced_requirements(text, only_install_lines=True):
-                assert ref in listed, (
-                    f"{name} installs from {ref}, which git does not track, so "
+            for path in referenced_requirement_paths(text):
+                rel = path.relative_to(REPO_ROOT).as_posix()
+                checked += 1
+                assert rel in listed, (
+                    f"{name} installs from {rel}, which git does not track, so "
                     "it would be absent from a clean checkout"
                 )
+        # The guard `test_the_scan_finds_something_to_check` gives the import
+        # scan, for the same reason: a loop over an empty list is green and
+        # says nothing, and this rule's whole subject is a file being absent.
+        assert checked, (
+            "no workflow installs from a requirements file, so the loop above "
+            "iterated over nothing and passed on an empty set"
+        )
 
     def test_ffmpeg_is_installed(self):
         # Not an import guard, so the scan above cannot see it: conftest.py
@@ -732,11 +878,70 @@ class TestTheWholeSuiteRunsInCI:
         # NON-GOAL: this does not forbid going back to `pip install pytest
         # yt-dlp`. It makes doing so a red test rather than a silent change,
         # which is the whole difference between a decision and a drift.
+        #
+        # Read the way every other claim in this class is read, and for the
+        # reason `workflow_claims` exists. `"--require-hashes" in
+        # without_comments(text)` was satisfied by a step `name:` — renaming the
+        # step to "Install test dependencies (--require-hashes)" and deleting
+        # the flag from the command left this green. Worse than the ffmpeg case
+        # it repeated, because a label cannot install ffmpeg but it also cannot
+        # enforce a hash, and here the thing being asserted IS the enforcement.
+        #
+        # And on an INSTALL line specifically. `workflow_claims` alone still
+        # accepts the flag anywhere in the file — including inside the
+        # requirements file it appends, where pip never reads it as an argument.
         name, text = the_suite_workflow()
-        assert "--require-hashes" in without_comments(text), (
-            f"{name} does not pass --require-hashes. pip accepts a requirements "
-            "file with hashes and ignores them without it, so the pins would be "
-            "documentation rather than enforcement."
+        installs = [
+            line
+            for line in workflow_claims(text).splitlines()
+            if any(m in line for m in INSTALL_MARKERS)
+        ]
+        assert installs, f"{name} has no pip install line at all"
+        assert any("--require-hashes" in line for line in installs), (
+            f"{name} does not pass --require-hashes on any install line. pip "
+            "accepts a requirements file with hashes and ignores them without "
+            "it, so the pins would be documentation rather than enforcement. "
+            f"Install lines found: {installs}"
+        )
+
+    @pytest.mark.parametrize("doc", ["README.md", "AGENTS.md"], ids=["readme", "agents"])
+    def test_the_documented_interpreters_are_the_ones_the_matrix_runs(self, doc):
+        # Both files state which interpreters CI runs, in prose, and until this
+        # test nothing read either. The workflow comment goes further and
+        # asserts a result per rung — "993 passed on 3.10.12 and 993 on CPython
+        # 3.13.13" — so dropping a rung leaves three separate places claiming a
+        # run that no longer happens.
+        #
+        # Asserted in BOTH directions. A version in the matrix and not in the
+        # sentence is a doc that undersells its own coverage; a version in the
+        # sentence and not in the matrix is a doc that claims a run nobody makes,
+        # which is the one that costs somebody an afternoon.
+        #
+        # NON-GOALS. It reads a sentence-shaped SLICE — from "CI runs" to the
+        # first `;` or newline — not prose. A claim written differently, or
+        # spread across a line break before the semicolon, reads as fewer
+        # versions and fails here rather than passing quietly; that is the
+        # intended direction, but it does mean this test constrains the phrasing
+        # and not only the facts. It also says nothing about whether either rung
+        # PASSED, or ever ran — a matrix entry is a request, and GitHub is where
+        # the answer lives.
+        _, workflow = the_suite_workflow()
+        matrix = matrix_python_versions(workflow)
+        assert len(matrix) >= 2, (
+            f"the suite workflow runs on {matrix or 'no declared version'}. The "
+            "second rung is the only thing in this repository that has ever run "
+            "the suite on an interpreter other than the floor — if it is going "
+            "deliberately, the sentences in README.md and AGENTS.md go with it."
+        )
+        documented = documented_ci_versions((REPO_ROOT / doc).read_text(encoding="utf-8"))
+        assert documented is not None, (
+            f"{doc} no longer says which interpreters CI runs. The matrix is "
+            f"{matrix}; a reader has nowhere to find that out."
+        )
+        assert sorted(documented) == sorted(matrix), (
+            f"{doc} says CI runs {documented}; the matrix runs {matrix}. "
+            "Whichever is right, the other is telling somebody a version is "
+            "covered when it is not, or hiding one that is."
         )
 
     def test_the_job_has_a_timeout(self):
@@ -750,6 +955,126 @@ class TestTheWholeSuiteRunsInCI:
             f"{name} sets no timeout-minutes, so a stuck job runs for GitHub's "
             "360-minute default"
         )
+
+
+class TestTheExemptedDriftJob:
+    """The three claims `NOT_THE_SUITE_WORKFLOW["drift.yml"]` makes, enforced.
+
+    An exemption is keyed by FILENAME. Naming a workflow there is not "this one
+    is checked differently" — it is "this one is checked by nothing", because
+    every assertion in `TestTheWholeSuiteRunsInCI` reads `the_suite_workflow()`
+    and that function filters the dict. So the reason string went from being a
+    note beside a check to being the whole of it, and prose enforces nothing.
+
+    What the exemption's own text claims, and what is asserted below:
+
+      * it does not run on `pull_request` — the property that makes exempting
+        it correct rather than a hole. A drift job wired into a merge decision
+        hands the merge button to whoever publishes upstream next.
+      * it installs what the suite guards an import on — the property that
+        makes it worth running. Without it the job is green for the reason the
+        gate exists to prevent: pytest exits 0 on a skip.
+      * it is the UNPINNED half — the property that makes it a different
+        question from tests.yml rather than a second copy of the same one.
+
+    NON-GOALS, deliberately:
+
+      * **It does not check that the schedule ever fires, or that anybody
+        reads it.** A `cron:` in a file is not a run, GitHub disables scheduled
+        workflows on inactive repositories without asking, and nothing here can
+        see either. The workflow's own NON-GOALS say the notification story is
+        the Actions tab and GitHub's scheduled-run email; this file cannot
+        verify that story and does not try.
+      * **It does not generalise to a second exemption.** Every assertion below
+        reads `drift.yml` by name, because the three properties are that
+        workflow's, not a category's — a hardened `release.yml` would be
+        exempt for entirely different reasons and would need its own class. The
+        one thing that IS generic is
+        `test_no_exemption_outlives_the_workflow_it_names`.
+      * **It cannot tell an unpinned install from an unpinnABLE one.** The apt
+        step here installs `ffmpeg` with no version, exactly as tests.yml does,
+        and this class reads only the pip lines. The pinning split this
+        repository runs on is a split about PyPI; TODOS.md carries the rest.
+    """
+
+    def the_drift_workflow(self) -> str:
+        text = workflow_files().get("drift.yml")
+        if text is None:
+            pytest.fail(
+                "drift.yml is named in NOT_THE_SUITE_WORKFLOW but is not in "
+                ".github/workflows — the exemption outlived the workflow"
+            )
+        return text
+
+    def test_it_does_not_gate_a_pull_request(self):
+        # The load-bearing one. `pull_request_target` is listed alongside
+        # `pull_request` because it is the more dangerous spelling of the same
+        # mistake — it runs with the base repository's token — and a rule that
+        # named only the safer one would be an invitation.
+        triggers = top_level_block(self.the_drift_workflow(), "on")
+        assert triggers, "drift.yml has no `on:` block"
+        for gate in ("pull_request", "push"):
+            assert gate not in triggers, (
+                f"drift.yml triggers on {gate}. It installs UNPINNED "
+                "dependencies, so a red run is news about PyPI rather than a "
+                "verdict on a diff — gating on it hands the merge button to "
+                "whoever publishes upstream next."
+            )
+
+    def test_it_installs_what_the_suite_guards_an_import_on(self):
+        # The same rule `test_every_module_the_suite_can_skip_on_is_installed`
+        # applies to the gate, applied here to the job the exemption removed
+        # from it. A drift job that does not install yt-dlp skips the 24 tests
+        # that drive it and reports green — which is the exact failure the whole
+        # file exists to stop, arriving through the exemption door.
+        text = self.the_drift_workflow()
+        missing = sorted(
+            module
+            for module in optional_imports(suite_test_files())
+            if module not in CI_NEED_NOT_INSTALL and not installed_by(text, module)
+        )
+        assert not missing, (
+            f"drift.yml does not install {missing}, which the suite guards an "
+            "import on. Those tests would skip, the run would be green, and the "
+            "drift job would be reporting on dependencies it never exercised."
+        )
+
+    def test_it_is_the_unpinned_half(self):
+        # What makes it a different question from tests.yml rather than a
+        # second copy of it. Both halves asserted: no hash enforcement, and no
+        # reference to the pinned file — either one alone would let the job
+        # quietly become a duplicate of the gate.
+        claims = workflow_claims(self.the_drift_workflow())
+        assert "--require-hashes" not in claims, (
+            "drift.yml passes --require-hashes, so it now asks the same "
+            "question tests.yml already answers. The point of this job is to "
+            "resolve whatever PyPI publishes today."
+        )
+        refs = referenced_requirements(
+            self.the_drift_workflow(), only_install_lines=True
+        )
+        assert not refs, (
+            f"drift.yml installs from {refs}. A drift job reading the pinned "
+            "file is a second run of the gate on a schedule."
+        )
+
+    def test_no_exemption_outlives_the_workflow_it_names(self):
+        # The generic half, and the one that survives a second exemption being
+        # added. A key here suppresses every assertion in
+        # `TestTheWholeSuiteRunsInCI` for that filename; if the workflow is
+        # deleted, or stops running pytest, the entry keeps suppressing nothing
+        # in particular and reads as deliberate coverage that no longer exists.
+        present = workflow_files()
+        for name in NOT_THE_SUITE_WORKFLOW:
+            assert name in present, (
+                f"NOT_THE_SUITE_WORKFLOW names {name}, which is not in "
+                ".github/workflows. Delete the entry, or restore the workflow."
+            )
+            assert pytest_invocations(present[name]), (
+                f"NOT_THE_SUITE_WORKFLOW names {name}, but it no longer runs "
+                "pytest — so the exemption excludes it from a filter that would "
+                "not have selected it anyway. Delete the entry."
+            )
 
 
 class TestTheRuleItself:
@@ -965,16 +1290,99 @@ class TestTheRuleItself:
         (tmp_path / "reqs.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
         assert installed_by(f"      - run: pip install {flag}\n", "yt_dlp", tmp_path)
 
-    @pytest.mark.parametrize(
-        "flag", ["-rreqs.txt", "-r=reqs.txt"], ids=["attached", "short-with-equals"]
-    )
-    def test_the_unsupported_spellings_are_not_followed(self, flag, tmp_path):
-        # A stated blind spot, driven rather than assumed. Both are legal pip
-        # and neither is seen, which reports yt_dlp as uninstalled and turns the
-        # suite red — the loud direction. If either is ever wanted, this is the
-        # test that has to change, which is the point of writing it down.
+    def test_the_attached_spelling_is_not_followed(self, tmp_path):
+        # The one real blind spot, driven rather than assumed. `-rreqs.txt` is
+        # legal pip and is not seen, which reports yt_dlp as uninstalled and
+        # turns the suite red — the loud direction. If it is ever wanted, this
+        # is the test that has to change, which is the point of writing it down.
         (tmp_path / "reqs.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
-        assert not installed_by(f"      - run: pip install {flag}\n", "yt_dlp", tmp_path)
+        assert not installed_by(
+            "      - run: pip install -rreqs.txt\n", "yt_dlp", tmp_path
+        )
+
+    def test_a_short_flag_with_an_equals_is_not_a_missed_reference(self, tmp_path):
+        # NOT a blind spot, and it sat beside the test above under an id reading
+        # `short-with-equals` and a shared comment reading "Both are legal pip"
+        # for a revision. That framing made it an argument for adding support,
+        # and adding support would have been the defect.
+        #
+        # This file's answer is the same as for the attached spelling — one
+        # token, matching neither flag, so nothing is named. The DIFFERENCE is
+        # on pip's side, so it is proved on pip's side rather than asserted in
+        # prose: optparse is what pip's CLI parser is built on, it is stdlib,
+        # and it binds the whole of `=reqs.txt`. So `pip install -r=reqs.txt`
+        # asks for a file literally named `=reqs.txt` — not for `reqs.txt` —
+        # and a walker that followed this spelling to `reqs.txt` would be
+        # reading a file pip never opens.
+        #
+        # Imported here rather than at module scope: nothing else in this file
+        # needs it, and its presence at the top would read as a dependency of
+        # the scanner rather than of one test's evidence.
+        import optparse
+
+        parser = optparse.OptionParser()
+        parser.add_option("-r", "--requirement", action="append", dest="req",
+                          default=[])
+        assert parser.parse_args(["-r=reqs.txt"])[0].req == ["=reqs.txt"]
+        # And the contrast, from the same parser, so "legal spelling" is a
+        # measured claim about `-rF` rather than a shared one about both.
+        assert parser.parse_args(["-rreqs.txt"])[0].req[-1:] == ["reqs.txt"]
+
+        line = "      - run: pip install -r=reqs.txt\n"
+        assert referenced_requirements(line, only_install_lines=True) == []
+        (tmp_path / "reqs.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
+        assert not installed_by(line, "yt_dlp", tmp_path)
+
+    def test_a_backslash_continuation_hides_a_reference(self, tmp_path):
+        # The third thing not seen, and the likeliest of the three to be typed
+        # by hand. `only_install_lines` keys on the LINE, and the continuation
+        # line carries no `pip install`, so its `-r` goes unread.
+        #
+        # Pinned as the CURRENT behaviour, not endorsed as the right one. It
+        # fails loud — yt_dlp reads as uninstalled and the suite goes red — but
+        # the failure names a missing package rather than an unreadable
+        # reference, which is the wrong sentence for the reader. Joining
+        # continued lines before tokenizing is the fix if it is ever wanted;
+        # this test is what turns making it into a deliberate edit.
+        (tmp_path / "reqs.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
+        wrapped = "      - run: |\n          pip install \\\n            -r reqs.txt\n"
+        assert referenced_requirements(wrapped, only_install_lines=True) == []
+        assert not installed_by(wrapped, "yt_dlp", tmp_path)
+        # The negative half: the same reference on ONE line is followed, so the
+        # assertion above is about the continuation and not about the fixture.
+        joined = "      - run: pip install -r reqs.txt\n"
+        assert installed_by(joined, "yt_dlp", tmp_path)
+
+    @pytest.mark.parametrize(
+        "spelling",
+        ["-r 'reqs.txt'", '-r "reqs.txt"', "--requirement='reqs.txt'"],
+        ids=["single", "double", "long-equals-single"],
+    )
+    def test_a_quoted_path_is_unquoted(self, spelling, tmp_path):
+        # Shell quoting is ordinary in a `run:` block and reaches pip stripped.
+        # A tokenizer that kept the quotes would look for a file whose name
+        # begins with an apostrophe and raise — loud, but for a reason that has
+        # nothing to do with the workflow.
+        (tmp_path / "reqs.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
+        assert installed_by(
+            f"      - run: pip install {spelling}\n", "yt_dlp", tmp_path
+        )
+
+    def test_pip3_is_an_install_marker(self, tmp_path):
+        # `pip3 install` is the same command under the name Debian images
+        # usually carry. Both markers are in INSTALL_MARKERS and only one was
+        # ever driven.
+        (tmp_path / "reqs.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
+        assert installed_by("      - run: pip3 install -r reqs.txt\n", "yt_dlp", tmp_path)
+
+    def test_a_trailing_dash_r_names_nothing(self):
+        # `-r` as the last token has no argument to bind. The tokenizer's
+        # `i + 1 < len(tokens)` guard is what stops it reading past the end;
+        # without it this raises IndexError, which is a bug in this file
+        # wearing the costume of a finding about the workflow.
+        assert referenced_requirements(
+            "      - run: pip install -r\n", only_install_lines=True
+        ) == []
 
     def test_a_dash_r_outside_an_install_is_not_a_reference(self):
         # The collision that decides the `pip install` restriction: pytest's own
@@ -1017,14 +1425,114 @@ class TestTheRuleItself:
         assert installed_by(text, "pytest", tmp_path)
         assert not installed_by(text, "yt_dlp", tmp_path)
 
-    def test_a_nested_reference_is_followed(self, tmp_path):
-        # pip resolves a nested `-r` against the referring file's directory, and
-        # the sub-directory here is what makes that rule observable rather than
-        # indistinguishable from resolving against the root.
-        (tmp_path / "a.txt").write_text("-r inner/b.txt\n", encoding="utf-8")
-        (tmp_path / "inner").mkdir()
-        (tmp_path / "inner" / "b.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
-        assert installed_by("      - run: pip install -r a.txt\n", "yt_dlp", tmp_path)
+    def test_a_nested_reference_resolves_against_its_referrer(self, tmp_path):
+        # pip resolves a nested `-r` against the REFERRING file's directory. The
+        # subdirectory has to be on the referring side for that to be
+        # observable: an earlier revision put `sub/` on the REFERENCED side —
+        # `a.txt` at the root saying `-r sub/b.txt` — where referrer-resolution
+        # and root-resolution both produce `tmp_path/sub/b.txt`. It passed
+        # against either rule, so it named one without testing it.
+        #
+        # Here `sub/a.txt` says `-r b.txt` with no directory at all. Referrer
+        # resolution finds `sub/b.txt`; root resolution looks for `b.txt` at the
+        # root and raises. Only one of the two can pass.
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "a.txt").write_text("-r b.txt\n", encoding="utf-8")
+        (tmp_path / "sub" / "b.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
+        assert installed_by(
+            "      - run: pip install -r sub/a.txt\n", "yt_dlp", tmp_path
+        )
+
+    def test_a_nested_reference_is_not_resolved_against_the_root(self, tmp_path):
+        # The mirror. Same shape, with the referenced file sitting at the ROOT
+        # instead of beside its referrer — which is where a root-resolving
+        # walker would look, and where pip does not. It must raise rather than
+        # quietly install from the wrong file.
+        #
+        # Written as a separate test rather than a second assertion above so a
+        # failure names which direction broke. The positive going red means the
+        # walk stopped following; this going red means it started resolving
+        # against the wrong base, and those are different bugs.
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "a.txt").write_text("-r b.txt\n", encoding="utf-8")
+        (tmp_path / "b.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
+        with pytest.raises(RequirementsReferenceError) as caught:
+            installed_by("      - run: pip install -r sub/a.txt\n", "yt_dlp", tmp_path)
+        assert "b.txt" in str(caught.value)
+
+    @pytest.mark.parametrize(
+        "spelling",
+        ["/etc/passwd", "../outside.txt", "sub/../../outside.txt"],
+        ids=["absolute", "dot-dot", "dot-dot-through-a-subdirectory"],
+    )
+    def test_a_reference_outside_the_checkout_is_refused(self, spelling, tmp_path):
+        # `root / name` DISCARDS root when `name` is absolute — `Path("/repo") /
+        # "/etc/passwd"` is `/etc/passwd`, not `/repo/etc/passwd` — so before
+        # the containment check this read whatever the line named. The dot-dot
+        # cases are the same escape by a different spelling, and the third goes
+        # out THROUGH a subdirectory, which a check written as "does not start
+        # with ..\" would miss and a resolve-then-compare does not.
+        #
+        # Not an escalation, and the fixture says so: the only text this parses
+        # is committed workflow YAML, and whoever can edit that already runs
+        # arbitrary code in the job. It is refused because a requirements file
+        # CI installs from has to ship with the checkout to exist on the runner
+        # at all — so containment refuses no legitimate case.
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "sub").mkdir()
+        (tmp_path / "outside.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
+        with pytest.raises(RequirementsReferenceError) as caught:
+            installed_by(f"      - run: pip install -r {spelling}\n", "yt_dlp", root)
+        assert "outside" in str(caught.value)
+
+    def test_a_reference_inside_a_subdirectory_is_not_refused(self, tmp_path):
+        # The negative half of containment, in its own test because a guard
+        # that refuses everything passes every test above. `sub/reqs.txt` is
+        # inside the checkout and ordinary.
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "reqs.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
+        assert installed_by(
+            "      - run: pip install -r sub/reqs.txt\n", "yt_dlp", tmp_path
+        )
+
+    def test_a_chain_deeper_than_the_cap_raises_this_module_s_error(self, tmp_path):
+        # A long ACYCLIC chain is not a cycle, so the cycle guard never fires on
+        # it, and before the cap it exhausted the interpreter's stack and left
+        # as `RecursionError` — true, loud, and outside the one exception type
+        # this module promises, which made it read as a bug in this file rather
+        # than a statement about the workflow.
+        depth = MAX_REFERENCE_DEPTH + 5
+        for i in range(depth):
+            nxt = f"-r r{i + 1}.txt\n" if i + 1 < depth else "yt-dlp==1.2.3\n"
+            (tmp_path / f"r{i}.txt").write_text(nxt, encoding="utf-8")
+        with pytest.raises(RequirementsReferenceError) as caught:
+            installed_by("      - run: pip install -r r0.txt\n", "yt_dlp", tmp_path)
+        assert str(MAX_REFERENCE_DEPTH) in str(caught.value)
+
+    def test_a_chain_at_the_cap_is_followed(self, tmp_path):
+        # The boundary, from the legal side. A cap that fired one file early
+        # would pass the test above and refuse a legitimate chain, and the two
+        # are indistinguishable without this.
+        depth = MAX_REFERENCE_DEPTH
+        for i in range(depth):
+            nxt = f"-r r{i + 1}.txt\n" if i + 1 < depth else "yt-dlp==1.2.3\n"
+            (tmp_path / f"r{i}.txt").write_text(nxt, encoding="utf-8")
+        assert installed_by("      - run: pip install -r r0.txt\n", "yt_dlp", tmp_path)
+
+    def test_the_path_walker_is_transitive(self, tmp_path):
+        # What `test_every_referenced_requirements_file_is_tracked` needs and
+        # cannot check for itself: this repository's one requirements file
+        # references nothing, so a walker that stopped after the top level
+        # returns a byte-identical answer on the real tree. Only a synthetic
+        # chain separates them.
+        (tmp_path / "a.txt").write_text("-r b.txt\n", encoding="utf-8")
+        (tmp_path / "b.txt").write_text("-r c.txt\n", encoding="utf-8")
+        (tmp_path / "c.txt").write_text("yt-dlp==1.2.3\n", encoding="utf-8")
+        found = referenced_requirement_paths(
+            "      - run: pip install -r a.txt\n", tmp_path
+        )
+        assert [p.name for p in found] == ["a.txt", "b.txt", "c.txt"]
 
     def test_a_missing_requirements_file_is_loud(self, tmp_path):
         with pytest.raises(RequirementsReferenceError) as caught:

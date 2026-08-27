@@ -44,7 +44,7 @@ Agent Skills package that gives an agent a video input. Installable across Claud
 # the floor is the test toolchain (pytest and yt-dlp both declare
 # `Requires-Python >= 3.10`), not the scripts, which parse under 3.7.
 # CI runs 3.10 and 3.13 against the hash-pinned set in requirements-ci.txt.
-.venv/bin/pytest -q                # or: python3 -m pytest -q
+python3 -m pytest -q               # or: .venv/bin/pytest -q, if you made one
 
 # Build the claude.ai upload bundle (archives skills/moviola/ as the bundle root)
 bash skills/moviola/scripts/build-skill.sh   # → dist/moviola.skill

@@ -49,12 +49,22 @@
 #   * Regenerating it is a deliberate edit, not a scheduled one. Nothing bumps
 #     these automatically; the drift job tells you when it is worth doing.
 #
-# Regenerate:
+# Regenerate ON PYTHON 3.10, and only there:
 #
-#   pip install --dry-run --report r.json --only-binary=:all: pytest yt-dlp
+#   python3.10 -m pip install --dry-run --report r.json --only-binary=:all: pytest yt-dlp
 #
 # then take each name and version from the report and list every `sha256` that
 # PyPI publishes for that version.
+#
+# The interpreter is load-bearing and this recipe did not name it for a
+# revision. pip resolves for the interpreter it is running under, so on 3.11 or
+# later the report contains six packages: `exceptiongroup`, `tomli` and
+# `typing-extensions` are gated behind `python_version < "3.11"` markers and
+# simply are not needed there. Regenerating on a newer interpreter therefore
+# drops three specs without a warning, and the file still installs cleanly on
+# the machine that produced it — while the 3.10 rung in tests.yml fails at
+# install time, because --require-hashes refuses a transitive dependency that
+# has no spec.
 
 pytest==9.1.1 \
     --hash=sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313 \

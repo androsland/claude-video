@@ -49,6 +49,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
+        # This SHA and the setup-python one below are duplicated from tests.yml
+        # and nothing couples them — bumping one leaves the other pinned to the
+        # older action, silently, until somebody diffs the two files. Noted
+        # rather than solved: the alternatives are a composite action or a
+        # reusable workflow, and both cost more indirection than two lines of
+        # duplication are worth at this size. Bump them together.
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python
@@ -68,11 +74,21 @@ jobs:
           sudo apt-get install -y --no-install-recommends ffmpeg
 
       - name: Install the latest published test dependencies
-        # Unpinned ON PURPOSE, and the only place in this repository that is.
+        # Unpinned ON PURPOSE, and the only place the SUITE'S OWN dependencies
+        # are. Not the only unpinned install in the repository, which this
+        # comment claimed for a revision: `--upgrade pip` on the next line is
+        # unpinned here and in tests.yml, and so is the `apt-get install ffmpeg`
+        # step above, in both files. Those are unpinned for their own reasons
+        # and are not what this job measures.
+        #
         # No --require-hashes and no requirements-ci.txt: the point is to
         # resolve whatever PyPI publishes today and find out whether the suite
         # still passes against it. `pip list` is this job's real output — it is
         # what names the versions that produced the result.
+        # `TestTheExemptedDriftJob` in tests/test_ci_runs_the_whole_suite.py
+        # asserts both halves of that, because this file is named in
+        # NOT_THE_SUITE_WORKFLOW and is therefore invisible to every other check
+        # in that file.
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest yt-dlp

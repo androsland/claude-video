@@ -4,7 +4,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Local Whisper backend
 
-- **No manifest means dependency CVE scanning has nothing to read.** `faster-whisper` is introduced only as a string in `setup.py`'s output and a lazy `import` — there is no `requirements.txt`, `pyproject.toml` or lockfile in the repo, which is correct for a project whose runtime is otherwise pure stdlib, but it means a manifest-driven scanner (`trivy fs`, `osv-scanner`) has no artifact to point at and will report clean without having checked anything. The dependency chain to check by hand is `faster-whisper` -> `ctranslate2`, `onnxruntime`, `huggingface-hub`, `tokenizers`, `av`. Do not read a clean scan of this repo as a clean bill for that chain. (supply-chain review, 2026-08-26)
+- **A manifest now exists, and it does not contain the dependency worth scanning.** `faster-whisper` is introduced only as a string in `setup.py`'s output and a lazy `import`; the runtime is otherwise pure stdlib and has no manifest, which is correct. The dependency chain to check by hand is `faster-whisper` -> `ctranslate2`, `onnxruntime`, `huggingface-hub`, `tokenizers`, `av`. Do not read a clean scan of this repo as a clean bill for that chain. **Amended 2026-08-27 (fix/ci-dependency-posture):** this entry used to rest on "there is no `requirements.txt`, `pyproject.toml` or lockfile in the repo", and `requirements-ci.txt` is now tracked, so that premise is gone. The finding survives its own reason and gets sharper: `trivy fs` and `osv-scanner` now DO find an artifact, they scan the two-package CI toolchain, and they report clean — which is a correct result about pytest and yt-dlp and says nothing at all about the six-package chain above. A clean scan of this repository was previously clean because nothing was read; it is now clean because the wrong thing was read, and the second is easier to mistake for coverage. (supply-chain review, 2026-08-26; premise corrected 2026-08-27)
 
 - **No test loads a real Whisper model.** `tests/test_local_whisper.py` now drives `_collect()`, `_run()`'s VAD fallback and `transcribe_local()`'s cuda-to-cpu retry against stub objects shaped like faster-whisper's `Segment`/`TranscriptionInfo`, so the segment contract and the fallback loop are covered; seven mutations were each confirmed to fail the suite (segment rounding, the dropped CPU retry, kept-empty-text, the progress catch-up loop, the language-pin guard, the progress line's own format, and moving the drain outside the retry's `try` — that last one fails only the fail-mid-drain test, which is what proves the two fallback tests exercise different paths). What remains uncovered is the real library boundary: if faster-whisper renames an attribute or changes `WhisperModel(...)`/`transcribe(...)`'s signature, the stubs keep matching the old shape and the suite stays green. Closing that needs a real model load, which means a multi-hundred-MB download in a suite that is otherwise network-free. Verified by hand instead: `large-v3` int8_float16 on a GTX 1650 Ti transcribed a 38.6 s clip in 22 s including model load. If a CI runner ever gets a model cache, add a `tiny`-model smoke test behind an opt-in marker. **Corrected 2026-08-26:** this entry originally said "CI stays green" and "If CI ever gets a model cache" as though a CI ran the suite. None did — `release.yml` on tag push was the whole of `.github/workflows/`, and it had never executed once in this repository (no workflow run of any kind existed), so the only thing that had ever run these tests was somebody's terminal. **Superseded 2026-08-26 by `ci/run-the-suite`:** `.github/workflows/tests.yml` now runs the suite on every pull request and on pushes to `main`. Two things that does NOT mean — it has still never *run* (no workflow run exists in this repository yet, and one will not until this merges), and the runner has no model cache, so the `tiny`-model smoke test below is still unbuilt and still opt-in when it is. The wording is fixed above and the gap is its own entry under `## Documentation as a checked claim`. (ai-output review, 2026-08-26)
 
@@ -905,6 +905,20 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   **This entry closes when that tag exists, not when this PR merges** — until then
   `README.md:136` still points at a 404. Nothing in the suite can tell the difference;
   see the new NON-GOALS bullet in `test_the_docs_are_checked.py` saying so directly.
+
+- **pip itself is unpinned in both workflows, and the reason given for that was wrong.**
+  (fix/ci-dependency-posture review, 2026-08-27) `python -m pip install --upgrade pip` runs
+  unpinned in `tests.yml` and in `drift.yml`. The comment in tests.yml justified it by
+  saying that pinning the checker with the checker is circular — which does not survive
+  being checked: the runner ships a preinstalled pip, and that pip can install a
+  hash-pinned pip before anything else happens, so it is an ordinary two-stage bootstrap.
+  The comment now says so. The bootstrap is NOT implemented, and that is the deferred
+  part: it would have the gate run against a pip version nobody here has run the suite
+  against, on a branch whose entire purpose is making CI decide its own inputs, and a red
+  gate for that reason would be worse than an unpinned pip. Worth doing when there is a
+  reason to touch the install step anyway. Scope, stated so this does not read bigger than
+  it is: pip never enters the environment the suite imports from, so this is about the
+  integrity of the tool that enforces the hashes, not about what the tests run against.
 
 - **The pins cover PyPI and nothing else — `apt-get install ffmpeg` is still unpinned.**
   (fix/ci-dependency-posture, 2026-08-27) `requirements-ci.txt` decides the two Python
