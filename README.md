@@ -230,10 +230,10 @@ Other knobs (passed to `scripts/moviola.py`):
 
 ```
 .
-├── skills/moviola/                 # self-contained skill — copied as a unit by every installer
+├── skills/moviola/               # self-contained skill — copied as a unit by every installer
 │   ├── SKILL.md                  # skill contract — the source of truth across all surfaces
 │   └── scripts/
-│       ├── moviola.py              # entry point — orchestrates download → frames → transcript
+│       ├── moviola.py            # entry point — orchestrates download → frames → transcript
 │       ├── download.py           # yt-dlp wrapper
 │       ├── frames.py             # ffmpeg frame extraction + auto-fps logic
 │       ├── transcribe.py         # VTT parsing + dedupe + Whisper orchestration
@@ -241,16 +241,23 @@ Other knobs (passed to `scripts/moviola.py`):
 │       ├── local_whisper.py      # on-device backend (optional: faster-whisper)
 │       ├── config.py             # shared config (~/.config/moviola/.env)
 │       ├── untrusted.py          # structural fencing for values this program did not write
+│       ├── workdir.py            # exclusive hold on --out-dir for the life of one run
 │       ├── setup.py              # preflight + installer
 │       └── build-skill.sh        # build dist/moviola.skill for claude.ai upload (dev-only)
 ├── hooks/                        # SessionStart status hook (Claude Code only)
 ├── .claude-plugin/               # plugin.json + marketplace.json (Claude Code)
 ├── .codex-plugin/                # plugin.json — Codex/agents manifest ("skills": "./skills/")
 ├── .agents/plugins/              # marketplace.json — Agent Skills marketplace listing
-├── AGENTS.md → CLAUDE.md         # generic-agent entry point
+├── AGENTS.md                     # generic-agent entry point; CLAUDE.md is a one-line include of it
 ├── tests/                        # pytest suite (ffmpeg-synthesized clips, no network)
-└── .github/workflows/            # tests.yml (suite on every PR) + release.yml (builds moviola.skill on tag push)
+├── requirements-ci.txt           # hash-pinned CI test toolchain — NOT a package manifest
+└── .github/workflows/            # tests.yml (the gate) + drift.yml (weekly, unpinned) + release.yml (tag → moviola.skill)
 ```
+
+The tree is a MAP, not an inventory: `CHANGELOG.md`, `LICENSE`, `dev-sync.sh` and the
+dotfiles are real and deliberately absent from it. What must not be absent is anything
+another document points at — `workdir.py` was, for one release, and `AGENTS.md`'s own
+Structure list is the thing to keep it honest against.
 
 ## Develop
 

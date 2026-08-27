@@ -1375,13 +1375,17 @@ The Python range is now declared rather than inferred: **3.10+** in `README.md` 
 `AGENTS.md`, and a two-rung matrix on 3.10 and 3.13. 3.10 is the TOOLCHAIN floor, not the
 language floor — moviola's own scripts parse under 3.7; pytest 9.1.1 and yt-dlp 2026.8.19
 both declare `Requires-Python >= 3.10`. Both rungs were run locally before the workflow
-claimed them rather than published as a guess: 1013 passed on 3.10.12 and 1013 on
+claimed them rather than published as a guess: 1019 passed on 3.10.12 and 1019 on
 CPython 3.13.13, each against exactly the pinned set, and the 3.13 install was checked to
 resolve six packages with `exceptiongroup`, `tomli` and `typing-extensions` correctly
 excluded by their `python_version < "3.11"` markers. That count is a snapshot with a date,
-not an invariant: it read 993 for the first commit of this branch and was falsified by the
-branch's own review commit, which added twenty tests. Nothing asserts it — the VERSIONS
-are asserted, the count is not, for the reason the workflow comment gives. 3.11 and 3.12 are deliberately untested and the
+not an invariant, and it went stale twice inside this branch: 993 was falsified by the
+review commit that added twenty tests, and 1013 was falsified by the very commit that
+wrote it, which appended five more cases to the same file after measuring. The second is
+an ordering defect rather than an oversight — measure, then edit, then commit — so the
+number is now taken after the last edit and immediately before the commit. Nothing
+asserts it; the VERSIONS are asserted, the count is not, for the reason the workflow
+comment gives. 3.11 and 3.12 are deliberately untested and the
 workflow says so. The day-one ONE-job rule is broken on purpose and the reason is in the
 file: that rule is about the meter, this repository is public so minutes are free, and the
 second rung buys COVERAGE, which is a different axis from parallelism.

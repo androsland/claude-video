@@ -26,6 +26,13 @@ name: Dependency drift
 # story until somebody wants more.
 
 on:
+  # No `push` and no `pull_request` here, deliberately — and the absence is
+  # ASSERTED by test_it_does_not_gate_a_pull_request rather than left to this
+  # comment to promise. This job installs UNPINNED, so a red run is news about
+  # PyPI rather than a verdict on a diff; gating on it would hand the merge
+  # button to whoever publishes upstream next. `pull_request_target` is out for
+  # the same reason twice over — it is the more dangerous spelling of the same
+  # mistake, running against the base repository's token.
   schedule:
     # 06:00 UTC on Mondays. Weekly rather than nightly because what it watches
     # moves on the order of weeks — yt-dlp publishes roughly that often — and a

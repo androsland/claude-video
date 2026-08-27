@@ -63,18 +63,25 @@ jobs:
         # will not install. AGENTS.md and README.md declare 3.10+ to match.
         #
         # Both rungs were run locally before this landed rather than published
-        # as a guess: 1013 passed on 3.10.12 and 1013 on CPython 3.13.13, each
+        # as a guess: 1019 passed on 3.10.12 and 1019 on CPython 3.13.13, each
         # against exactly the hash-pinned set below, and the 3.13 install was
         # checked to resolve six packages — `exceptiongroup`, `tomli` and
         # `typing-extensions` correctly excluded by their markers.
         #
         # That count is a SNAPSHOT of this branch, not an invariant, and it went
-        # stale once INSIDE the branch that introduced it: the first commit
-        # measured 993, the review commit added twenty tests and left this
-        # sentence alone, so for one commit it vouched for a run that covered a
-        # fiftieth less than it claimed. If `pytest -q` prints a different
-        # number today, the likely reason is that somebody added tests, not that
-        # a rung broke.
+        # stale TWICE inside the branch that introduced it. First at 993: the
+        # review commit added twenty tests and left this sentence alone. Then at
+        # 1013, which is the interesting one — that correction was measured and
+        # written, and then five more test cases were appended to the same file
+        # in the same commit, so the sentence shipped already false rather than
+        # drifting into falsehood later.
+        #
+        # Twice is not bad luck, it is an ORDERING defect: measure, then edit,
+        # then commit. So the number is now taken AFTER the last edit and
+        # immediately before the commit, which is the only order in which
+        # "run locally before this landed" is a true sentence. If `pytest -q`
+        # prints a different number today, the likely reason is that somebody
+        # added tests, not that a rung broke.
         #
         # Nothing asserts this number and nothing should. A test pinning the
         # suite's own size fails on every commit that adds a test, which teaches

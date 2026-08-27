@@ -63,9 +63,12 @@ on:
     this project's dependency set and adding one to check a dependency rule
     would be its own joke. What it does before matching is strip the two places
     a name can appear without being installed — `#` comments and `name:` display
-    labels — because the workflow this rule guards mentions `yt-dlp` four times
-    in its own prose, and without stripping, deleting the install line left
-    every assertion here green. What survives that and is still NOT seen: a step
+    labels — because the workflow this rule guards mentions `yt-dlp` several
+    times in its own prose, and without stripping, deleting the install line
+    left every assertion here green. The count is left unstated deliberately:
+    it was written as "four times", was wrong when written and wronger after
+    this branch moved the install into `requirements-ci.txt`, and the argument
+    never turned on the number. What survives that and is still NOT seen: a step
     behind a false `if:`, a job that never runs, and a name in a command that is
     not an install (`echo yt-dlp`). One shape fails in the loud direction: a `#`
     inside a quoted shell string is truncated as though it were a comment, which
@@ -171,6 +174,16 @@ on:
     job count, or trigger breadth. This repository is public, so Actions minutes
     are free; the day-one config in the workflow is there because it is cheap
     now and awkward to retrofit, not because anything is metered.
+
+  * **`strategy.fail-fast: false` is unasserted, and it is NOT covered by the
+    bullet above.** It is a COVERAGE setting wearing a `strategy:` key, not a
+    cost one: at the default `true`, a 3.10 failure cancels the 3.13 rung
+    mid-run, so the build reports on one interpreter while the matrix claims
+    two — the same green-but-hollow shape this file is named for, running in
+    reverse. It is left unasserted because that failure is loud and
+    self-describing (a cancelled job says it was cancelled), not because it is
+    beneath notice. Named here so "says nothing about cost" is not read as
+    having disposed of every `strategy:` key.
 """
 from __future__ import annotations
 
@@ -557,6 +570,33 @@ def top_level_block(text: str, key: str) -> str:
     return "\n".join(body)
 
 
+def declared_triggers(text: str) -> str:
+    """The events a workflow actually fires on: the `on:` block, comments gone.
+
+    This exists because "the text under `on:`" and "what this workflow fires
+    on" are two different questions, and three call sites open-coded the second
+    as the first. `top_level_block` answers the first and deliberately KEEPS
+    comments — a column-zero comment must not terminate a block, and its own
+    tests pin that — so every caller asking the second question has to strip
+    them, and one of the three forgot.
+
+    The cost of forgetting is a test that fails on a CORRECT file: a comment
+    inside `on:` explaining why `push` is absent puts the word "push" in the
+    block, and an absence check reads it as a presence. That is not
+    hypothetical here. drift.yml's `on:` block now carries exactly such a
+    comment, because the reason those triggers are missing is worth writing
+    down, and writing it down is what turned the latent bug into a red run.
+
+    NON-GOALS: this does not parse YAML. A trigger inside a quoted string, or
+    an `on:` key that is not at column zero, is invisible to it — see
+    `top_level_block`, which owns that limit. It also does not distinguish
+    `pull_request` from `pull_request_target`; a caller that needs to must
+    remove the longer spelling before testing for the shorter one, since one
+    contains the other.
+    """
+    return top_level_block(without_comments(text), "on")
+
+
 # --------------------------------------------------------------------------
 # Reading the suite's optional imports
 # --------------------------------------------------------------------------
@@ -685,8 +725,11 @@ def installed_by(text: str, module: str, root: Path = REPO_ROOT) -> bool:
     a different separator, and nothing here needs to know which is which.
 
     Matched against `workflow_claims`, not raw text: the workflow names
-    `yt-dlp` four times in comments and once in a step label, so against raw
-    text this returned True with the install line deleted. `workflow_claims`
+    `yt-dlp` in several comments — and once, historically, in a step label — so
+    against raw text this returned True with the install line deleted. The
+    tally is left vague on purpose: it was written as "four times in comments
+    and once in a step label", was already wrong when it was written, and the
+    argument never depended on the number. `workflow_claims`
     also expands `-r`, which is why the workflow no longer needs to name the
     package at all — `requirements-ci.txt` does.
 
@@ -711,7 +754,7 @@ class TestSomethingRunsTheSuite:
 
     def test_it_fires_on_pull_request(self):
         name, text = the_suite_workflow()
-        triggers = top_level_block(without_comments(text), "on")
+        triggers = declared_triggers(text)
         assert triggers, f"{name} has no column-zero `on:` block"
         # `pull_request_target` CONTAINS `pull_request`, so it is removed before
         # the check rather than trusted to be a different string.
@@ -727,7 +770,7 @@ class TestSomethingRunsTheSuite:
         # also the standard privilege-escalation trigger, running against the
         # base repository's secrets with a write token.
         name, text = the_suite_workflow()
-        triggers = top_level_block(without_comments(text), "on")
+        triggers = declared_triggers(text)
         assert "pull_request_target" not in triggers, (
             f"{name} fires on pull_request_target. The suite would run against "
             "the base commit rather than the PR, and the check would be green "
@@ -908,7 +951,7 @@ class TestTheWholeSuiteRunsInCI:
     def test_the_documented_interpreters_are_the_ones_the_matrix_runs(self, doc):
         # Both files state which interpreters CI runs, in prose, and until this
         # test nothing read either. The workflow comment goes further and
-        # asserts a result per rung — "1013 passed on 3.10.12 and 1013 on
+        # asserts a result per rung — "1019 passed on 3.10.12 and 1019 on
         # CPython 3.13.13" — so dropping a rung leaves three separate places
         # claiming a run that no longer happens.
         #
@@ -1018,7 +1061,7 @@ class TestTheExemptedDriftJob:
         # `pull_request` because it is the more dangerous spelling of the same
         # mistake — it runs with the base repository's token — and a rule that
         # named only the safer one would be an invitation.
-        triggers = top_level_block(self.the_drift_workflow(), "on")
+        triggers = declared_triggers(self.the_drift_workflow())
         assert triggers, "drift.yml has no `on:` block"
         for gate in ("pull_request", "push"):
             assert gate not in triggers, (
@@ -1627,6 +1670,34 @@ class TestTheRuleItself:
 
     def test_a_missing_block_reads_as_empty_not_as_absent_evidence(self):
         assert top_level_block("name: x\njobs:\n  a:\n", "on") == ""
+
+    def test_a_trigger_named_only_in_a_comment_is_not_declared(self):
+        # The bug this pins was real and shipped: an absence check read the raw
+        # `on:` block, so a comment SAYING why `push` is absent made the check
+        # report `push` present. A file gets this comment precisely because
+        # somebody was careful, which is the worst possible trigger for a
+        # spurious red.
+        #
+        # Both halves are asserted. `top_level_block` must still SEE the
+        # comment — that is its documented contract and another test depends on
+        # it — while `declared_triggers` must not. A fix that made the generic
+        # reader strip comments would satisfy the second half by breaking the
+        # first, so the first half is here to refuse it.
+        workflow = (
+            "on:\n"
+            "  # Deliberately no push and no pull_request: this installs\n"
+            "  # unpinned, so a red run is news about PyPI.\n"
+            "  schedule:\n"
+            '    - cron: "0 6 * * 1"\n'
+            "  workflow_dispatch:\n"
+            "\njobs:\n  a:\n    runs-on: ubuntu-latest\n"
+        )
+        raw = top_level_block(workflow, "on")
+        assert "push" in raw and "pull_request" in raw
+        declared = declared_triggers(workflow)
+        assert "push" not in declared
+        assert "pull_request" not in declared
+        assert "schedule" in declared and "workflow_dispatch" in declared
 
     def test_a_doc_with_no_ci_sentence_reads_as_none_not_as_no_versions(self):
         # `documented_ci_versions` has two failure shapes and the consumer
