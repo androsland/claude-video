@@ -26,6 +26,7 @@ import time
 import urllib.error
 import uuid
 from pathlib import Path
+from typing import NamedTuple
 from urllib.request import Request, urlopen
 
 # This module has a __main__ block, so it has to find its siblings when run
@@ -53,6 +54,49 @@ MAX_UPLOAD_BYTES = 24 * 1024 * 1024
 # second; a header-only file ffmpeg writes for an out-of-range seek measured 333
 # bytes. See extract_audio().
 MIN_AUDIO_BYTES = 2048
+
+
+class AudioChunk(NamedTuple):
+    """One slice of the extracted audio, and the span of the source it covers.
+
+    The duration is carried rather than recomputed because a failed chunk's
+    END is otherwise not knowable from the chunk list: the plan that produced
+    it is out of scope by the time transcription runs, and a chunk whose file
+    was never written has no duration to probe.
+    """
+
+    path: Path
+    offset: float
+    duration: float
+
+
+class TranscriptGaps(NamedTuple):
+    """Which spans of a transcript are missing, and how many chunks failed.
+
+    `ranges` are the spans moviola ASKED for, on the audio's own timeline until
+    `shifted` puts them on the video's. `total` is carried alongside `failed`
+    so a report can say "1 of 4" — one failure out of four is a footnote, three
+    out of four is barely a transcript, and a bare count cannot tell them apart.
+    """
+
+    ranges: list[tuple[float, float]]
+    failed: int
+    total: int
+
+    def shifted(self, offset: float) -> "TranscriptGaps":
+        """Move the ranges onto the source video's timeline, as segments are."""
+        if not offset:
+            return self
+        return self._replace(
+            ranges=[(round(s + offset, 3), round(e + offset, 3)) for s, e in self.ranges]
+        )
+
+
+class ChunkOutcome(NamedTuple):
+    """What a chunked transcription produced, and what it silently did not."""
+
+    segments: list[dict]
+    gaps: TranscriptGaps
 
 
 def plan_chunks(
@@ -404,8 +448,8 @@ def split_audio(
     full_audio: Path,
     work_dir: Path,
     plan: list[tuple[float, float]],
-) -> list[tuple[Path, float]]:
-    """Slice full_audio into per-plan chunk files, returning (path, offset) pairs.
+) -> list[AudioChunk]:
+    """Slice full_audio into per-plan chunk files as AudioChunks.
 
     Uses stream copy (`-c copy`) so there is no re-encode and no quality loss;
     mp3 frame boundaries are close enough for transcription's purposes.
@@ -419,7 +463,7 @@ def split_audio(
     # them. Whatever is left over carries a name this run could have written and
     # nothing downstream can tell it apart from a chunk of this audio.
     cleanup_chunks(work_dir)
-    chunks: list[tuple[Path, float]] = []
+    chunks: list[AudioChunk] = []
     for index, (offset, duration) in enumerate(plan):
         out_path = work_dir / f"chunk_{index:03d}.mp3"
         cmd = [
@@ -438,7 +482,7 @@ def split_audio(
             raise SystemExit(
                 f"ffmpeg failed to split audio chunk {index + 1}: {result.stderr.strip()}"
             )
-        chunks.append((out_path, offset))
+        chunks.append(AudioChunk(out_path, offset, duration))
     return chunks
 
 
@@ -777,35 +821,43 @@ def _segments_from_response(data: object) -> list[dict]:
 
 
 def transcribe_chunks(
-    chunks: list[tuple[Path, float]],
+    chunks: list[AudioChunk],
     transcribe_one,
-) -> list[dict]:
+) -> ChunkOutcome:
     """Transcribe each chunk, shift its segments by the chunk offset, concatenate.
 
     A chunk that fails after its own retries is logged and skipped so one bad
     slice doesn't discard the whole transcript. Raises only if every chunk fails.
+    Skipping is the right trade and is not in question here.
+
+    What WAS in question is that the skip left no trace on stdout. The failure
+    count was computed and used for exactly one thing — raising when it reached
+    the chunk count — so nine chunks of ten succeeding returned an ordinary list
+    of segments, and the transcript then read as a CONTINUOUS account of a span
+    it never covered. The ranges come back in `ChunkOutcome.gaps` so the report
+    can name the hole.
     """
     segments: list[dict] = []
-    failures = 0
-    for index, (path, offset) in enumerate(chunks):
+    gaps: list[tuple[float, float]] = []
+    for index, chunk in enumerate(chunks):
         try:
-            chunk_segments = transcribe_one(path)
+            chunk_segments = transcribe_one(chunk.path)
         except SystemExit as exc:
-            failures += 1
+            gaps.append((chunk.offset, round(chunk.offset + chunk.duration, 3)))
             print(
                 f"[moviola] chunk {index + 1}/{len(chunks)} failed — skipping ({exc})",
                 file=sys.stderr,
             )
             continue
-        segments.extend(shift_segments(chunk_segments, offset))
+        segments.extend(shift_segments(chunk_segments, chunk.offset))
         print(
             f"[moviola] chunk {index + 1}/{len(chunks)} → {len(chunk_segments)} segments",
             file=sys.stderr,
         )
 
-    if failures == len(chunks):
+    if len(gaps) == len(chunks):
         raise SystemExit("Whisper failed on every audio chunk")
-    return segments
+    return ChunkOutcome(segments, TranscriptGaps(gaps, len(gaps), len(chunks)))
 
 
 def _transcribe_file(backend: str, api_key: str, audio_path: Path) -> list[dict]:
@@ -903,6 +955,11 @@ def transcribe_video(
     def transcribe_one(path: Path) -> list[dict]:
         return _transcribe_file(backend, api_key, path)
 
+    # Every path that is not chunked transcribes the audio in one piece and
+    # either succeeds whole or raises: one chunk, none failed. That is the
+    # absence of a disclosure, not a disclosure of completeness.
+    gaps = TranscriptGaps([], 0, 1)
+
     if backend == LOCAL_BACKEND:
         # No chunking: the 24 MB split exists solely to stay under the APIs'
         # upload cap, which does not apply on-device. faster-whisper streams
@@ -927,7 +984,7 @@ def transcribe_video(
         chunk_dir = audio_out.parent / "chunks"
         try:
             chunks = split_audio(audio_path, chunk_dir, plan)
-            segments = transcribe_chunks(chunks, transcribe_one)
+            segments, gaps = transcribe_chunks(chunks, transcribe_one)
         finally:
             # Especially on the failing path: chunking only happens on the
             # largest audio, so a run that dies mid-transcript is the one that
@@ -941,9 +998,19 @@ def transcribe_video(
     # video's timeline so timestamps line up with the extracted frames.
     if offset:
         segments = shift_segments(segments, offset)
+        # The gaps are spans of the same timeline and move with it. Leaving them
+        # behind would report a hole in the wrong place on any --start run, which
+        # is a worse failure than reporting none: it is a confident wrong answer.
+        gaps = gaps.shifted(offset)
 
     print(f"[moviola] transcribed {len(segments)} segments via {backend}", file=sys.stderr)
-    return segments, backend
+    if gaps.failed:
+        print(
+            f"[moviola] transcript is INCOMPLETE — {gaps.failed} of {gaps.total} "
+            f"chunks failed, missing {gaps.ranges}",
+            file=sys.stderr,
+        )
+    return segments, backend, gaps
 
 
 if __name__ == "__main__":
@@ -957,5 +1024,8 @@ if __name__ == "__main__":
     if "--backend" in sys.argv:
         backend_override = sys.argv[sys.argv.index("--backend") + 1]
 
-    segments, backend = transcribe_video(video, audio_out, backend=backend_override)
-    print(json.dumps({"backend": backend, "segments": segments}, indent=2))
+    segments, backend, gaps = transcribe_video(video, audio_out, backend=backend_override)
+    print(json.dumps(
+        {"backend": backend, "segments": segments, "missing_ranges": gaps.ranges},
+        indent=2,
+    ))

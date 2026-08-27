@@ -211,33 +211,6 @@ class TestRangeValidation:
         assert "**Focus range:**" in out
 
 
-def _build_audio_clip(path: Path) -> None:
-    """A short clip that actually carries an audio stream.
-
-    The shared fixtures are all `a=0`, so `meta["has_audio"]` is False for
-    every one of them and the whisper block is skipped entirely — which is
-    exactly why nothing in this suite had ever entered it.
-    """
-    subprocess.run(
-        [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-t", "1.5", "-i", "color=c=blue:s=160x120:r=10",
-            "-f", "lavfi", "-t", "1.5", "-i", "sine=frequency=440:sample_rate=44100",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-    )
-
-
-@pytest.fixture(scope="module")
-def audio_clip(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    path = tmp_path_factory.mktemp("audio") / "tone.mp4"
-    _build_audio_clip(path)
-    return path
-
-
 class TestTheReportSurvivesABrokenTranscript:
     """The transcript is optional. The report is not.
 

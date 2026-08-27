@@ -103,8 +103,8 @@ class TestSplitAudio:
         chunks = whisper.split_audio(full, tmp_path, plan)
 
         assert len(chunks) == 2
-        for chunk_path, _offset in chunks:
-            assert chunk_path.exists() and chunk_path.stat().st_size > 0
+        for chunk in chunks:
+            assert chunk.path.exists() and chunk.path.stat().st_size > 0
 
     def test_returns_plan_offsets(self, tmp_path: Path):
         full = tmp_path / "audio.mp3"
@@ -113,7 +113,10 @@ class TestSplitAudio:
 
         chunks = whisper.split_audio(full, tmp_path, plan)
 
-        assert [offset for _path, offset in chunks] == [0.0, 3.0]
+        assert [chunk.offset for chunk in chunks] == [0.0, 3.0]
+        # The duration rides along: a failed chunk's END is not knowable
+        # without it, and that is what the missing-range report needs.
+        assert [chunk.duration for chunk in chunks] == [3.0, 3.0]
 
     def test_chunks_are_smaller_than_full(self, tmp_path: Path):
         full = tmp_path / "audio.mp3"
@@ -123,8 +126,8 @@ class TestSplitAudio:
         chunks = whisper.split_audio(full, tmp_path, plan)
 
         full_size = full.stat().st_size
-        for chunk_path, _offset in chunks:
-            assert chunk_path.stat().st_size < full_size
+        for chunk in chunks:
+            assert chunk.path.stat().st_size < full_size
 
 
 class TestAudioDuration:
@@ -134,14 +137,21 @@ class TestAudioDuration:
         assert whisper.audio_duration(audio) == pytest.approx(5.0, abs=0.5)
 
 
+def _chunks() -> list:
+    return [
+        whisper.AudioChunk(Path("a.mp3"), 0.0, 100.0),
+        whisper.AudioChunk(Path("b.mp3"), 100.0, 100.0),
+    ]
+
+
 class TestTranscribeChunks:
     def test_shifts_and_concatenates_each_chunk(self):
-        chunks = [(Path("a.mp3"), 0.0), (Path("b.mp3"), 100.0)]
+        chunks = _chunks()
 
         def fake_transcribe(path: Path) -> list[dict]:
             return [{"start": 0.0, "end": 2.0, "text": path.stem}]
 
-        out = whisper.transcribe_chunks(chunks, fake_transcribe)
+        out = whisper.transcribe_chunks(chunks, fake_transcribe).segments
 
         assert out == [
             {"start": 0.0, "end": 2.0, "text": "a"},
@@ -149,19 +159,19 @@ class TestTranscribeChunks:
         ]
 
     def test_keeps_successful_chunks_when_one_fails(self):
-        chunks = [(Path("a.mp3"), 0.0), (Path("b.mp3"), 100.0)]
+        chunks = _chunks()
 
         def flaky(path: Path) -> list[dict]:
             if path.stem == "b":
                 raise SystemExit("chunk b failed")
             return [{"start": 1.0, "end": 2.0, "text": "a"}]
 
-        out = whisper.transcribe_chunks(chunks, flaky)
+        out = whisper.transcribe_chunks(chunks, flaky).segments
 
         assert out == [{"start": 1.0, "end": 2.0, "text": "a"}]
 
     def test_raises_when_every_chunk_fails(self):
-        chunks = [(Path("a.mp3"), 0.0), (Path("b.mp3"), 100.0)]
+        chunks = _chunks()
 
         def always_fail(path: Path) -> list[dict]:
             raise SystemExit("boom")

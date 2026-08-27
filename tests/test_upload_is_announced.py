@@ -98,7 +98,10 @@ class TestTheUploadIsAnnouncedBeforeItHappens:
         # three billed requests, not one, and the user finds that out before any
         # of them rather than after all three.
         audio = _audio_file(tmp_path, whisper.MAX_UPLOAD_BYTES * 2 + 1)
-        chunks = [(tmp_path / f"chunk{i}.mp3", float(i * 60)) for i in range(3)]
+        chunks = [
+            whisper.AudioChunk(tmp_path / f"chunk{i}.mp3", float(i * 60), 60.0)
+            for i in range(3)
+        ]
         recorder = _Recorder(stderr_buffer)
         monkeypatch.setattr(whisper, "extract_audio", lambda *a, **k: audio)
         monkeypatch.setattr(whisper, "audio_duration", lambda *a, **k: 180.0)
@@ -118,7 +121,7 @@ class TestTheUploadIsAnnouncedBeforeItHappens:
         stderr_buffer = _capture_stderr(monkeypatch)
         minutes = whisper.COST_WARN_MINUTES + 1
         audio = _audio_file(tmp_path, int(whisper.AUDIO_BYTES_PER_MINUTE * minutes))
-        chunks = [(tmp_path / "chunk0.mp3", 0.0)]
+        chunks = [whisper.AudioChunk(tmp_path / "chunk0.mp3", 0.0, minutes * 60.0)]
         recorder = _Recorder(stderr_buffer)
         monkeypatch.setattr(whisper, "extract_audio", lambda *a, **k: audio)
         monkeypatch.setattr(whisper, "audio_duration", lambda *a, **k: minutes * 60.0)

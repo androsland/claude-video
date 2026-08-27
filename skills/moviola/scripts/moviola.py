@@ -34,10 +34,40 @@ from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from untrusted import balance_bidi, finite_float, stderr_line  # noqa: E402,F401
 from whisper import (  # noqa: E402
     LOCAL_BACKEND,
+    TranscriptGaps,
     env_key_backend,
     resolve_backend,
     transcribe_video,
 )
+
+
+def format_missing_ranges(gaps: TranscriptGaps | None) -> str:
+    """The summary bullet's suffix when part of the transcript never arrived.
+
+    Empty string on every complete run, which is the overwhelming majority of
+    them — this must read as an exception, not as a field the report always has.
+    """
+    if not gaps or not gaps.failed:
+        return ""
+    spans = ", ".join(f"{format_time(s)}–{format_time(e)}" for s, e in gaps.ranges)
+    return f" — **INCOMPLETE: {gaps.failed} of {gaps.total} audio chunks failed**, missing {spans}"
+
+
+def gap_warning(gaps: TranscriptGaps) -> str:
+    """The block-quote above the transcript itself.
+
+    It names the specific misreading rather than only the fact: text either
+    side of a dropped chunk closes over the hole, so the transcript LOOKS
+    continuous across a span nothing ever transcribed. A reader who is told
+    only "1 of 4 chunks failed" still has no reason to distrust what they read.
+    """
+    spans = ", ".join(f"{format_time(s)}–{format_time(e)}" for s, e in gaps.ranges)
+    return (
+        f"> **Warning:** {gaps.failed} of {gaps.total} audio chunks failed to "
+        f"transcribe. Nothing below covers {spans}, and the surrounding text runs "
+        "continuous across the gap — it does not read as truncated. Treat any "
+        "claim about that span as unsupported."
+    )
 
 
 def resolve_whisper_choice(flag: str | None, configured: str) -> str | None:
@@ -268,6 +298,7 @@ def main() -> int:
     transcript_segments: list[dict] = []
     transcript_text: str | None = None
     transcript_source: str | None = None
+    transcript_gaps: TranscriptGaps | None = None
     video_path: str | None = None
 
     if url_source:
@@ -421,7 +452,7 @@ def main() -> int:
                 # Pass the range down rather than transcribing the whole video
                 # and discarding most of it: on the local backend that waste is
                 # minutes of compute, not a throwaway API call.
-                all_segments, used_backend = transcribe_video(
+                all_segments, used_backend, transcript_gaps = transcribe_video(
                     video_path,
                     work / "audio.mp3",
                     backend=backend,
@@ -519,9 +550,10 @@ def main() -> int:
         print(f"- **Frame size:** max {args.resolution}px wide, max 1998px tall")
     if transcript_segments:
         in_range = " in range" if focused else ""
+        missing = format_missing_ranges(transcript_gaps)
         print(
             f"- **Transcript:** {len(transcript_segments)} segments{in_range} "
-            f"(via {transcript_source or 'captions'})"
+            f"(via {transcript_source or 'captions'}){missing}"
         )
     else:
         print("- **Transcript:** none available")
@@ -567,6 +599,9 @@ def main() -> int:
     print()
     if transcript_text:
         label = transcript_source or "captions"
+        if transcript_gaps and transcript_gaps.failed:
+            print(gap_warning(transcript_gaps))
+            print()
         if focused:
             print(f"_Source: {label}. Filtered to {format_time(effective_start)} → {format_time(effective_end)}:_")
         else:
