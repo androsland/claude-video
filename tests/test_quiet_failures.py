@@ -36,8 +36,9 @@ NON-GOALS, so a green run is not read as more than it is:
   * The frame test proves the ORDER is numeric. It does not prove ffmpeg's
     showinfo timestamps are themselves correct, which is ffmpeg's business.
   * Nothing here touches the case where showinfo reports FEWER timestamps than
-    there are frames. That path still substitutes the range start, and is
-    recorded in TODOS.md rather than fixed.
+    there are frames. That is fixed and pinned in `test_quiet_failures_ii.py`,
+    not here — a frame without a timestamp is now dropped rather than labelled
+    with the range start.
 """
 from __future__ import annotations
 
@@ -246,7 +247,7 @@ class TestFramesArePairedWithTheirOwnTimestamps:
             return result
 
         monkeypatch.setattr(frames.subprocess, "run", fake_run)
-        got = frames.extract_scene_candidates("video.mp4", out_dir, resolution=512)
+        got, _untimed = frames.extract_scene_candidates("video.mp4", out_dir, resolution=512)
 
         assert [(Path(f["path"]).name, f["timestamp_seconds"]) for f in got] == [
             ("frame_0999.jpg", 999.0),

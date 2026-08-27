@@ -230,34 +230,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Quiet failures
 
-- **A partial transcript reaches the report with nothing marking it partial.**
-  (ai-output review, 2026-08-26) `transcribe_chunks` at `whisper.py:779` counts
-  `failures` and uses the count for exactly one thing: raising when it equals the number
-  of chunks. Nine chunks out of ten succeeding returns the concatenation as an ordinary
-  list of segments, and the report on stdout is then indistinguishable from a complete
-  one — the only trace is the `chunk N/M failed — skipping` line on stderr, a channel a
-  reader may not have and a summariser will not weigh. The gap is worst where it matters
-  most: a dropped chunk is a HOLE in the middle of the timeline, so the transcript reads
-  as continuous across a gap it never covered. The shape is to thread `failures` and
-  `len(chunks)` out of the function and have the report say which time ranges are
-  missing. Non-goal: skipping rather than failing is the correct behaviour and must not
-  change — one bad slice discarding a whole transcript is the trade this was built to
-  avoid; the fix is disclosure, not strictness. Non-goal: this says nothing about the
-  single-file path, which has no chunks and either succeeds or raises.
-
-- **A frame can still be paired with a timestamp that is not its own, when ffmpeg
-  reports FEWER of them than it wrote frames.** (quiet-failures review, 2026-08-26)
-  `extract_scene_candidates` and `extract_keyframes` both do
-  `ts = timestamps[i] if i < len(timestamps) else offset`, so once showinfo's output is
-  shorter than the frame list every remaining image is labelled with the START of the
-  requested range. That is a plausible number in the right units, which is what makes it
-  bad: a report saying "at 0:00" for a frame from minute nine looks like ordinary output.
-  Sorting the frames numerically (this pass) removed the reason the two lists diverge in
-  the common case, but not the fallback itself — showinfo can drop lines under `-loglevel`
-  changes, and a filter graph that emits a frame without a `pts_time` would do it too. The
-  honest fix is to treat a length mismatch as an error, or carry the frame NUMBER through
-  from the filename and index the timestamps by it rather than by position.
-
 - **`frames_in_order` sorts on the last run of digits in the name and cannot see a
   directory that mixes two naming schemes.** (quiet-failures review, 2026-08-26) Every
   caller writes `frame_%04d.jpg` into a directory it has just emptied of `frame_*.jpg`,
@@ -873,6 +845,20 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   this is about the *mechanism*, not the bumps — filing it does not decide whether to take
   `checkout@v7`, which alters what the action does and needs its own verification pass.
 
+- **`actions/checkout@v4` and `actions/setup-python@v5` run on the Node 20 runtime,
+  which GitHub is progressively deprecating.** (supply-chain review of
+  `fix/release-workflow`, 2026-08-26) Both pins are authentic and carry no known
+  advisory — this is a future-breakage risk on the runner, not an unpatched
+  vulnerability, and it is a *different* reason to bump than the staleness filed above.
+  `softprops/action-gh-release@v2` was not called out on this axis. Verified against every
+  intervening major's release notes: `checkout` v5.0.0/v6.0.0/v7.0.0/v7.0.1 and
+  `setup-python` v6.0.0/v7.0.0 are Node 20→24 migrations, ESM/bundling changes and bug
+  fixes; none describes a CVE fix. Non-goal: this does not say when the deprecation lands
+  or that CI breaks on a date — GitHub has published none, and nothing here polls for it.
+  Filed a branch late on purpose: it arrived from the reviewer after
+  `fix/release-workflow` was already gated, and the gate marker is HEAD-pinned, so
+  amending a one-bullet edit in would have cost a full re-gate for a Low operational note.
+
 - **`release.yml` has no `workflow_dispatch:`, so it cannot be rehearsed without cutting a
   tag.** (fix/release-workflow review, 2026-08-26) Verified by absence: `grep -rn
   workflow_dispatch .github/` returns nothing. Every assertion in
@@ -954,6 +940,49 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   extraction step, so a pass that archives without lifting them is a silent regression.
 
 ## Completed
+
+### A partial transcript and a mislabelled frame both read as ordinary output
+
+Two findings, one root cause in two places: a stand-in value that is a plausible number
+in the right units. That is the property that makes both unrecoverable downstream — not
+that the failure happened, but that what it produced is indistinguishable from a correct
+answer by anything that consumes it.
+
+`transcribe_chunks` counted failed chunks and used the count for exactly one thing:
+raising when it equalled the chunk count. Nine of ten succeeding returned the
+concatenation as an ordinary list of segments, and the only trace was a line on stderr —
+a channel a reader may not have and a summariser will not weigh. Worse, a dropped chunk
+is a HOLE in the middle of the timeline, so the surrounding text closes over it and the
+transcript reads as CONTINUOUS across a span nothing transcribed. `split_audio` now
+returns `AudioChunk(path, offset, duration)` — the duration is carried because a failed
+chunk's END is not otherwise knowable, its file having never been written — and
+`transcribe_chunks` returns a `ChunkOutcome` whose `TranscriptGaps` names the missing
+ranges, the failure count and the chunk total. The ranges move with `--start` alongside
+the segments themselves. The report says "INCOMPLETE: 1 of 4 audio chunks failed" in the
+summary bullet and puts a block-quote above the transcript naming the specific
+misreading, because "1 of 4 failed" alone gives a reader no reason to distrust what they
+then read.
+
+`extract_scene_candidates` and `extract_keyframes` carried the identical line
+`ts = timestamps[i] if i < len(timestamps) else offset`, so the moment showinfo reported
+fewer timestamps than ffmpeg wrote frames, every remaining image was labelled with the
+START of the requested range: "at 0:00" for a frame from minute nine. Carrying the frame
+NUMBER through from the filename — the alternative this file recorded — turns out to be
+equivalent to indexing by position, because showinfo sits before the muxer, so filename
+index *i* and showinfo line *i* describe the same frame and a dropped line truncates a
+prefix rather than misaligning it. There is no honest timestamp to substitute, so both
+engines now share `pair_with_timestamps`, which drops the frame, DELETES its file
+(`frames_in_order` globs the directory, so an orphan is re-paired by position by the next
+caller — the defect again, one call later), warns on stderr, and returns the count for
+the Frames bullet to disclose. Raising instead was rejected as contradicting the
+disclosure-not-strictness trade the rest of the codebase makes.
+
+`tests/test_quiet_failures_ii.py` states both as invariants across 19 tests. Finding 1:
+5 of 6 mutations died in-module, the sixth (dropping the chunk duration) dying in
+`test_whisper.py` where `split_audio`'s contract lives. Finding 2: 7 of 7 died, and all
+4 must-NOT-fire cases stayed green — including a timestamp SURPLUS, which is what every
+`-frames:v`-capped run looks like and must never warn.
+
 
 ### The file a tag executes is now checked
 

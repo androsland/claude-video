@@ -532,10 +532,21 @@ def main() -> int:
         engine = frame_meta.get("engine", "scene")
         fallback = " with uniform fallback" if frame_meta.get("fallback") else ""
         deduped = frame_meta.get("deduped_count", 0)
+        # Not a tuning note like the dedup count beside it: a shortfall here
+        # means ffmpeg told us about fewer frames than it wrote, so the frames
+        # it did not account for were discarded rather than mislabelled — and
+        # the ones that remain are only as aligned as the reports that arrived.
+        untimed = frame_meta.get("untimed_dropped", 0)
+        untimed_note = (
+            f" — **{untimed} dropped without a timestamp from ffmpeg**; "
+            "remaining timestamps may be misaligned"
+            if untimed else ""
+        )
         dedup_note = f", {deduped} near-duplicate{'s' if deduped != 1 else ''} dropped" if deduped else ""
         print(
             f"- **Frames:** {detail_count} selected from {frame_meta.get('candidate_count', detail_count)} "
             f"candidates ({engine}{fallback}{dedup_note}, {range_mode} range, budget {target}, cap {cap_label})"
+            f"{untimed_note}"
         )
     elif not cue_frames:
         print("- **Frames:** skipped (transcript detail)")

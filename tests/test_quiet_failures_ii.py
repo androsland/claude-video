@@ -16,6 +16,15 @@ may not arrive silently, and it may not arrive wearing the shape of a success.
     in the middle of the timeline, so the transcript reads as CONTINUOUS across
     a span it never covered.
 
+  * A frame wore another frame's timestamp. Both extraction engines carried the
+    identical line `ts = timestamps[i] if i < len(timestamps) else offset`, so
+    the moment showinfo's output ran shorter than the frame list, every
+    remaining image was labelled with the START of the requested range. Same
+    root cause as the finding above, one directory over — a stand-in that is a
+    plausible number in the right units. That is precisely what makes it
+    unrecoverable downstream: "at 0:00" for a frame from minute nine reads as
+    ordinary output, and nothing that consumes it can tell the two apart.
+
 NON-GOALS, so a green run is not read as more than it is:
 
   * These pin what the second review found. They are not a survey, and nothing
@@ -34,20 +43,41 @@ NON-GOALS, so a green run is not read as more than it is:
   * This says nothing about whether the surviving segments are themselves
     correct. A chunk that succeeds and returns nonsense is a different problem
     with no signal to fire on.
+  * A frame that SURVIVES the pairing is only as aligned as the reports that
+    arrived. If the missing showinfo lines were not the last ones, the frames
+    that remain are shifted, the counts still match, and nothing here or
+    anywhere else fires. The warning says so in words because words are the
+    only place it can be said — no signal distinguishes that shape.
+  * Dropping the unpairable frames is the entire remedy, and it is a LOSS: a
+    run that would have returned five frames returns three. Substituting a
+    number is the alternative, and is what this replaces. There is no third
+    option that keeps the frame AND places it honestly.
+  * A SURPLUS of timestamps is deliberately NOT a shortfall and must not warn.
+    `-frames:v` caps the files written while showinfo keeps reporting, which is
+    what every capped run looks like;
+    `test_more_timestamps_than_frames_is_not_a_shortfall` is the must-NOT-fire
+    half of that pair.
+  * Nothing here reaches the uniform fallback's own frames. That path
+    re-extracts from scratch, so a scene-pass shortfall leaves no mislabelled
+    frame behind — the count survives to record that a shortfall HAPPENED, not
+    that a file did.
   * One link of the chain is pinned NEXT DOOR, not here: that `split_audio`
     carries each chunk's duration at all is asserted in
     `test_whisper.py::TestSplitAudio::test_returns_plan_offsets`, where
     `split_audio`'s contract lives. Reverting it survives this file and dies
-    there. Said out loud because a KILL run scoped to this module alone reports
-    5 of 6, and the missing one is a scoping decision rather than a hole.
+    there. Said out loud because a KILL run over that finding's mutation set,
+    scoped to this module alone, reports 5 of 6 — and the missing one is a
+    scoping decision rather than a hole.
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+import frames
 import moviola
 import whisper
 
@@ -260,3 +290,193 @@ class TestTheGapsMoveWithTheTimeline:
         """The must-NOT-fire half: no shift where there is no offset."""
         gaps = self._run(monkeypatch, tmp_path, start=0.0)
         assert gaps.ranges == [(60.0, 120.0)]
+
+
+# --------------------------------------------------------------------------
+# A frame is never labelled with a timestamp that is not its own.
+# --------------------------------------------------------------------------
+
+
+def _stub_ffmpeg(monkeypatch, out_dir: Path, frame_count: int, ts_count: int):
+    """An ffmpeg that writes `frame_count` frames but reports `ts_count` times.
+
+    This is the divergence itself. Round one removed the ORDERING cause of it
+    by sorting numerically; it did not remove the fallback, and showinfo can
+    still emit fewer lines than there are frames — under a `-loglevel` change,
+    or from a filter graph that hands on a frame carrying no `pts_time`.
+    """
+    def fake_run(cmd, *args, **kwargs):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for n in range(1, frame_count + 1):
+            (out_dir / f"frame_{n:04d}.jpg").write_bytes(b"jpeg")
+        result = subprocess.CompletedProcess(cmd, 0)
+        result.stdout = ""
+        result.stderr = "".join(
+            f"[Parsed_showinfo_1 @ 0x0] n:{i} pts_time:{float(i * 10)} \n"
+            for i in range(ts_count)
+        )
+        return result
+
+    monkeypatch.setattr(frames.subprocess, "run", fake_run)
+
+
+class TestAFrameNeverWearsAnotherFramesTimestamp:
+    """`ts = timestamps[i] if i < len(timestamps) else offset`.
+
+    Once showinfo's output is shorter than the frame list, every remaining
+    image was labelled with the START of the requested range. That is a
+    plausible number in the right units, which is exactly what made it bad:
+    "at 0:00" for a frame from minute nine reads as ordinary output.
+    """
+
+    def test_the_scene_engine_drops_frames_it_cannot_time(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        out_dir = tmp_path / "frames"
+        _stub_ffmpeg(monkeypatch, out_dir, frame_count=5, ts_count=3)
+
+        got, untimed = frames.extract_scene_candidates("v.mp4", out_dir, resolution=512)
+
+        assert [f["timestamp_seconds"] for f in got] == [0.0, 10.0, 20.0]
+        assert untimed == 2
+        # No frame carries the range start as a stand-in for its own time.
+        assert [f["index"] for f in got] == [0, 1, 2]
+
+    def test_the_dropped_frames_are_not_left_on_disk(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An orphan is a live hazard, not just clutter.
+
+        `frames_in_order` globs the directory. A frame left behind after being
+        dropped is picked up by the next thing that looks, and re-paired by
+        position — which is the defect again, one call later.
+        """
+        out_dir = tmp_path / "frames"
+        _stub_ffmpeg(monkeypatch, out_dir, frame_count=5, ts_count=3)
+
+        frames.extract_scene_candidates("v.mp4", out_dir, resolution=512)
+
+        assert sorted(p.name for p in out_dir.glob("frame_*.jpg")) == [
+            "frame_0001.jpg", "frame_0002.jpg", "frame_0003.jpg",
+        ]
+
+    def test_the_keyframe_engine_drops_them_too(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Both engines carried the identical line. Fixing one is half a fix."""
+        out_dir = tmp_path / "frames"
+        _stub_ffmpeg(monkeypatch, out_dir, frame_count=6, ts_count=4)
+
+        got, meta = frames.extract_keyframes(
+            "v.mp4", out_dir, resolution=512, max_frames=None
+        )
+
+        assert [f["timestamp_seconds"] for f in got] == [0.0, 10.0, 20.0, 30.0]
+        assert meta["untimed_dropped"] == 2
+
+    def test_a_shortfall_is_announced_on_stderr(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        out_dir = tmp_path / "frames"
+        _stub_ffmpeg(monkeypatch, out_dir, frame_count=5, ts_count=3)
+
+        frames.extract_scene_candidates("v.mp4", out_dir, resolution=512)
+
+        err = capsys.readouterr().err
+        assert "2" in err and "timestamp" in err.lower()
+
+    def test_every_frame_timed_drops_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """The must-NOT-fire half. Every ordinary run has counts that match."""
+        out_dir = tmp_path / "frames"
+        _stub_ffmpeg(monkeypatch, out_dir, frame_count=4, ts_count=4)
+
+        got, untimed = frames.extract_scene_candidates("v.mp4", out_dir, resolution=512)
+
+        assert len(got) == 4
+        assert untimed == 0
+        assert capsys.readouterr().err == ""
+
+    def test_more_timestamps_than_frames_is_not_a_shortfall(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """`-frames:v` caps the files written while showinfo keeps reporting.
+
+        This is a legitimate configuration — `extract_scene_candidates` passes
+        `-frames:v` whenever `max_frames` is set — and the surplus timestamps
+        are simply unused. Warning here would fire on an ordinary capped run.
+        """
+        out_dir = tmp_path / "frames"
+        _stub_ffmpeg(monkeypatch, out_dir, frame_count=3, ts_count=7)
+
+        got, untimed = frames.extract_scene_candidates("v.mp4", out_dir, resolution=512)
+
+        assert [f["timestamp_seconds"] for f in got] == [0.0, 10.0, 20.0]
+        assert untimed == 0
+        assert capsys.readouterr().err == ""
+
+
+class TestTheDroppedFramesReachTheReport:
+    """Same argument as the transcript: stderr is not the report.
+
+    A run that quietly returns three frames where five were extracted looks
+    exactly like a run that found three frames. The count has to be on stdout
+    for the same reason the transcript gaps do.
+    """
+
+    def test_the_frames_bullet_names_the_shortfall(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        cut_clip: Path,
+    ) -> None:
+        def fake_extract(*a: object, **k: object) -> tuple:
+            return (
+                [{"index": 0, "timestamp_seconds": 0.0, "path": "f.jpg", "reason": "scene-change"}],
+                {
+                    "engine": "scene", "candidate_count": 1, "deduped_count": 0,
+                    "selected_count": 1, "fallback": False, "untimed_dropped": 2,
+                },
+            )
+
+        monkeypatch.setattr(moviola, "extract_scene_or_uniform", fake_extract)
+        monkeypatch.setattr(sys, "argv", ["moviola.py", str(cut_clip), "--no-whisper"])
+        assert moviola.main() == 0
+        out = capsys.readouterr().out
+
+        assert "2 dropped" in out
+        assert "timestamp" in out.lower()
+
+    def test_the_default_engine_puts_the_count_where_the_report_looks(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The link the test above cannot see, because it stubs over it.
+
+        `test_the_frames_bullet_names_the_shortfall` replaces
+        `extract_scene_or_uniform` outright, so it pins the RENDERER and says
+        nothing about whether anything ever fills that key. This pins the other
+        half of the same wire: the engine moviola actually calls carries the
+        count out in its meta dict, under the name the renderer reads.
+        """
+        out_dir = tmp_path / "frames"
+        _stub_ffmpeg(monkeypatch, out_dir, frame_count=12, ts_count=9)
+
+        _selected, meta = frames.extract_scene_or_uniform(
+            "v.mp4", out_dir, fps=1.0, target_frames=9,
+            resolution=512, max_frames=None, dedup=False,
+        )
+
+        assert meta["fallback"] is False
+        assert meta["untimed_dropped"] == 3
+
+    def test_an_ordinary_run_says_nothing_about_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        cut_clip: Path,
+    ) -> None:
+        """The must-NOT-fire half, and the shape every real run takes."""
+        monkeypatch.setattr(sys, "argv", ["moviola.py", str(cut_clip), "--no-whisper"])
+        assert moviola.main() == 0
+        assert "dropped without a timestamp" not in capsys.readouterr().out

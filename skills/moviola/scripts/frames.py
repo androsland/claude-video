@@ -63,12 +63,13 @@ def frames_in_order(out_dir: Path, pattern: str = "frame_*.jpg") -> list[Path]:
     video reaches four figures easily.
 
     NON-GOALS. This fixes the ORDER; it says nothing about whether ffmpeg's own
-    showinfo timestamps are right, nor about the case where showinfo reports
-    fewer timestamps than there are frames — that path still substitutes the
-    range start and is recorded in TODOS.md. It sorts on the LAST digit run in
-    the name, so a directory mixing two naming schemes is not something it can
-    see. Names carrying no digits at all sort last, in name order, rather than
-    raising: a stray file must not take down a run whose frames are all fine.
+    showinfo timestamps are right, which is ffmpeg's business. It sorts on the
+    LAST digit run in the name, so a directory mixing two naming schemes is not
+    something it can see. Names carrying no digits at all sort last, in name
+    order, rather than raising: a stray file must not take down a run whose
+    frames are all fine. A frame this returns may still have NO timestamp
+    reported for it — that is `pair_with_timestamps`' problem, and it drops
+    such frames rather than inventing a time for them.
     """
     def key(path: Path) -> tuple[int, int, str]:
         digits = _FRAME_NUM_RE.findall(path.stem)
@@ -78,6 +79,58 @@ def frames_in_order(out_dir: Path, pattern: str = "frame_*.jpg") -> list[Path]:
 
     return sorted(out_dir.glob(pattern), key=key)
 
+
+
+def pair_with_timestamps(
+    files: list[Path],
+    timestamps: list[float],
+    reason: str,
+    label: str,
+) -> tuple[list[dict], int]:
+    """Pair each frame with its own showinfo timestamp, dropping any it lacks.
+
+    Both extraction engines carried the identical line
+    `ts = timestamps[i] if i < len(timestamps) else offset`, so once showinfo's
+    output ran short every remaining image was labelled with the START of the
+    requested range. A plausible number in the right units is the worst kind of
+    wrong answer: a report saying "at 0:00" for a frame from minute nine reads
+    as ordinary output, and nothing downstream can tell it from one.
+
+    There is no honest timestamp to substitute, so a frame without one is
+    dropped and its file removed. The count comes back for the caller to
+    disclose; leaving the file behind would be worse than useless, because
+    `frames_in_order` globs the directory and the next thing to look would
+    re-pair it by position.
+
+    A SURPLUS of timestamps is not a shortfall and does not warn: passing
+    `-frames:v` caps the files written while showinfo keeps reporting, and that
+    is an ordinary capped run.
+    """
+    paired: list[dict] = []
+    for i, path in enumerate(files):
+        if i >= len(timestamps):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            continue
+        paired.append({
+            "index": i,
+            "timestamp_seconds": timestamps[i],
+            "path": str(path),
+            "reason": "first-frame" if (reason == "scene-change" and i == 0) else reason,
+        })
+
+    untimed = len(files) - len(paired)
+    if untimed:
+        print(
+            f"[moviola] {label}: ffmpeg reported {len(timestamps)} timestamps for "
+            f"{len(files)} frames — dropped {untimed} that could not be placed on "
+            "the timeline. Frames that remain may also be misaligned if the "
+            "missing reports were not the last ones.",
+            file=sys.stderr,
+        )
+    return paired, untimed
 
 
 def _scale_filter(resolution: int) -> str:
@@ -272,7 +325,7 @@ def extract_scene_candidates(
     start_seconds: float | None = None,
     end_seconds: float | None = None,
     threshold: float = SCENE_THRESHOLD,
-) -> list[dict]:
+) -> tuple[list[dict], int]:
     """Extract first frame plus ffmpeg scene-change frames.
 
     When ``max_frames`` is set, ``-frames:v`` lets ffmpeg stop decoding once it
@@ -317,17 +370,9 @@ def extract_scene_candidates(
 
     offset = start_seconds or 0.0
     timestamps = [round(offset + float(match.group(1)), 2) for match in SHOWINFO_TS_RE.finditer(result.stderr)]
-    frames = frames_in_order(out_dir)
-    out: list[dict] = []
-    for i, path in enumerate(frames):
-        ts = timestamps[i] if i < len(timestamps) else offset
-        out.append({
-            "index": i,
-            "timestamp_seconds": ts,
-            "path": str(path),
-            "reason": "first-frame" if i == 0 else "scene-change",
-        })
-    return out
+    return pair_with_timestamps(
+        frames_in_order(out_dir), timestamps, "scene-change", "scene detection"
+    )
 
 
 def _even_indices(count: int, n: int) -> list[int]:
@@ -580,7 +625,7 @@ def extract_scene_or_uniform(
     drop the tail of long videos (and could even fall below ``SCENE_MIN_FRAMES``
     and misfire the uniform fallback on a cut-heavy clip).
     """
-    scene_frames = extract_scene_candidates(
+    scene_frames, untimed = extract_scene_candidates(
         video_path,
         out_dir,
         resolution=resolution,
@@ -599,6 +644,7 @@ def extract_scene_or_uniform(
             "deduped_count": n_dropped,
             "selected_count": len(selected),
             "fallback": False,
+            "untimed_dropped": untimed,
         }
 
     fallback_cap = target_frames if max_frames is None else min(max_frames, target_frames)
@@ -620,6 +666,10 @@ def extract_scene_or_uniform(
         "deduped_count": n_dropped,
         "selected_count": len(frames),
         "fallback": True,
+        # The uniform path re-extracts from scratch, so any frame the scene pass
+        # could not time is already gone with the rest of its output. What the
+        # count still records is that the scene pass saw a shortfall at all.
+        "untimed_dropped": untimed,
     }
 
 
@@ -672,16 +722,9 @@ def extract_keyframes(
 
     offset = start_seconds or 0.0
     timestamps = [round(offset + float(m.group(1)), 2) for m in SHOWINFO_TS_RE.finditer(result.stderr)]
-    files = frames_in_order(out_dir)
-    candidates: list[dict] = []
-    for i, path in enumerate(files):
-        ts = timestamps[i] if i < len(timestamps) else offset
-        candidates.append({
-            "index": i,
-            "timestamp_seconds": ts,
-            "path": str(path),
-            "reason": "keyframe",
-        })
+    candidates, untimed = pair_with_timestamps(
+        frames_in_order(out_dir), timestamps, "keyframe", "keyframe extraction"
+    )
 
     # Too few keyframes → uniform fallback over the same range.
     if len(candidates) < KEYFRAME_MIN:
@@ -715,6 +758,10 @@ def extract_keyframes(
             "deduped_count": n_dropped,
             "selected_count": len(frames_out),
             "fallback": True,
+            # Same as the scene engine's uniform fallback: the re-extract wiped
+            # the untimed frames along with everything else, and the count is
+            # kept because a shortfall HAPPENED, not because a file survived it.
+            "untimed_dropped": untimed,
         }
 
     # Detect-all, drop near-duplicates, then even-sample down to the cap (first +
@@ -729,6 +776,7 @@ def extract_keyframes(
         "deduped_count": n_dropped,
         "selected_count": len(selected),
         "fallback": False,
+        "untimed_dropped": untimed,
     }
 
 
