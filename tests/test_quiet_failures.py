@@ -91,8 +91,12 @@ class TestAFailedDownloadCannotBorrowAnEarlierRunsVideo:
             download.download_url("https://example.invalid/v", out_dir)
 
         # The message has to name the exit code, or the user is left guessing
-        # which of the two failures they hit.
-        assert "1" in str(exc.value)
+        # which of the two failures they hit. Pinned as "(exit 1)", not as a bare
+        # "1": the message interpolates `out_dir`, and pytest builds tmp_path
+        # under a session counter (`/tmp/pytest-of-<user>/pytest-<N>/`), so a
+        # lone digit is satisfied by the PATH on any run where N carries a 1 —
+        # including runs where the code stopped naming the exit code at all.
+        assert "(exit 1)" in str(exc.value)
 
     def test_a_stale_video_is_not_mistaken_for_a_successful_download_either(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -132,7 +136,11 @@ class TestAFailedDownloadCannotBorrowAnEarlierRunsVideo:
         result = download.download_url("https://example.invalid/v", out_dir)
 
         assert Path(result["video_path"]).read_bytes() == VIDEO_BYTES
-        assert "1" in capsys.readouterr().err
+        # "exited 1", not a bare "1" — same reason as the SystemExit above,
+        # pre-emptively: nothing else in this line carries a digit today, but
+        # the assertion should pin the code to the word it qualifies rather
+        # than to whatever else the line grows.
+        assert "exited 1" in capsys.readouterr().err
 
 
 class TestEveryTimestampWebVTTAllowsIsParsed:

@@ -401,7 +401,11 @@ class TestAFrameNeverWearsAnotherFramesTimestamp:
         frames.extract_scene_candidates("v.mp4", out_dir, resolution=512)
 
         err = capsys.readouterr().err
-        assert "2" in err and "timestamp" in err.lower()
+        # "dropped 2", not a bare "2": the same line reports how many timestamps
+        # arrived and how many frames were written, so two other counts share it
+        # and either could grow the digit this assertion is looking for.
+        assert "dropped 2" in err
+        assert "timestamp" in err.lower()
 
     def test_every_frame_timed_drops_nothing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture

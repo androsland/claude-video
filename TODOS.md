@@ -1063,7 +1063,8 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
      exists to hold. It sits in `frames.py` for historical reasons only. Moving it is
      mechanical and would put the surplus/shortfall reasoning beside the other fences.
   4. The report is assembled by a run of bare `print()` calls inside `main()`
-     (`moviola.py`, roughly 560–664) with no function of its own, so there is no name to
+     (`moviola.py:560–691` — from the summary heading to the last print before `main()`
+     returns at 693) with no function of its own, so there is no name to
      hang a contract on and no signature saying what a section may read. **The first
      version of this item claimed `render_report`'s ordering was load-bearing, and both
      halves of that were false** — no function called `render_report` has ever existed in
@@ -1077,7 +1078,11 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
      by nothing, so a reader has no way to tell which of these prints may be moved. Extract
      the block into a named function whose parameters say what it reads — that answers the
      question the missing name leaves open, instead of adding a comment asserting a
-     dependency that is not there.
+     dependency that is not there. (**The corrected version of this item said `560–664`,
+     which is also wrong** — 664 is not a boundary of anything, it falls inside the
+     Transcript section's `if focused: / else:`, and an extraction following that range
+     would leave the `gap_warning` print, the fenced transcript body, all three
+     no-transcript branches and the work-dir footer still inline. Use 560–691.)
   5. `whisper.py:1015` interpolates `gaps.ranges` straight into a stderr line, so a
      failed-chunk span reaches a human as `missing [(1.0, 2.0)]` instead of as formatted
      times. Only `.ranges` is raw — `gaps.failed` and `gaps.total` are already plain ints
@@ -1085,18 +1090,31 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
      and showed `(([1.0, 2.0]), 1, 4)`; :1017 is the closing paren of the same call, and
      nothing anywhere interpolates the whole `TranscriptGaps`.**) It is stderr and it is
      diagnostic, but it is the one place on the branch where a range reaches a human
-     unformatted, and `format_missing_ranges` already exists to do it.
+     unformatted.
 
-  **Why two of five were wrong, recorded because it is the more useful finding.** Items 4
-  and 5 were written by paraphrasing the reviewer's report rather than by opening the
-  files, and a paraphrase carries the confident shape of a verified claim without the
-  verification. They were caught only because the same reviewer was asked, on a re-run, to
-  audit this entry against the code rather than to re-report its own findings. A deferral
-  is read by whoever picks the work up months later, with the review long gone — so a
-  wrong file or function name in TODOS.md costs strictly more than not filing at all,
-  because it sends someone searching for something that does not exist. Check a finding
-  against the code before it lands here, even when the finding came from a reviewer that
-  was right about everything else.
+     **`format_missing_ranges` is NOT the fix, and the corrected version of this item said
+     it was.** Two independent grounds, either fatal on its own. (a) Import direction:
+     `moviola.py` imports from `whisper.py`, `whisper.py` imports only from `untrusted.py`,
+     and `format_missing_ranges` lives in `moviola.py` — so calling it from `whisper.py`
+     is a circular import that fails at entry-point start, not a style objection. (b)
+     Shape: it returns markdown for a report bullet
+     (`" — **INCOMPLETE: N of M audio chunks failed**, missing …"`), so substituting it at
+     `whisper.py:1015` would bold a stderr line and duplicate the "N of M failed" phrasing
+     already on :1014. The reusable piece is the smaller one item 1 flags — the span join
+     `", ".join(f"{format_time(s)}–{format_time(e)}" …)`, duplicated at `moviola.py:52`
+     and `:114`. It depends on `format_time`, which lives in `frames.py` and is imported
+     only by `moviola.py`; `whisper.py` imports neither module. So sharing it means a new
+     stdlib-only leaf both can reach, on the pattern `untrusted.py` set — not a reuse of
+     something that already exists, and a larger move than this item first implied.
+
+  **This entry is its own worked example, which is why the corrections are left visible.**
+  Items 4 and 5 were wrong when first filed, and the corrections were wrong again — a
+  range that cut the block in half, and a proposed fix that does not compile. Both rounds
+  were written by paraphrasing a review instead of opening the files; both were caught
+  only by asking a reviewer to audit the entry against the code rather than re-report its
+  own findings. Items 1–3, audited on the second round, are clean, so the failure tracks
+  how a line was written, not which list it is on. Open the file before a claim lands
+  here.
 
 ## Completed
 
