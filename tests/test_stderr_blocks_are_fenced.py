@@ -150,6 +150,7 @@ import shutil
 import stat
 import subprocess
 import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -775,8 +776,23 @@ class TestTheLiveVectorEndToEnd:
         ])
         return clip
 
+    # BOTH `-loglevel info` sites, not just one. The module docstring names
+    # `extract_scene_candidates` AND `extract_keyframes` as the two where any
+    # failure carries the author's text, so running one of them live and
+    # reaching the other only through the monkeypatched fixture left half of
+    # that framing asserted and not evidenced. The two are near-identical in
+    # shape — which is the argument that the second adds little, and exactly
+    # why it costs one line to stop taking it on trust.
+    @pytest.mark.parametrize(
+        "extract",
+        [frames.extract_scene_candidates, frames.extract_keyframes],
+        ids=["scene_candidates", "keyframes"],
+    )
     def test_a_container_title_reaches_the_diagnostic_attributed(
-        self, forging_clip: Path, tmp_path: Path
+        self,
+        extract: Callable[..., object],
+        forging_clip: Path,
+        tmp_path: Path,
     ) -> None:
         out = tmp_path / "out"
         out.mkdir()
@@ -785,7 +801,7 @@ class TestTheLiveVectorEndToEnd:
             pytest.skip("this filesystem does not enforce the write bit")
         try:
             with pytest.raises(SystemExit) as caught:
-                frames.extract_scene_candidates(str(forging_clip), out)
+                extract(str(forging_clip), out)
         finally:
             os.chmod(out, stat.S_IRWXU)
 

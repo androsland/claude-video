@@ -106,7 +106,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 - **Four stderr sites interpolate an exception raised while handling remote data, and the
   channel is latent rather than live.** (security gate, 2026-08-26; anchors re-verified
   2026-08-27) `download.py:208` (`info.json parse failed`), `moviola.py:369` and `:501`
-  (`subtitle parse failed`), and `moviola.py:534` (`whisper fallback failed`, the
+  (`subtitle parse failed`), and `moviola.py:534-535` (`whisper fallback failed`, the
   `except Exception` arm at `:527`) each print
   `{exc}` raw. A gate reviewer first flagged three of these as already-itemized uncovered
   surfaces; they are itemized nowhere, so they were audited from scratch. Every exception
@@ -132,9 +132,9 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   (`transcribe.py:55`). So a key a server omitted is defaulted long before anything
   indexes it. That invariant is what makes the class unreachable, it has to hold across
   all three producers because two of the three indexing sites are shared, and it is
-  recorded here so whoever adds a fourth knows what it has to hold. `moviola.py:534` is
+  recorded here so whoever adds a fourth knows what it has to hold. `moviola.py:534-535` is
   structurally safe from the ffmpeg value above it, because `SystemExit` subclasses
-  `BaseException` and cannot land in an `except Exception`. `transcribe.py:62`
+  `BaseException` and cannot land in an `except Exception`. `transcribe.py:63`
   interpolates `Path(path).name`, safe for a different reason — the yt-dlp output
   template is the fixed `video.%(ext)s` (`download.py:157`, `:223`), so the filename never
   carries the remote title. Nothing enforces any of this: one `raise ValueError(f"bad
@@ -648,7 +648,7 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   `finite_float` findings — a value this program did not write, parsed as though it had —
   but one level up: the guards protect the FIELDS inside a document that was already assumed
   to be a document. Reachability is low and is the reason this is filed rather than fixed:
-  the real ffprobe under `-v quiet -print_format json` either emits JSON or exits non-zero,
+  the real ffprobe under `-v error -print_format json` either emits JSON or exits non-zero,
   so it takes a shim or a wrapper on PATH answering to the name `ffprobe`. Non-goal: this is
   not the `_read_info` half — `download.py:178` reads a file yt-dlp wrote and has the same
   shape with its own reachability story.
@@ -1017,6 +1017,43 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   case the new test cannot see either: an anchor whose number is a real line saying
   something entirely unrelated, which is exactly what all three `frames.py` ones were.
   Set equality has no opinion about meaning.
+
+- **The anchor test shipped and three more citations in this file were still wrong.**
+  (maintainability gate, 2026-08-27) On the branch that added
+  `tests/test_doc_anchors_are_current.py`, a reviewer checked every anchor the diff
+  touched and found three the new test cannot see: `transcribe.py:62` for a
+  `Path(path).name` that is on `:63` (62 is the bare `print(`), `moviola.py:534` for an
+  `{exc}` that is on `:535` (534 is the label half of the same call), and the
+  reachability sentence in the unguarded-`json.loads` entry above, which asserted the
+  real ffprobe runs under `-v quiet` — a flag the very same commit deleted. All three
+  are fixed in the commit that files this. They are two different diseases and only the
+  first looks like an anchor problem.
+
+  **A citation paired with a quoted fragment** (`transcribe.py:63` +
+  `Path(path).name`) is checkable in principle: assert the fragment appears on the
+  cited line. It is not built, and the reason is the reason, not an omission. Pairing a
+  fragment to an anchor is only unambiguous on a prose line carrying exactly one of
+  each — and the sentence that produced BOTH of these carries four anchors and five
+  backticked fragments, so the restriction that makes the check safe excludes precisely
+  the shape that failed. Building it without the restriction means guessing which
+  fragment belongs to which anchor, and a wrong guess fires on correct prose, which is
+  worse than not checking.
+
+  **The ffprobe one is not an anchor at all**, and no signature of any shape would have
+  caught it. It is a flag name inside an argument about reachability, invalidated by a
+  change to code the sentence does not cite, in the same commit. It was found by
+  tracing the flag from `get_metadata` outward to the prose naming it. Note what sits
+  two paragraphs below it: a sentence that still says `-v quiet` and is still correct,
+  because it describes a *test* helper. Any grep-based rule broad enough to catch the
+  stale one breaks the sound one.
+
+  Non-goals: this is NOT a request for a third signature class — see the entry above,
+  where each new signature is another way for the check to go quiet on a rewrap, and the
+  standing advice is to cite a symbol instead. It does not cover a fragment spanning
+  lines, or a citation deliberately written as a range (`moviola.py:534-535` now is
+  one). And it says nothing about the dozens of anchors in this file pointing at
+  `download.py`, `whisper.py` and `local_whisper.py`, which no test reads and which
+  nobody has audited end to end.
 
 ## Housekeeping
 
