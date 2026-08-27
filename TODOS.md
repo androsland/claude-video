@@ -963,16 +963,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   24 tests call directly", which is both likelier and harder to read as a real
   regression when it happens.
 
-- **CI's ffmpeg is a major version this suite has never run against.** (testing
-  review of ci/run-the-suite, 2026-08-26) Every measurement in this repository
-  was taken on ffmpeg 4.4.2 (Ubuntu 22.04). `ubuntu-latest` has not been 22.04
-  since 2025, so the runner installs a different major, and six tests in
-  `test_frames.py` depend on x264 GOP placement and scene-detection thresholds —
-  behaviour that is tuned, not specified. This is a risk and not a predicted
-  failure: the workflow has never executed, so nobody knows either way. The
-  cheap answer if it bites is pinning `runs-on` to a specific image rather than
-  loosening the assertions; the assertions are the product.
-
 - **`test_ci_runs_the_whole_suite.py` reads the workflow as text, not as YAML.**
   (ci/run-the-suite, 2026-08-26; narrowed by review 2026-08-26) Two of the
   permissive cases are now closed — a name in a `#` comment and a name in a
@@ -1016,14 +1006,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   remaining blind spot, deliberately unfixed: a module-level
   `pytestmark = pytest.mark.skipif(find_spec("x") is None)`, which skips a whole
   file and looks nothing like an import guard.
-
-- **`AGENTS.md` documents a `.venv` that no longer exists in this checkout.**
-  (release staging, 2026-08-26) Its Commands block gives
-  `.venv/bin/pytest -q                # or: python3 -m pytest -q`, and there is no
-  `.venv/` here — the first form fails outright and only the fallback works. Left as a
-  finding rather than fixed in the same breath because the honest repair is a decision
-  about whether this project wants a checked-in venv convention at all, and that is
-  wider than a docs edit. `python3 -m pytest -q` collects 564 as of this commit.
 
 - **The file set the repo-wide audits read is a subset under a sparse checkout, and
   nothing says so.** (release staging, 2026-08-26) `tracked_text_files` asks
@@ -1439,6 +1421,56 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Completed
 
+### CI's ffmpeg major version, and the pass counts that named it
+
+(docs/release-notes-and-stale-claims, 2026-08-27) Two entries close on the same
+evidence — the first CI run the workflow ever made.
+
+- **The ffmpeg risk did not bite.** The entry was filed as a risk and not a predicted
+  failure, on the correct ground that the workflow had never executed. It has now:
+  run **33109063305** installed **ffmpeg 6.1.1-3ubuntu5** on both rungs — a different
+  major from the 4.4.2 every measurement in this repository had been taken on — and the
+  suite passed whole, **1041 on CPython 3.10.21 and 1041 on CPython 3.13.15**. The six
+  `test_frames.py` tests that depend on x264 GOP placement and scene-detection
+  thresholds are inside those counts. The contingency stands unused and unneeded: pin
+  `runs-on` to a specific image rather than loosening the assertions.
+
+  **What this does NOT establish.** One run, one image, one ffmpeg build. It says
+  nothing about ffmpeg 5 or 7, nothing about the next `ubuntu-latest` rotation, and
+  nothing about the thresholds being *specified* rather than merely *agreeing here* —
+  they are still tuned behaviour that happens to hold across two majors. A green run
+  is evidence the risk was overestimated for this build, not that the class is closed.
+
+- **The `AGENTS.md` `.venv` entry had already been fixed, by a branch that did not
+  close it.** Filed 2026-08-26 when the Commands block read
+  `.venv/bin/pytest -q  # or: python3 -m pytest -q` — primary form first, and there is
+  no `.venv/` in this checkout, so the primary form failed outright. **`50a0aa9`
+  (PR #25, 2026-08-27) reversed the order to
+  `python3 -m pytest -q  # or: .venv/bin/pytest -q, if you made one`**, which is
+  conditional and therefore correct, and left the entry open. Traced rather than
+  eyeballed: `git log -S'.venv/bin/pytest'` reports only the 2026-06-29 commit that
+  introduced the line, because `-S` counts occurrences and reordering changed none —
+  `-G` is what surfaces the reorder. The entry deferred to "a decision about whether
+  this project wants a checked-in venv convention", and the answer the fix gives is
+  that it does not need one: the sentence no longer claims a `.venv` exists.
+
+- **The README's two `/releases/latest` links close by tagging, not by editing.**
+  `README.md:110` and `:142` both point at
+  `https://github.com/androsland/moviola/releases/latest`. Verified today: `gh release
+  list` is empty and `git ls-remote --tags` stops at `v0.2.0`, so both 404 right now.
+  `release.yml` triggers on `v*` and `[0-9]*`, so pushing `v0.3.0` publishes the first
+  release and both URLs resolve with no diff. Recorded because "the link is broken" and
+  "the link needs changing" are different findings, and only the first is true.
+
+- **The workflow's pass counts were stale by 20.** The comment claimed 1021 per rung
+  from a local pre-land measurement on 3.10.12 and 3.13.13. It now carries the CI
+  figure with its run id and the interpreters the runner actually resolved, keeping
+  the local numbers beside it because the six-package resolution check they also made
+  has not been repeated in CI. `test_ci_runs_the_whole_suite.py` reads the VERSIONS out
+  of README and AGENTS and the matrix out of the YAML — never the counts — so this was
+  a documentation correction with no test to satisfy, which is exactly the shape that
+  goes stale unnoticed.
+
 ### Four packaging and path defects, and three of the entries that filed them were wrong
 
 (chore/packaging-and-docs, 2026-08-27) Closes the `--out-dir` umask entry, the
@@ -1515,8 +1547,12 @@ both declare `Requires-Python >= 3.10`. Both rungs were run locally before the w
 claimed them rather than published as a guess: 1021 passed on 3.10.12 and 1021 on
 CPython 3.13.13, each against exactly the pinned set, and the 3.13 install was checked to
 resolve six packages with `exceptiongroup`, `tomli` and `typing-extensions` correctly
-excluded by their `python_version < "3.11"` markers. That count is a snapshot with a date,
-not an invariant, and it went stale twice inside this branch: 993 was falsified by the
+excluded by their `python_version < "3.11"` markers. CI has since measured it for itself
+— run 33109063305, **1041 passed on CPython 3.10.21 and 1041 on CPython 3.13.15**, on the
+interpreters the runner resolved rather than the ones a developer had — and the workflow
+comment now carries the CI figure with its run id, keeping the local one beside it because
+the package-resolution check has not been repeated there. That count is a snapshot with a
+date, not an invariant, and it went stale twice inside this branch: 993 was falsified by the
 review commit that added twenty tests, and 1013 was falsified by the very commit that
 wrote it, which appended five more cases to the same file after measuring. The second is
 an ordering defect rather than an oversight — measure, then edit, then commit — so the

@@ -1048,8 +1048,8 @@ class TestTheWholeSuiteRunsInCI:
     def test_the_documented_interpreters_are_the_ones_the_matrix_runs(self, doc):
         # Both files state which interpreters CI runs, in prose, and until this
         # test nothing read either. The workflow comment goes further and
-        # asserts a result per rung — "1021 passed on 3.10.12 and 1021 on
-        # CPython 3.13.13" — so dropping a rung leaves three separate places
+        # asserts a result per rung — "1041 passed on CPython 3.10.21 and 1041
+        # on CPython 3.13.15" — so dropping a rung leaves three separate places
         # claiming a run that no longer happens.
         #
         # This test reads the VERSIONS out of that sentence's neighbourhood and
