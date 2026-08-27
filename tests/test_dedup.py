@@ -97,7 +97,7 @@ def test_dedupe_mismatched_thumb_count_is_noop(tmp_path: Path):
 # --- _thumb_frames + dedupe_perceptual: real ffmpeg over extracted JPEGs ------
 
 def test_thumb_frames_match_candidate_count(cut_clip: Path, tmp_path: Path):
-    out = frames.extract_scene_candidates(str(cut_clip), tmp_path / "f", max_frames=None)
+    out, _untimed = frames.extract_scene_candidates(str(cut_clip), tmp_path / "f", max_frames=None)
     thumbs = frames._thumb_frames([Path(fr["path"]) for fr in out])
     assert len(thumbs) == len(out)
     assert all(len(t) == frames.DEDUP_THUMB * frames.DEDUP_THUMB for t in thumbs)
@@ -115,7 +115,7 @@ def test_dedupe_perceptual_collapses_static_clip(static_clip: Path, tmp_path: Pa
 
 def test_dedupe_perceptual_keeps_distinct_cuts(cut_clip: Path, tmp_path: Path):
     """Distinct color shots differ in luma, so frame-delta keeps them all."""
-    out = frames.extract_scene_candidates(str(cut_clip), tmp_path / "f", max_frames=None)
+    out, _untimed = frames.extract_scene_candidates(str(cut_clip), tmp_path / "f", max_frames=None)
     n_before = len(out)
     survivors, dropped = frames.dedupe_perceptual(out)
     assert dropped == 0

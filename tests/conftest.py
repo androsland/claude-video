@@ -81,3 +81,26 @@ def static_clip(tmp_path_factory: pytest.TempPathFactory) -> Path:
     path = tmp_path_factory.mktemp("clips") / "static.mp4"
     build_static_clip(path)
     return path
+
+
+def build_audio_clip(path: Path, duration: float = 1.5) -> None:
+    """A short clip that actually carries an audio stream.
+
+    The two clips above are both `a=0`, so `meta["has_audio"]` is False for
+    every one of them and the whisper block is skipped entirely — which is
+    exactly why nothing in this suite had ever entered it.
+    """
+    _run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-t", str(duration), "-i", "color=c=blue:s=160x120:r=10",
+        "-f", "lavfi", "-t", str(duration), "-i", "sine=frequency=440:sample_rate=44100",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+        str(path),
+    ])
+
+
+@pytest.fixture(scope="session")
+def audio_clip(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    path = tmp_path_factory.mktemp("audio") / "tone.mp4"
+    build_audio_clip(path)
+    return path

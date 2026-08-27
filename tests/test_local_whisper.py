@@ -350,7 +350,7 @@ class TestLocalDispatch:
             whisper, "_transcribe_local",
             lambda path, options: [{"start": 0.0, "end": 1.0, "text": "hi"}],
         )
-        segments, backend = whisper.transcribe_video("v.mp4", audio, backend="local")
+        segments, backend, _gaps = whisper.transcribe_video("v.mp4", audio, backend="local")
         assert backend == "local"
         assert segments == [{"start": 0.0, "end": 1.0, "text": "hi"}]
 
@@ -436,7 +436,7 @@ class TestLocalDispatch:
             whisper, "_transcribe_local",
             lambda path, options: [{"start": 0.0, "end": 1.0, "text": "hi"}],
         )
-        _, backend = whisper.transcribe_video("v.mp4", tmp_path / "a.mp3", backend="local")
+        _, backend, _gaps = whisper.transcribe_video("v.mp4", tmp_path / "a.mp3", backend="local")
         assert backend == "local"
 
     def test_api_backend_without_key_still_errors(self, monkeypatch, tmp_path):
@@ -510,7 +510,7 @@ class TestFocusedExtraction:
             whisper, "_transcribe_local",
             lambda path, options: [{"start": 0.0, "end": 2.0, "text": "hi"}],
         )
-        segments, _ = whisper.transcribe_video(
+        segments, _, _gaps = whisper.transcribe_video(
             "v.mp4", tmp_path / "a.mp3", backend="local", start_seconds=60.0, end_seconds=70.0,
         )
         assert segments == [{"start": 60.0, "end": 62.0, "text": "hi"}]
@@ -524,7 +524,7 @@ class TestFocusedExtraction:
             whisper, "_transcribe_local",
             lambda path, options: [{"start": 0.0, "end": 2.0, "text": "hi"}],
         )
-        segments, _ = whisper.transcribe_video(
+        segments, _, _gaps = whisper.transcribe_video(
             "v.mp4", tmp_path / "a.mp3", backend="local", end_seconds=10.0,
         )
         assert segments == [{"start": 0.0, "end": 2.0, "text": "hi"}]

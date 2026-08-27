@@ -168,10 +168,10 @@ class TestChunkFilesDoNotOutliveTheTranscript:
         def fake_split(full_audio: Path, out_dir: Path, plan: list) -> list:
             out_dir.mkdir(parents=True, exist_ok=True)
             made = []
-            for index, (offset, _duration) in enumerate(plan):
+            for index, (offset, duration) in enumerate(plan):
                 path = out_dir / f"chunk_{index:03d}.mp3"
                 path.write_bytes(b"filler")
-                made.append((path, offset))
+                made.append(whisper.AudioChunk(path, offset, duration))
             return made
 
         def transcribed(path: Path) -> list[dict]:

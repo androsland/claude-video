@@ -244,7 +244,9 @@ class TestAHostileErrorBodyCannotForgeAProgressLine:
             )
 
         with pytest.raises(SystemExit):
-            whisper.transcribe_chunks([(audio, 0.0)], transcribe_one)
+            whisper.transcribe_chunks(
+                [whisper.AudioChunk(audio, 0.0, 10.0)], transcribe_one
+            )
         err = capsys.readouterr().err
         assert "quota exceeded" in err
         # Count, do not pattern-match. Asserting every line starts with

@@ -579,3 +579,117 @@ class TestTheChangelogsTestCountsAreReal:
             found = re.search(r"(\d+) tests? collected", proc.stdout)
             assert found, proc.stdout[-2000:]
             assert found.group(1) == claimed, f"{filename}: says {claimed}, collects {found.group(1)}"
+
+
+class TestAFunctionReturnsWhatItSaysItReturns:
+    """A return-value claim is prose about code, and it drifts the same way.
+
+    This file exists because `transcribe_video`'s docstring named four of the
+    five option keys its caller builds. The quiet-failures work then made the
+    same function return a THIRD value — the transcript's missing ranges — and
+    both of its other descriptions stayed at two: the annotation still read
+    `tuple[list[dict], str]` and the docstring still said
+    `Returns (segments, backend_used)`. Neither is decoration. The annotation is
+    what a reader and a type checker are handed, and the sentence is what the
+    next person copies when they write a call site.
+
+    Two claims, checked against the code rather than against each other:
+
+      * every `return (...)` literal has the arity its `tuple[...]` annotation
+        declares — the check that catches this class of drift at the source;
+      * where a docstring also spells the tuple out as `Returns (a, b)`, that
+        sentence has the same arity as the annotation.
+
+    NON-GOALS — what this cannot see, and what it must not fire on:
+
+      * TYPES are not checked, only COUNT. A function annotated
+        `tuple[list[dict], str]` that returns `(str, list)` passes here. Arity
+        is what the two drifted descriptions actually disagreed on, and a real
+        type checker is the tool for the other half.
+      * A `return` whose value is a NAME or a CALL rather than a tuple literal
+        is skipped, not guessed at — `return pair_with_timestamps(...)` is a
+        legitimate two-value return this cannot count, and inventing an arity
+        for it would make the test fire on correct code. Seventeen of the
+        eighteen annotated functions in `scripts/` are green today; that is the
+        must-not-fire half, and it is why the predicate is narrow.
+      * Only functions annotated `tuple[...]` are in scope. A bare `tuple`, a
+        `Sequence`, an aliased NamedTuple return (`-> ChunkOutcome`) or a union
+        such as `tuple[str, str] | tuple[None, None]` is invisible here — the
+        last one deliberately, since its two arms may legitimately differ.
+      * The docstring half is a check on a sentence that ONE function in the
+        codebase currently writes. It is not a house style being enforced: a
+        function with no `Returns (...)` sentence is complete as it stands and
+        the test says nothing about it.
+      * Nested `def`s are excluded from their parent's scan, so a closure
+        returning a differently-shaped tuple is neither attributed to the outer
+        function nor checked on its own.
+    """
+
+    RETURNS_SENTENCE = re.compile(r"Returns \(([^)]*)\)")
+
+    @staticmethod
+    def _annotated_arity(node: ast.FunctionDef) -> int | None:
+        """The element count of a `tuple[...]` return annotation, else None."""
+        ann = node.returns
+        if not isinstance(ann, ast.Subscript):
+            return None
+        if not (isinstance(ann.value, ast.Name) and ann.value.id == "tuple"):
+            return None
+        return len(ann.slice.elts) if isinstance(ann.slice, ast.Tuple) else 1
+
+    @staticmethod
+    def _own_returns(node: ast.FunctionDef) -> list[ast.Return]:
+        """This function's own `return`s, not those of any `def` inside it."""
+        found: list[ast.Return] = []
+
+        def walk(body: list[ast.stmt]) -> None:
+            for stmt in body:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                if isinstance(stmt, ast.Return):
+                    found.append(stmt)
+                for field in ("body", "orelse", "finalbody"):
+                    walk(getattr(stmt, field, []) or [])
+                for handler in getattr(stmt, "handlers", []) or []:
+                    walk(handler.body)
+
+        walk(node.body)
+        return found
+
+    def _annotated_functions(self):
+        for path in sorted((REPO / "skills" / "moviola" / "scripts").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.FunctionDef):
+                    continue
+                arity = self._annotated_arity(node)
+                if arity is not None:
+                    yield path.name, node, arity
+
+    def test_every_tuple_return_has_the_arity_its_annotation_declares(self) -> None:
+        checked = 0
+        for filename, node, arity in self._annotated_functions():
+            for ret in self._own_returns(node):
+                if not isinstance(ret.value, ast.Tuple):
+                    continue
+                checked += 1
+                assert len(ret.value.elts) == arity, (
+                    f"{filename}:{ret.lineno} {node.name}() returns "
+                    f"{len(ret.value.elts)} values; its annotation declares {arity}"
+                )
+        assert checked >= 10, f"the scan found only {checked} tuple returns to check"
+
+    def test_a_returns_sentence_counts_the_same_values_as_the_annotation(self) -> None:
+        checked = 0
+        for filename, node, arity in self._annotated_functions():
+            match = self.RETURNS_SENTENCE.search(ast.get_docstring(node) or "")
+            if not match:
+                continue
+            checked += 1
+            named = [part.strip() for part in match.group(1).split(",") if part.strip()]
+            assert len(named) == arity, (
+                f"{filename}:{node.lineno} {node.name}() documents "
+                f"{len(named)} return values ({match.group(1)}); "
+                f"its annotation declares {arity}"
+            )
+        assert checked, "no function documents its return tuple any more"

@@ -271,7 +271,7 @@ class TestEveryNameTranscribes:
     def test_a_pinned_name_reaches_an_implementation(self, backend, stubbed):
         # api_key is passed for every name; the local branch ignores it, which
         # is itself part of the contract being pinned.
-        segments, used = whisper.transcribe_video(
+        segments, used, _gaps = whisper.transcribe_video(
             str(stubbed / "video.mp4"),
             stubbed / "out.mp3",
             backend=backend,

@@ -230,34 +230,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Quiet failures
 
-- **A partial transcript reaches the report with nothing marking it partial.**
-  (ai-output review, 2026-08-26) `transcribe_chunks` at `whisper.py:779` counts
-  `failures` and uses the count for exactly one thing: raising when it equals the number
-  of chunks. Nine chunks out of ten succeeding returns the concatenation as an ordinary
-  list of segments, and the report on stdout is then indistinguishable from a complete
-  one — the only trace is the `chunk N/M failed — skipping` line on stderr, a channel a
-  reader may not have and a summariser will not weigh. The gap is worst where it matters
-  most: a dropped chunk is a HOLE in the middle of the timeline, so the transcript reads
-  as continuous across a gap it never covered. The shape is to thread `failures` and
-  `len(chunks)` out of the function and have the report say which time ranges are
-  missing. Non-goal: skipping rather than failing is the correct behaviour and must not
-  change — one bad slice discarding a whole transcript is the trade this was built to
-  avoid; the fix is disclosure, not strictness. Non-goal: this says nothing about the
-  single-file path, which has no chunks and either succeeds or raises.
-
-- **A frame can still be paired with a timestamp that is not its own, when ffmpeg
-  reports FEWER of them than it wrote frames.** (quiet-failures review, 2026-08-26)
-  `extract_scene_candidates` and `extract_keyframes` both do
-  `ts = timestamps[i] if i < len(timestamps) else offset`, so once showinfo's output is
-  shorter than the frame list every remaining image is labelled with the START of the
-  requested range. That is a plausible number in the right units, which is what makes it
-  bad: a report saying "at 0:00" for a frame from minute nine looks like ordinary output.
-  Sorting the frames numerically (this pass) removed the reason the two lists diverge in
-  the common case, but not the fallback itself — showinfo can drop lines under `-loglevel`
-  changes, and a filter graph that emits a frame without a `pts_time` would do it too. The
-  honest fix is to treat a length mismatch as an error, or carry the frame NUMBER through
-  from the filename and index the timestamps by it rather than by position.
-
 - **`frames_in_order` sorts on the last run of digits in the name and cannot see a
   directory that mixes two naming schemes.** (quiet-failures review, 2026-08-26) Every
   caller writes `frame_%04d.jpg` into a directory it has just emptied of `frame_*.jpg`,
@@ -282,6 +254,112 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   deliberate false positive: the cost of a spurious stderr line is one line, and the cost
   of the silence it replaces was a paid API upload for a transcript already on disk. Worth
   revisiting only if the line turns out to be common enough to train people to ignore it.
+
+- **`pair_with_timestamps` joins showinfo lines to files BY POSITION, and the two lists
+  are produced by stages that can legitimately disagree.** (quiet-failures review,
+  2026-08-27) Verified against ffmpeg 4.4.2 in this environment, not reasoned about:
+  `ffmpeg -i src.mp4 -vf "setpts=PTS-0.5/TB,scale=64:-2,showinfo" -vsync vfr -q:v 4
+  out/frame_%04d.jpg` reports **10** `pts_time:` lines, writes **9** files, and
+  `SHOWINFO_TS_RE = pts_time:([0-9.]+)` extracts **7** — it silently drops `-0.5`,
+  `-0.3`, `-0.1`, because the pattern cannot match a leading minus. Nine files against
+  seven timestamps is a HEAD hole, the worst case for a positional join: every surviving
+  frame wears a later frame's timestamp and the two frames that *did* have extractable
+  times are the ones deleted. The fix landed on `fix/quiet-failures-ii` converts an
+  invented `offset` into a drop and hedges honestly on stderr, so nothing here is a
+  regression against `main` — but its subject line, *a frame never wears another frame's
+  timestamp*, is broader than what it delivers, and that is the gap. Note the NOPTS case
+  is NOT this bug: `setpts='if(eq(N,2),NAN,PTS)'` makes showinfo print `pts_time:NOPTS`
+  and the muxer refuse the frame, so the regex's skip and ffmpeg's skip cancel and the
+  lists stay aligned. Widening the pattern to `-?[0-9.]+` alone would therefore make
+  things WORSE, turning today's 9-vs-7 shortfall into a 10-vs-9 surplus — which the
+  function treats as an ordinary capped run and ignores in silence. A real fix has to
+  stop joining on position: pair on the frame number ffmpeg reports (`n:` in the same
+  showinfo line) rather than on list index. Filed for `fix/quiet-failures-iii`.
+
+- **Dropping an untimed frame lowers the count the engine floors are compared against,
+  so a showinfo gap can buy a second full ffmpeg re-decode.** (forgeward performance
+  reviewer, 2026-08-27) `pair_with_timestamps` returns fewer candidates than were
+  extracted, and both engines then test that reduced count against a floor —
+  `scene_count + untimed >= SCENE_MIN_FRAMES` in `extract_scene_or_uniform`,
+  `len(candidates) + untimed >= KEYFRAME_MIN` in the keyframe path. The `+ untimed` term
+  is there precisely so the report can say the shortfall CAUSED the fallback, which means
+  the fallback genuinely happens in that case: a video with enough real scene changes
+  falls back to uniform sampling and re-decodes the source from scratch. Cost is one extra
+  full pass over the video, and it scales with duration, not with the size of the gap —
+  one missing showinfo line on a two-hour source is the same price as fifty. This is the
+  right behaviour given a positional join, not a defect on top of it: the alternative is
+  keeping frames whose timestamps are invented. It stops being a cost at all once pairing
+  moves to the reported frame number (entry above), because a frame with a real `n:` is
+  never dropped for lack of a match. Filed as the cost half of `fix/quiet-failures-iii`,
+  not as separate work.
+
+- **A timestamp SURPLUS is documented as ordinary, and through `moviola.py` it is not.**
+  (quiet-failures review, 2026-08-27) `pair_with_timestamps`'s docstring justifies
+  ignoring a surplus because `-frames:v` caps the files written while showinfo keeps
+  reporting. True for the public API, where `extract_scene_candidates(max_frames=100)`
+  emits `-frames:v` at `frames.py:367`. Not true on the product path:
+  `extract_scene_or_uniform` calls it with `max_frames=None`, so no cap is emitted and a
+  surplus there means the muxer refused frames showinfo had already reported. That is the
+  same class of evidence as a shortfall and it is discarded without a word. Same fix as
+  the entry above — pairing on the reported frame number makes the distinction fall out
+  instead of needing a rule.
+
+- **A chunk that returns HTTP 200 with zero segments is not counted as a gap.**
+  (quiet-failures review, 2026-08-27) `transcribe_chunks` records a gap only in its
+  `except SystemExit` arm, and `_segments_from_response` (`whisper.py:801-820`) returns
+  `[]` for a well-formed response carrying no segments rather than raising. So two chunks
+  where the second transcribes to nothing yield `TranscriptGaps(ranges=[], failed=0,
+  total=2)` and the report says the transcript is complete. This is the branch's own
+  proposition — *a partial transcript says it is partial* — surviving in a second form,
+  and `whisper.py:831-839` already states it as the reason the ranges exist. Not fixed on
+  `fix/quiet-failures-ii` because it is a behaviour change needing its own RED test and
+  the branch was at its size ceiling. The judgement call it needs first: an empty chunk is
+  also what silence sounds like, so counting every one as a failure would fire on a
+  legitimately quiet passage. Distinguishing them probably means asking whether the whole
+  chunk was empty versus whether the response carried no `segments` key at all.
+
+- **`TranscriptGaps.shifted(0.0)` returns `self`, aliasing the mutable `ranges` list.**
+  (quiet-failures review, 2026-08-27) The early return at `whisper.py:86-92` is a correct
+  optimisation for an immutable value and `TranscriptGaps` is not one — `ranges` is a
+  plain `list`. No caller mutates it today, so this is a hazard note rather than a live
+  bug; `_replace` on every path, or a tuple, would close it before somebody appends.
+
+- **`test_quiet_failures_ii.py` pins less than its test names claim — seven mutations
+  survive, each independently confirmed.** (testing review, 2026-08-27) Re-run here
+  against `test_quiet_failures_ii.py`, `test_whisper.py` and `test_moviola.py`; a
+  parallel review reports the same seven against the full suite. In severity order:
+
+  * **Only the first missing span is ever rendered.** Slicing `gaps.ranges[:1]` in
+    EITHER `format_missing_ranges` or `gap_warning` passes. `test_several_failures_are_
+    all_named` proves `transcribe_chunks` COLLECTS several ranges; nothing proves the
+    report PRINTS more than one. Chunks 1 and 7 of 10 failing would name one hole and
+    leave the reader treating the other span as covered — the exact misreading the file
+    exists to prevent.
+  * **The summary bullet's ratio and spans are unpinned.** Swapping `{gaps.failed}` and
+    `{gaps.total}` passes, and so does dropping `, missing {spans}` entirely — every
+    assertion in `test_the_report_names_the_missing_span` is satisfied by the
+    block-quote alone. Rendering raw seconds instead of `format_time` also passes,
+    despite that test's own comment claiming to check exactly it. The fix is the shape
+    `TestTheFallbackReportsItsOwnFrames` already uses: a `_transcript_line` helper that
+    isolates the bullet, so an assertion cannot be satisfied by a different line.
+  * **The warning's POSITION is unpinned.** `gap_warning`'s docstring says "the
+    block-quote above the transcript itself"; moving it below the closing fence passes.
+    Deleting it is caught, relocating it is not — and a warning under a long transcript
+    is one a summariser reaches last, if at all.
+  * **The `INCOMPLETE` stderr line in `transcribe_video` has no coverage at all.**
+    Replacing its condition with `False` passes.
+  * **`TranscriptGaps([], 0, 1)`'s `1` is unpinned.** Changing it to `0` passes, though
+    both the `transcribe_video` docstring and this file's NON-GOALS state it as an
+    invariant. No user-visible effect today because every renderer guards on `failed`,
+    but any consumer computing `failed / total` divides by zero.
+  * **The gap end's `round(..., 3)` is never exercised.** Every chunk duration in the
+    tests is an exact binary float, so removing the `round` passes; a plan with
+    0.1-granularity durations would print `200.00000000000003` into the report.
+
+  Not fixed on `fix/quiet-failures-ii`: the branch is at ~1,320 changed lines against a
+  ~800 ceiling, and none of these is a live defect — the shipped code renders every
+  span, the right ratio, formatted times, and the warning in the right place. They are
+  claims nothing holds. Queued for `fix/quiet-failures-iii`.
 
 ## Bounded failures
 
@@ -873,6 +951,20 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   this is about the *mechanism*, not the bumps — filing it does not decide whether to take
   `checkout@v7`, which alters what the action does and needs its own verification pass.
 
+- **`actions/checkout@v4` and `actions/setup-python@v5` run on the Node 20 runtime,
+  which GitHub is progressively deprecating.** (supply-chain review of
+  `fix/release-workflow`, 2026-08-26) Both pins are authentic and carry no known
+  advisory — this is a future-breakage risk on the runner, not an unpatched
+  vulnerability, and it is a *different* reason to bump than the staleness filed above.
+  `softprops/action-gh-release@v2` was not called out on this axis. Verified against every
+  intervening major's release notes: `checkout` v5.0.0/v6.0.0/v7.0.0/v7.0.1 and
+  `setup-python` v6.0.0/v7.0.0 are Node 20→24 migrations, ESM/bundling changes and bug
+  fixes; none describes a CVE fix. Non-goal: this does not say when the deprecation lands
+  or that CI breaks on a date — GitHub has published none, and nothing here polls for it.
+  Filed a branch late on purpose: it arrived from the reviewer after
+  `fix/release-workflow` was already gated, and the gate marker is HEAD-pinned, so
+  amending a one-bullet edit in would have cost a full re-gate for a Low operational note.
+
 - **`release.yml` has no `workflow_dispatch:`, so it cannot be rehearsed without cutting a
   tag.** (fix/release-workflow review, 2026-08-26) Verified by absence: `grep -rn
   workflow_dispatch .github/` returns nothing. Every assertion in
@@ -953,7 +1045,121 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   rejection and the ambient-key rule are both in that class. Nothing verifies that
   extraction step, so a pass that archives without lifting them is a silent regression.
 
+- **Five maintainability items from the gate on `fix/quiet-failures-ii`.** (forgeward
+  maintainability reviewer, 2026-08-27) All PASS-with-debt — none blocks, and they are
+  recorded together because they were found together and share one cause: the branch
+  added disclosure in four places at once and the fourth copy is where a shape becomes a
+  duplication.
+  1. `moviola.py:52` and `moviola.py:114` carry a byte-identical line —
+     `spans = ", ".join(f"{format_time(s)}–{format_time(e)}" for s, e in gaps.ranges)`.
+     Two callers is the threshold where extracting a `_format_spans(gaps)` helper stops
+     being premature; a third would make it overdue.
+  2. The four `untimed_dropped` / `fallback` metadata blocks in `frames.py` are assembled
+     inline at each return, so a new key has to be added in four places and the compiler
+     will not say which one was missed. A constructor for the meta dict would make the
+     set of keys a single fact.
+  3. The showinfo parse (`SHOWINFO_TS_RE.finditer` over `result.stderr`) is a guarded
+     parse of output this program did not write, which is exactly what `untrusted.py`
+     exists to hold. It sits in `frames.py` for historical reasons only. Moving it is
+     mechanical and would put the surplus/shortfall reasoning beside the other fences.
+  4. The report is assembled by a run of bare `print()` calls inside `main()`
+     (`moviola.py:560–691` — from the summary heading to the last print before `main()`
+     returns at 693) with no function of its own, so there is no name to
+     hang a contract on and no signature saying what a section may read. **The first
+     version of this item claimed `render_report`'s ordering was load-bearing, and both
+     halves of that were false** — no function called `render_report` has ever existed in
+     this repository (`git log -S` across all commits returns only the commit that wrote
+     this entry), and the ordering is not load-bearing: everything both sections read
+     (`frame_meta`, `transcript_gaps`, `transcript_segments`) is fully computed before any
+     printing starts, the five assignments between the two print sites are local read-only
+     derivations, and `untimed_note` and `gap_warning` are pure string builders over
+     disjoint state. Swapping the two prints would reorder the document and break nothing.
+     What is actually true is weaker and still worth fixing: the order is a convention held
+     by nothing, so a reader has no way to tell which of these prints may be moved. Extract
+     the block into a named function whose parameters say what it reads — that answers the
+     question the missing name leaves open, instead of adding a comment asserting a
+     dependency that is not there. (**The corrected version of this item said `560–664`,
+     which is also wrong** — 664 is not a boundary of anything, it falls inside the
+     Transcript section's `if focused: / else:`, and an extraction following that range
+     would leave the `gap_warning` print, the fenced transcript body, all three
+     no-transcript branches and the work-dir footer still inline. Use 560–691.)
+  5. `whisper.py:1015` interpolates `gaps.ranges` straight into a stderr line, so a
+     failed-chunk span reaches a human as `missing [(1.0, 2.0)]` instead of as formatted
+     times. Only `.ranges` is raw — `gaps.failed` and `gaps.total` are already plain ints
+     in the "1 of 4" phrasing on the line above. (**This item first said `whisper.py:1017`
+     and showed `(([1.0, 2.0]), 1, 4)`; :1017 is the closing paren of the same call, and
+     nothing anywhere interpolates the whole `TranscriptGaps`.**) It is stderr and it is
+     diagnostic, but it is the one place on the branch where a range reaches a human
+     unformatted.
+
+     **`format_missing_ranges` is NOT the fix, and the corrected version of this item said
+     it was.** Two independent grounds, either fatal on its own. (a) Import direction:
+     `moviola.py` imports from `whisper.py`, `whisper.py` imports only from `untrusted.py`,
+     and `format_missing_ranges` lives in `moviola.py` — so calling it from `whisper.py`
+     is a circular import that fails at entry-point start, not a style objection. (b)
+     Shape: it returns markdown for a report bullet
+     (`" — **INCOMPLETE: N of M audio chunks failed**, missing …"`), so substituting it at
+     `whisper.py:1015` would bold a stderr line and duplicate the "N of M failed" phrasing
+     already on :1014. The reusable piece is the smaller one item 1 flags — the span join
+     `", ".join(f"{format_time(s)}–{format_time(e)}" …)`, duplicated at `moviola.py:52`
+     and `:114`. It depends on `format_time`, which lives in `frames.py` and is imported
+     only by `moviola.py`; `whisper.py` imports neither module. So sharing it means a new
+     stdlib-only leaf both can reach, on the pattern `untrusted.py` set — not a reuse of
+     something that already exists, and a larger move than this item first implied.
+
+  **This entry is its own worked example, which is why the corrections are left visible.**
+  Items 4 and 5 were wrong when first filed, and the corrections were wrong again — a
+  range that cut the block in half, and a proposed fix that does not compile. Both rounds
+  were written by paraphrasing a review instead of opening the files; both were caught
+  only by asking a reviewer to audit the entry against the code rather than re-report its
+  own findings. Items 1–3, audited on the second round, are clean, so the failure tracks
+  how a line was written, not which list it is on. Open the file before a claim lands
+  here.
+
 ## Completed
+
+### A partial transcript and a mislabelled frame both read as ordinary output
+
+Two findings, one root cause in two places: a stand-in value that is a plausible number
+in the right units. That is the property that makes both unrecoverable downstream — not
+that the failure happened, but that what it produced is indistinguishable from a correct
+answer by anything that consumes it.
+
+`transcribe_chunks` counted failed chunks and used the count for exactly one thing:
+raising when it equalled the chunk count. Nine of ten succeeding returned the
+concatenation as an ordinary list of segments, and the only trace was a line on stderr —
+a channel a reader may not have and a summariser will not weigh. Worse, a dropped chunk
+is a HOLE in the middle of the timeline, so the surrounding text closes over it and the
+transcript reads as CONTINUOUS across a span nothing transcribed. `split_audio` now
+returns `AudioChunk(path, offset, duration)` — the duration is carried because a failed
+chunk's END is not otherwise knowable, its file having never been written — and
+`transcribe_chunks` returns a `ChunkOutcome` whose `TranscriptGaps` names the missing
+ranges, the failure count and the chunk total. The ranges move with `--start` alongside
+the segments themselves. The report says "INCOMPLETE: 1 of 4 audio chunks failed" in the
+summary bullet and puts a block-quote above the transcript naming the specific
+misreading, because "1 of 4 failed" alone gives a reader no reason to distrust what they
+then read.
+
+`extract_scene_candidates` and `extract_keyframes` carried the identical line
+`ts = timestamps[i] if i < len(timestamps) else offset`, so the moment showinfo reported
+fewer timestamps than ffmpeg wrote frames, every remaining image was labelled with the
+START of the requested range: "at 0:00" for a frame from minute nine. Carrying the frame
+NUMBER through from the filename — the alternative this file recorded — turns out to be
+equivalent to indexing by position, because showinfo sits before the muxer, so filename
+index *i* and showinfo line *i* describe the same frame and a dropped line truncates a
+prefix rather than misaligning it. There is no honest timestamp to substitute, so both
+engines now share `pair_with_timestamps`, which drops the frame, DELETES its file
+(`frames_in_order` globs the directory, so an orphan is re-paired by position by the next
+caller — the defect again, one call later), warns on stderr, and returns the count for
+the Frames bullet to disclose. Raising instead was rejected as contradicting the
+disclosure-not-strictness trade the rest of the codebase makes.
+
+`tests/test_quiet_failures_ii.py` states both as invariants across 19 tests. Finding 1:
+5 of 6 mutations died in-module, the sixth (dropping the chunk duration) dying in
+`test_whisper.py` where `split_audio`'s contract lives. Finding 2: 7 of 7 died, and all
+4 must-NOT-fire cases stayed green — including a timestamp SURPLUS, which is what every
+`-frames:v`-capped run looks like and must never warn.
+
 
 ### The file a tag executes is now checked
 

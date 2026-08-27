@@ -34,10 +34,90 @@ from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from untrusted import balance_bidi, finite_float, stderr_line  # noqa: E402,F401
 from whisper import (  # noqa: E402
     LOCAL_BACKEND,
+    TranscriptGaps,
     env_key_backend,
     resolve_backend,
     transcribe_video,
 )
+
+
+def format_missing_ranges(gaps: TranscriptGaps | None) -> str:
+    """The summary bullet's suffix when part of the transcript never arrived.
+
+    Empty string on every complete run, which is the overwhelming majority of
+    them — this must read as an exception, not as a field the report always has.
+    """
+    if not gaps or not gaps.failed:
+        return ""
+    spans = ", ".join(f"{format_time(s)}–{format_time(e)}" for s, e in gaps.ranges)
+    return f" — **INCOMPLETE: {gaps.failed} of {gaps.total} audio chunks failed**, missing {spans}"
+
+
+def untimed_note(frame_meta: dict) -> str:
+    """The Frames bullet's suffix when ffmpeg did not timestamp every frame.
+
+    Two sentences, because the count means two different things and the wrong
+    one is not a weaker claim — it is a false one.
+
+    On a normal run the untimed frames were dropped out of the output being
+    read, and the frames that remain are only as aligned as the reports that
+    arrived. Both halves are about the frames below.
+
+    On a uniform fallback neither half is. The output was re-extracted from
+    scratch by :func:`frames.extract`, whose timestamps are `offset + i / fps`
+    and never touch showinfo, so nothing below is missing and nothing below can
+    be misaligned. The count survives because it explains the FALLBACK: the
+    engine floors are compared against the candidate count after untimed frames
+    are dropped, so a shortfall can push a perfectly lively video under one, and
+    "with uniform fallback" otherwise reads as "this video is static".
+
+    `fallback` alone decides which sentence, whatever key the count arrives
+    under — a claim about the frames in this report cannot be true of a run
+    whose frames were all thrown away.
+    """
+    if frame_meta.get("fallback"):
+        untimed = frame_meta.get("untimed_before_fallback", 0)
+        if not untimed:
+            return ""
+        pass_name = frame_meta.get("fallback_from", "detection")
+        noun = "frame" if untimed == 1 else "frames"
+        if frame_meta.get("untimed_caused_fallback"):
+            return (
+                f" — **ffmpeg never timestamped {untimed} {noun} in the {pass_name} "
+                f"pass**, and dropping them put it under the floor: this fell back for "
+                "that reason, not because the video is static. The frames above are "
+                "evenly spaced and exactly timed"
+            )
+        return (
+            f" — ffmpeg never timestamped {untimed} {noun} in the {pass_name} pass, "
+            "which was under the floor either way. The frames above are evenly spaced "
+            "and exactly timed"
+        )
+
+    untimed = frame_meta.get("untimed_dropped", 0)
+    if not untimed:
+        return ""
+    return (
+        f" — **{untimed} dropped without a timestamp from ffmpeg**; "
+        "remaining timestamps may be misaligned"
+    )
+
+
+def gap_warning(gaps: TranscriptGaps) -> str:
+    """The block-quote above the transcript itself.
+
+    It names the specific misreading rather than only the fact: text either
+    side of a dropped chunk closes over the hole, so the transcript LOOKS
+    continuous across a span nothing ever transcribed. A reader who is told
+    only "1 of 4 chunks failed" still has no reason to distrust what they read.
+    """
+    spans = ", ".join(f"{format_time(s)}–{format_time(e)}" for s, e in gaps.ranges)
+    return (
+        f"> **Warning:** {gaps.failed} of {gaps.total} audio chunks failed to "
+        f"transcribe. Nothing below covers {spans}, and the surrounding text runs "
+        "continuous across the gap — it does not read as truncated. Treat any "
+        "claim about that span as unsupported."
+    )
 
 
 def resolve_whisper_choice(flag: str | None, configured: str) -> str | None:
@@ -268,6 +348,7 @@ def main() -> int:
     transcript_segments: list[dict] = []
     transcript_text: str | None = None
     transcript_source: str | None = None
+    transcript_gaps: TranscriptGaps | None = None
     video_path: str | None = None
 
     if url_source:
@@ -421,7 +502,7 @@ def main() -> int:
                 # Pass the range down rather than transcribing the whole video
                 # and discarding most of it: on the local backend that waste is
                 # minutes of compute, not a throwaway API call.
-                all_segments, used_backend = transcribe_video(
+                all_segments, used_backend, transcript_gaps = transcribe_video(
                     video_path,
                     work / "audio.mp3",
                     backend=backend,
@@ -501,10 +582,16 @@ def main() -> int:
         engine = frame_meta.get("engine", "scene")
         fallback = " with uniform fallback" if frame_meta.get("fallback") else ""
         deduped = frame_meta.get("deduped_count", 0)
+        # Not a tuning note like the dedup count beside it: a shortfall here
+        # means ffmpeg told us about fewer frames than it wrote. What follows
+        # from that differs between a normal run and a fallback, so the sentence
+        # is chosen in one place rather than assembled here.
+        shortfall = untimed_note(frame_meta)
         dedup_note = f", {deduped} near-duplicate{'s' if deduped != 1 else ''} dropped" if deduped else ""
         print(
             f"- **Frames:** {detail_count} selected from {frame_meta.get('candidate_count', detail_count)} "
             f"candidates ({engine}{fallback}{dedup_note}, {range_mode} range, budget {target}, cap {cap_label})"
+            f"{shortfall}"
         )
     elif not cue_frames:
         print("- **Frames:** skipped (transcript detail)")
@@ -519,9 +606,10 @@ def main() -> int:
         print(f"- **Frame size:** max {args.resolution}px wide, max 1998px tall")
     if transcript_segments:
         in_range = " in range" if focused else ""
+        missing = format_missing_ranges(transcript_gaps)
         print(
             f"- **Transcript:** {len(transcript_segments)} segments{in_range} "
-            f"(via {transcript_source or 'captions'})"
+            f"(via {transcript_source or 'captions'}){missing}"
         )
     else:
         print("- **Transcript:** none available")
@@ -567,6 +655,9 @@ def main() -> int:
     print()
     if transcript_text:
         label = transcript_source or "captions"
+        if transcript_gaps and transcript_gaps.failed:
+            print(gap_warning(transcript_gaps))
+            print()
         if focused:
             print(f"_Source: {label}. Filtered to {format_time(effective_start)} → {format_time(effective_end)}:_")
         else:
