@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from config import DETAILS, WHISPER_BACKENDS, frame_cap, get_config  # noqa: E402
 from download import download, fetch_captions, is_url  # noqa: E402
 from frames import MAX_FPS, auto_fps, auto_fps_focus, extract_at_timestamps, extract_keyframes, extract_scene_or_uniform, format_time, get_metadata, merge_frames, parse_time, parse_timestamps  # noqa: E402
+import workdir  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 # Three names, three different reasons, and this comment did not account for the
 # third until a review read it as the complete list it presents itself as.
@@ -342,6 +343,11 @@ def main() -> int:
         work = Path(tempfile.mkdtemp(prefix="moviola-"))
     work.mkdir(parents=True, exist_ok=True)
     print(f"[moviola] working dir: {work}", file=sys.stderr)
+    # Before anything is written into it. Two runs sharing one --out-dir do not
+    # collide loudly — they overwrite each other's video.* and frame_*.jpg, and
+    # the (mtime, size) stale-file guard reads the other run's fresh files as
+    # this run's, so the report is assembled from two films and says so nowhere.
+    workdir.hold(work)
 
     url_source = is_url(args.source)
     dl: dict = {"subtitle_path": None, "info": {}, "downloaded": False}

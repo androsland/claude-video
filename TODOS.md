@@ -230,15 +230,6 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
 
 ## Quiet failures
 
-- **The stale-file guard compares (mtime, size) and cannot see a second run writing into
-  the same `--out-dir`.** (quiet-failures review, 2026-08-26) `snapshot_dir` answers "did
-  THIS run produce this file", which is the right question for a reused directory and the
-  wrong one for a shared directory: a file another moviola process writes while yt-dlp is
-  running is new-since-the-snapshot and reads as ours. Two concurrent runs pointed at one
-  `--out-dir` also clobber each other's `video.*` and `frame_*.jpg` outright, which is the
-  larger problem the guard does not address. A per-run subdirectory, or a lock file, is
-  the shape.
-
 - **`parse_vtt` warns on a caption track that is legitimately empty.** (quiet-failures
   review, 2026-08-26) The warning fires whenever a subtitle file yields zero segments,
   and a video whose caption track exists but contains no cues will trip it. That is a
@@ -1108,6 +1099,39 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   here.
 
 ## Completed
+
+### Two runs sharing one `--out-dir` are now refused rather than mixed
+
+(quiet-failures review, 2026-08-26; fixed 2026-08-27) `snapshot_dir` answers "did THIS run
+produce this file", which is the right question for a REUSED directory and the wrong one
+for a SHARED one: a file another moviola process writes while yt-dlp is running is
+new-since-the-snapshot and reads as ours. The runs also overwrite each other's `video.*`
+and `frame_*.jpg` outright. `skills/moviola/scripts/workdir.py` takes an exclusive `flock`
+over `.moviola.lock` before anything is written, and `main()` holds it for the life of the
+process via `atexit`.
+
+This is the deliberate exception to moviola's disclosure-not-strictness rule. Disclosure
+cannot help here: a warning still leaves a report assembled from two films, and nothing
+downstream can separate them again. `flock` over a pid file because the kernel drops the
+lock when the fd closes — SIGKILL included — so there is no stale-lock state and nothing
+has to decide whether a recorded pid is still alive.
+
+What the KILL harness caught, all three of them tests that passed for the wrong reason:
+
+- **The refusal names `--out-dir` twice**, once explaining the collision and once as the
+  remedy. `assert "--out-dir" in message` was satisfied by the explanation, so deleting
+  the actionable half survived. Now asserts `"Pass a different --out-dir"`.
+- **`os.close(fd)` drops the kernel lock by itself**, so "the next `exclusive()` succeeds"
+  proves nothing about the cleanup path. Skipping cleanup on the raise path leaves the
+  lock FILE behind, in the directory the refusal sends the user to look at — that is what
+  is asserted now.
+- **`hold` keeps holding only because `atexit` is the last reference to the ExitStack.**
+  Remove the registration and the stack is collected the instant `hold` returns, releasing
+  the lock before the run downloads anything. Measured directly. No existing test could
+  see it: releasing too EARLY also leaves no lock behind.
+
+KILL: 10/10 mutations killed, 6/6 legitimate variations stay green. Each of the three
+mutations above dies to exactly one test, and that test is the one written for it.
 
 ### A frame filename's shape had four owners that happened to agree
 

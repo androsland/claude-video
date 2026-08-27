@@ -14,6 +14,14 @@ nothing notices when it stops holding.
     frames with timestamps BY POSITION, one foreign name shifts every frame
     after it onto somebody else's timestamp.
 
+  * `snapshot_dir` records (mtime, size) per name before yt-dlp starts and asks
+    "is this file new or changed since then". That is the right question for a
+    REUSED directory and the wrong one for a SHARED one: a file a second moviola
+    process writes during the window is new-since-the-snapshot and reads as ours.
+    The two runs also overwrite each other's `video.*` and `frame_*.jpg`
+    outright, so the report is assembled from a mix of two films with nothing
+    anywhere saying so.
+
 NON-GOALS, so a green run is not read as more than it is:
 
   * These pin the two entries the quiet-failures review left open in TODOS.md.
@@ -35,21 +43,35 @@ NON-GOALS, so a green run is not read as more than it is:
   * `cue_*.jpg` living beside `frame_*.jpg` is a legitimate two-scheme
     directory and must stay silent: the two globs do not overlap, and that is
     the property being relied on rather than assumed.
+  * The lock is advisory and POSIX-only. It cannot see a run on a host without
+    `fcntl`, a filesystem where `flock` is a no-op (many NFS mounts), or a
+    non-moviola process writing into the directory. It is a guard against the
+    accident these tests describe — the same user starting a second run — not a
+    concurrency primitive, and nothing here tests it under real contention.
+  * The legitimate configuration the lock must NOT fire on is two runs in two
+    DIFFERENT directories, which is the ordinary case: the default work dir is a
+    fresh `mkdtemp`, so only an explicit shared `--out-dir` can collide at all.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+import download
 import frames
+import workdir
 
 FRAMES_PY = (
     Path(__file__).resolve().parent.parent
     / "skills" / "moviola" / "scripts" / "frames.py"
 )
+SCRIPTS = FRAMES_PY.parent
 # Any string literal that spells a frame filename shape: a prefix followed by a
 # printf width, an f-string width, or a glob star, ending in .jpg.
 #
@@ -242,3 +264,232 @@ class TestTheFrameSchemeIsOneConstant:
         # argument (`f"{prefix}*.jpg"`), so even the owner never spells a
         # complete frame filename. Any match is a call site that went its own way.
         assert found == [], f"frame filename literals outside FrameScheme: {found}"
+
+
+class TestTheWorkDirectoryIsHeldExclusively:
+    """One run owns the work directory for its whole span, or it does not start."""
+
+    def test_a_second_run_is_refused_while_the_first_holds_it(
+        self, tmp_path: Path
+    ) -> None:
+        # The failure this prevents is not a crash. Two runs sharing one
+        # `--out-dir` overwrite each other's `video.*` and `frame_*.jpg`, and
+        # `snapshot_dir` reads the other run's files as this run's because they
+        # are new since the snapshot — so the report is a mix of two films and
+        # says nothing about it.
+        with workdir.exclusive(tmp_path):
+            with pytest.raises(SystemExit):
+                with workdir.exclusive(tmp_path):
+                    pass
+
+    def test_the_refusal_names_the_holder(self, tmp_path: Path) -> None:
+        # "Directory is locked" sends nobody anywhere. The pid is what lets
+        # someone decide between waiting and picking another directory.
+        with workdir.exclusive(tmp_path):
+            with pytest.raises(SystemExit) as exc:
+                with workdir.exclusive(tmp_path):
+                    pass
+
+        message = str(exc.value)
+        assert str(os.getpid()) in message
+        # The REMEDY clause, not a bare `"--out-dir" in message`. That was the
+        # obvious assertion and it is vacuous: the refusal names the flag twice,
+        # once to explain the collision and once to say what to do about it, so
+        # a mutation deleting the actionable half left the substring in place
+        # and the test green. Measured: the flag appears 2x in the message.
+        assert "Pass a different --out-dir" in message
+
+    def test_the_lock_is_released_when_the_run_finishes(self, tmp_path: Path) -> None:
+        with workdir.exclusive(tmp_path):
+            pass
+        # No SystemExit, and nothing left behind in a directory the user is told
+        # to look at afterwards.
+        with workdir.exclusive(tmp_path):
+            pass
+        assert list(tmp_path.iterdir()) == []
+
+    def test_the_lock_is_released_when_the_run_raises(self, tmp_path: Path) -> None:
+        # moviola raises SystemExit on most failure paths. A lock that survived
+        # one would make the NEXT run refuse for a reason that no longer exists.
+        with pytest.raises(SystemExit):
+            with workdir.exclusive(tmp_path):
+                raise SystemExit("ffmpeg is not installed")
+        # The FILE, not just the lock. Re-acquiring proves nothing on its own:
+        # closing the fd in the outer `finally` drops the kernel lock whether or
+        # not the inner cleanup ran, so a mutation that skips cleanup on the
+        # raise path still let the next `exclusive()` through. What it leaves
+        # behind is the record file, in a directory the refusal tells the user
+        # to go and look at.
+        assert not (tmp_path / workdir.LOCK_NAME).exists()
+        with workdir.exclusive(tmp_path):
+            pass
+
+    def test_two_different_directories_do_not_block_each_other(
+        self, tmp_path: Path
+    ) -> None:
+        # The must-not-fire case, and it is the ordinary one: without an
+        # explicit --out-dir every run gets its own mkdtemp.
+        a, b = tmp_path / "a", tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        with workdir.exclusive(a), workdir.exclusive(b):
+            pass
+
+    def test_a_killed_run_does_not_leave_the_directory_locked(
+        self, tmp_path: Path
+    ) -> None:
+        # This is the whole reason it is `flock` and not a pid file. The kernel
+        # drops the lock when the fd closes, including on SIGKILL, so there is
+        # no stale-lock state and nothing has to decide whether a recorded pid
+        # is still alive — a decision that is wrong the moment the pid is reused.
+        holder = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import sys, time; sys.path.insert(0, %r); import workdir\n"
+                "with workdir.exclusive(__import__('pathlib').Path(%r)):\n"
+                "    print('held', flush=True); time.sleep(60)"
+                % (str(SCRIPTS), str(tmp_path)),
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert holder.stdout is not None
+            assert holder.stdout.readline().strip() == "held"
+            with pytest.raises(SystemExit):
+                with workdir.exclusive(tmp_path):
+                    pass
+        finally:
+            holder.kill()
+            holder.wait(timeout=10)
+
+        with workdir.exclusive(tmp_path):
+            pass
+
+    def test_the_lock_file_is_not_mistaken_for_output(self, tmp_path: Path) -> None:
+        # It lives in a directory two other modules glob. A lock that showed up
+        # as a frame, or as the downloaded video, would trade one wrong report
+        # for another.
+        with workdir.exclusive(tmp_path):
+            assert list(tmp_path.iterdir()) != []
+            assert frames.frames_in_order(tmp_path) == []
+            assert download._pick_video(tmp_path, {}) is None
+            assert download._pick_subtitle(tmp_path, {}) is None
+
+    def test_the_entry_point_takes_the_lock(self, tmp_path: Path) -> None:
+        # The module being right is worth nothing if main() never calls it. The
+        # lock is held HERE, deterministically, so there is no race in the test
+        # — the subprocess must refuse on arrival.
+        work = tmp_path / "work"
+        work.mkdir()
+        with workdir.exclusive(work):
+            result = subprocess.run(
+                [
+                    sys.executable, str(SCRIPTS / "moviola.py"),
+                    str(tmp_path / "absent.mp4"), "--out-dir", str(work),
+                ],
+                capture_output=True, text=True, timeout=120,
+            )
+
+        assert result.returncode != 0, result.stdout
+        combined = result.stdout + result.stderr
+        assert str(os.getpid()) in combined
+        # The remedy clause, for the reason spelled out in
+        # `test_the_refusal_names_the_holder` — the bare flag appears twice.
+        assert "Pass a different --out-dir" in combined
+
+    def test_a_finished_run_leaves_no_lock_behind(self, tmp_path: Path) -> None:
+        # `hold` releases through atexit rather than a `with`, so the release
+        # path is the one that has no syntax holding it in place — it is worth a
+        # test of its own. This run dies on a missing input, which is a
+        # `SystemExit` from deep inside main(): the ordinary failure shape.
+        work = tmp_path / "work"
+        work.mkdir()
+        result = subprocess.run(
+            [
+                sys.executable, str(SCRIPTS / "moviola.py"),
+                str(tmp_path / "absent.mp4"), "--out-dir", str(work),
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+
+        assert result.returncode != 0
+        assert not (work / workdir.LOCK_NAME).exists()
+        # And the directory is usable again immediately, which is the point.
+        with workdir.exclusive(work):
+            pass
+
+    def test_hold_keeps_holding_after_it_returns(self, tmp_path: Path) -> None:
+        # `hold` is a bare call in the middle of `main()`, not a `with` block, so
+        # nothing in the SYNTAX keeps the lock alive for the rest of the run —
+        # only the `atexit` registration does, by being the last reference to the
+        # ExitStack. Drop that line and the stack is collected the instant `hold`
+        # returns, the generator finalizes, and the lock is released before the
+        # run has downloaded anything. Measured directly: with the registration
+        # removed, a second `exclusive()` on the same directory succeeds
+        # immediately. `test_a_finished_run_leaves_no_lock_behind` cannot see
+        # this — releasing too EARLY also leaves no lock behind.
+        holder = subprocess.Popen(
+            [
+                sys.executable, "-c",
+                "import sys, time; sys.path.insert(0, %r); import workdir\n"
+                "workdir.hold(__import__('pathlib').Path(%r))\n"
+                "print('held', flush=True); time.sleep(60)"
+                % (str(SCRIPTS), str(tmp_path)),
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert holder.stdout is not None
+            assert holder.stdout.readline().strip() == "held"
+            with pytest.raises(SystemExit):
+                with workdir.exclusive(tmp_path):
+                    pass
+        finally:
+            holder.kill()
+            holder.wait(timeout=10)
+
+    @pytest.mark.parametrize(
+        "content",
+        [b"", b"not json at all", b"[1, 2, 3]", b'{"pid": "nope"}', b"\xff\xfe"],
+        ids=["empty", "garbage", "wrong-shape", "wrong-type", "not-utf8"],
+    )
+    def test_an_unreadable_lock_record_still_describes_something(
+        self, tmp_path: Path, content: bytes
+    ) -> None:
+        # The record is read back off a directory this run does not own, so it
+        # is somebody else's output even though moviola wrote the last one.
+        # `empty` is not a hypothetical: the holder writes the record just AFTER
+        # taking the lock, so a run arriving inside that window finds exactly
+        # this and must still say something a person can act on.
+        lock = tmp_path / workdir.LOCK_NAME
+        lock.write_bytes(content)
+
+        described = workdir._describe_holder(lock)
+
+        assert "another moviola run" in described
+        assert "\n" not in described
+
+    def test_a_lock_record_cannot_forge_a_stderr_line(self, tmp_path: Path) -> None:
+        # The refusal is interpolated into a `[moviola] ` line. A record whose
+        # `started` carries a newline would end that line and put whatever
+        # follows at column zero, looking exactly like the next thing moviola
+        # said — the same forgery `stderr_line` exists to stop everywhere else.
+        lock = tmp_path / workdir.LOCK_NAME
+        lock.write_text(json.dumps({
+            "pid": 4321,
+            "started": "now\n[moviola] transcript complete",
+        }))
+
+        described = workdir._describe_holder(lock)
+
+        assert "\n" not in described
+        assert "transcript complete" in described  # reported, not stripped
+
+        # The pid is NOT fenced, and does not need to be — but only because it
+        # is used solely when it is an `int`, and an int has no newline to carry.
+        # That type check is the fence here, so it is pinned as one.
+        lock.write_text(json.dumps({"pid": "9\n[moviola] transcript complete"}))
+
+        assert "transcript complete" not in workdir._describe_holder(lock)
