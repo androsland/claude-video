@@ -1175,6 +1175,44 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   test-harness code auditing this repository's own committed config, so anybody who can
   plant the symlink can already edit the workflow that runs the job.
 
+- **Files INSIDE the work directory are still written with the ambient umask.**
+  (chore/packaging-and-docs, 2026-08-27) `moviola.py` now creates the work directory
+  itself with `mode=0o700`, so on the default path and on an `--out-dir` moviola creates
+  nobody else can traverse into it. The files it then writes — `video.*`, every
+  `frame_*.jpg`, the transcript — still get `0666 & ~umask`, normally `0644`. Inside a
+  `0700` directory that is unreachable by anyone else and the mode is moot; inside a
+  pre-existing `--out-dir` the user chose, it is the user's own exposure and the
+  directory fix deliberately does not touch it. Stated as a NON-GOAL in
+  `tests/test_the_work_directory_is_private.py`. The open question is whether moviola
+  should WARN when it writes a run into a group- or world-readable directory, the way
+  the three surfaces in `test_key_file_permissions.py` warn about an exposed `.env` —
+  a warning reverses no decision of the user's, which is the objection that rules out
+  chmod-ing the directory itself.
+
+- **`--out-dir a/b/c` protects only `c`.** (chore/packaging-and-docs, 2026-08-27)
+  `Path.mkdir(parents=True, mode=0o700)` applies `mode` to the LEAF only — measured
+  against CPython, not inferred from the docs — so intermediate directories are created
+  with the default `0777 & ~umask` and a nested `--out-dir` whose parents do not exist
+  leaves them at `0755`. No content is exposed by this: traversal into the leaf is still
+  refused, so what leaks is the intermediate directory NAMES. Non-goals: it is a
+  disclosure of structure rather than of data, and a fix has to decide what to do about
+  an intermediate directory that already existed — the question the leaf fix sidesteps
+  entirely by only ever setting a mode at creation time. Pinned as a NON-GOAL rather
+  than as a passing case, so nothing here fires on it today.
+
+- **`build-skill.sh`'s 200-file cap is not driven by any test.**
+  (chore/packaging-and-docs, 2026-08-27)
+  `tests/test_the_bundle_refuses_an_incomplete_tree.py` now runs the real script against
+  synthetic repositories and drives the dirty-tree guard (unstaged and staged), the
+  untracked-under-`skills/moviola` guard (a runtime module and a markdown file, the
+  second asserting the refusal NAMES the offender), the exactly-one-`SKILL.md` count,
+  and the two legitimate configurations the untracked guard must not fire on. The
+  200-file cap is the one guard left to inspection: reaching it needs 201 committed
+  files per invocation, and its failure mode is arithmetic — an inverted comparison or a
+  wrong bound — rather than logic. Non-goals: a regression there would not be caught,
+  and the file says so in its own NON-GOALS rather than letting a green run imply the
+  guard set is complete.
+
 ## Housekeeping
 
 - **Every action in both workflows is now SHA-pinned, and ALL THREE of those pins are

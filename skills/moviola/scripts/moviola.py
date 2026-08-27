@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 
 
-SCRIPT_DIR = Path(__file__).parent.resolve()
+SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from config import DETAILS, WHISPER_BACKENDS, frame_cap, get_config  # noqa: E402
@@ -341,7 +341,15 @@ def main() -> int:
         work = Path(args.out_dir).expanduser().resolve()
     else:
         work = Path(tempfile.mkdtemp(prefix="moviola-"))
-    work.mkdir(parents=True, exist_ok=True)
+    # 0o700 so the two branches above agree about who may read the run. mkdtemp is
+    # 0700 unconditionally; a plain mkdir is 0777 & ~umask, so --out-dir used to hand
+    # the downloaded video, every frame and the transcript to every account on the
+    # machine while the default path handed them to nobody. `exist_ok=True` ignores
+    # `mode` for a directory that already exists, which is deliberate: a directory the
+    # user made themselves carries a decision this program should not reverse. Only
+    # the LEAF is covered — `parents=True` creates intermediate directories with the
+    # default mode. Pinned by tests/test_the_work_directory_is_private.py.
+    work.mkdir(parents=True, exist_ok=True, mode=0o700)
     print(f"[moviola] working dir: {work}", file=sys.stderr)
     # Before anything is written into it. Two runs sharing one --out-dir do not
     # collide loudly — they overwrite each other's video.* and frame_*.jpg, and

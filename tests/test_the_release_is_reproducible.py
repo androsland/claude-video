@@ -80,8 +80,12 @@ NON-GOALS — what this file cannot see, and what it must not fire on:
 
   * **It says nothing about whether the release actually publishes**, whether
     `dist/moviola.skill` is correct, whether the asset uploads, or whether
-    anyone can install what came out. `build-skill.sh` has its own coverage;
-    the boundary here is the workflow file.
+    anyone can install what came out. `build-skill.sh`'s refusals are covered by
+    `test_the_bundle_refuses_an_incomplete_tree.py`, and the file list of what it
+    produces by `TestThePublishedBundleShipsWhatGitattributesClaims`. Neither says
+    the bundle is CORRECT, and the boundary here is the workflow file either way.
+    This sentence read "`build-skill.sh` has its own coverage" while the script had
+    none at all — a deferral to a test that did not exist.
 
   * **It must NOT fire on a legitimate `uses:` that has no SHA to pin.** A
     local action (`uses: ./.github/actions/x`) and a container action

@@ -376,6 +376,102 @@ class TestThePublishedBundleShipsWhatGitattributesClaims:
             )
 
 
+class TestThePluginInstallArchiveShipsNoScannerConfig:
+    """The `/plugin install` archive is the SECOND surface, and `.gitattributes` missed it.
+
+    `TestThePublishedBundleShipsWhatGitattributesClaims` above covers the claude.ai
+    bundle — `git archive HEAD:skills/moviola` — and its own NON-GOALS say it says
+    nothing about the other two install surfaces. This is the one it named: Claude
+    Code's `/plugin install` fetches a FULL-REPO archive, so the archive root is the
+    repository root and a different set of `export-ignore` patterns applies.
+
+    The repo-root `.skillignore` shipped in it. That file is scanner configuration —
+    a list of paths install-time security scanners are told to skip — and shipping it
+    is the same defect one directory up from the one already fixed: the bundle
+    carried an instruction not to look at things. It is worse than useless here,
+    because every path it names is ALREADY absent from this archive (`tests/`,
+    `.github/`, `.agents/`, `dev-sync.sh` and `skills/moviola/scripts/build-skill.sh`
+    are all `export-ignore`d), so what ships is an exclusion list whose only live
+    effect would be on files a user added themselves.
+
+    NON-GOALS, so a green run here is not read as more than it is:
+
+      * It checks the archive's file LIST, not any file's contents. A runtime script
+        that is present but wrong is exactly as green as a correct one.
+
+      * It archives HEAD, not the working tree. An uncommitted fix still reads as
+        broken here, which is deliberate — HEAD is what a user's `/plugin install`
+        actually fetches.
+
+      * **The legitimate configuration it must NOT fire on is the repo-root
+        `.skillignore` continuing to exist.** `npx skills add` copies the directory
+        wholesale and never runs `git archive`, so that surface still needs the file
+        and still gets it. `export-ignore` is what separates the two; DELETING the
+        file would fix this archive and break that one. Nothing here would catch
+        that, because a deleted file is also an absent one.
+
+      * It does not verify that any scanner honours `.skillignore`, or that the
+        paths it names are the right ones. Whether the exclusion list is correct is
+        a different question from whether it should ship.
+
+      * It pins four entries that must STAY, not the whole roster. An
+        `export-ignore` added tomorrow that drops something else from the archive is
+        invisible here unless it drops one of those four.
+    """
+
+    # Present on purpose, and the repo-root .gitattributes carries a NOTE saying so:
+    # /plugin install fetches the full-repo archive, so the plugin manifest and both
+    # halves of the SessionStart hook — its config and the script it names — have to be
+    # inside it or the plugin does not install. They are
+    # asserted here because this class's whole subject is what `export-ignore` removes,
+    # and an over-broad pattern is the failure mode a test about exclusions invites.
+    MUST_SHIP = (
+        "skills/moviola/SKILL.md",
+        ".claude-plugin/plugin.json",
+        "hooks/hooks.json",
+        "hooks/scripts/check-setup.sh",
+    )
+
+    def _archive_names(self) -> list[str]:
+        try:
+            archive = subprocess.run(
+                ["git", "-C", str(REPO), "archive", "--format=zip", "HEAD"],
+                capture_output=True,
+                check=True,
+                timeout=60,
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            pytest.skip(f"git archive cannot run here: {exc}")
+        return zipfile.ZipFile(io.BytesIO(archive)).namelist()
+
+    def test_the_archive_is_the_one_plugin_install_would_fetch(self) -> None:
+        """The positive control, so the exclusion assertions cannot pass over nothing."""
+        names = self._archive_names()
+
+        assert names, "git archive produced an empty full-repo archive"
+        for required in self.MUST_SHIP:
+            assert required in names, (
+                f"{required} is missing from the full-repo archive, so `/plugin "
+                "install` would not install. An `export-ignore` pattern is too "
+                "broad — the repo-root .gitattributes NOTE explains why hooks/ and "
+                ".claude-plugin/ have to stay."
+            )
+
+    def test_no_skillignore_ships_in_the_plugin_archive(self) -> None:
+        names = self._archive_names()
+
+        shipped = [name for name in names if Path(name).name == ".skillignore"]
+        assert not shipped, (
+            f"{shipped} ships inside the archive `/plugin install` fetches. "
+            ".skillignore is install-time scanner configuration: it tells a scanner "
+            "which paths not to read. Every path it names is already export-ignored "
+            "out of this archive, so shipping it adds no exclusion a user wants and "
+            "one they did not ask for. Fix it with `/.skillignore export-ignore` in "
+            "the repo-root .gitattributes, NOT by deleting the file — `npx skills "
+            "add` copies the directory wholesale and still needs it."
+        )
+
+
 class TestNoUrlStillPointsAtTheRepositoryThisWasForkedFrom:
     """A fork's own badges pointing upstream send its users to someone else."""
 

@@ -39,3 +39,14 @@ V2_CONCERNS.md   export-ignore
 # Build config itself
 .gitignore      export-ignore
 .gitattributes  export-ignore
+
+# Install-time scanner config. `.skillignore` tells scanners which paths NOT to read,
+# and every path this one names is already export-ignored out of the archive above —
+# so what shipped was an exclusion list with no exclusion a user wants in it, and one
+# they did not ask for. EXPORT-IGNORED rather than deleted: `npx skills add` copies the
+# directory wholesale and never runs `git archive`, so that surface still needs the file
+# and still gets it. The leading slash anchors this to the repository root so it does not
+# also match skills/moviola/.skillignore, which skills/moviola/.gitattributes already
+# excludes for its own reasons.
+# Pinned by TestThePluginInstallArchiveShipsNoScannerConfig.
+/.skillignore   export-ignore
