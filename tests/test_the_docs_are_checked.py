@@ -395,12 +395,19 @@ class TestThePluginInstallArchiveShipsNoScannerConfig:
     kept on purpose by the repo-root `.gitattributes` NOTE and both asserted below as
     MUST_SHIP, plus README.md, CHANGELOG.md, AGENTS.md and CLAUDE.md. The shipped
     exclusion list therefore told a scanner to skip `hooks/scripts/check-setup.sh`, an
-    executable that ships and runs on SessionStart. Ten further entries (`tests/`,
-    `.github/`, `.agents/`, `dev-sync.sh`, `skills/moviola/scripts/build-skill.sh` and
-    five cache/artifact patterns) genuinely are export-ignored, and seven name paths git
-    never tracked. An earlier draft of this docstring generalised those ten into "every
-    path it names", which understated a real scanner-blinding exclusion as a vacuous
-    one; the count is written out here so the next reader does not have to trust it.
+    executable that ships and runs on SessionStart. Ten further entries genuinely are
+    export-ignored — `tests/`, `.github/`, `.agents/`, `dev-sync.sh`,
+    `skills/moviola/scripts/build-skill.sh`, THREE cache/artifact patterns
+    (`__pycache__/`, `*.pyc`, `.DS_Store`) and two dev-planning docs (`V2_PLAN.md`,
+    `V2_CONCERNS.md`) that name files this repository has never tracked in its history —
+    and seven name paths git never tracked. Two drafts of this docstring have now been
+    wrong about that tail: the first generalised the ten into "every path it names",
+    understating a real scanner-blinding exclusion as a vacuous one, and the second
+    called all five remaining entries "cache/artifact patterns" when two of them are
+    dead `export-ignore` lines for files that never existed. The headline 6-of-23 is the
+    load-bearing number and was measured against `git archive HEAD` both times; the
+    breakdown is written out so the next reader does not have to trust it, which is the
+    only reason its errors were findable.
 
     NON-GOALS, so a green run here is not read as more than it is:
 

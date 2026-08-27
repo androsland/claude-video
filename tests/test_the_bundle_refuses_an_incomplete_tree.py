@@ -38,6 +38,13 @@ NON-GOALS, so a green run here is not read as more than it is:
     produces installs anywhere or that its contents are runnable. A `.skill` file
     holding the right file names and the wrong bytes is green here.
 
+  * **The developer's global git config is neutralized, not accommodated.** A green run
+    here says nothing about whether the script behaves on a machine whose
+    `core.excludesFile`, `core.attributesFile` or `core.hooksPath` is set — it says the
+    script behaves with none of them. That is the right trade for a guard test (the
+    alternative is a suite whose answer depends on whose laptop it runs on), but it means
+    a user-visible misbehaviour caused by their own git config is invisible here.
+
   * It cannot see a guard that is missing entirely. Each test names a condition the
     script already refuses; nothing enumerates the conditions it *should* refuse, so a
     fourth hazard nobody has thought of is invisible by construction.
@@ -50,6 +57,7 @@ NON-GOALS, so a green run here is not read as more than it is:
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -59,19 +67,46 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 BUILD_SCRIPT = REPO / "skills" / "moviola" / "scripts" / "build-skill.sh"
 
-# Identity for the throwaway repo's single commit. Passed with -c rather than written
-# into a config file so nothing here depends on, or alters, the developer's own git
-# identity. `commit.gpgsign=false` is here for a different reason: a contributor with
-# signing on globally has no key for `tests@example.invalid`, and every case below
-# ERRORS at fixture setup with `exit status 128`. That was a loud failure rather than a
-# silent pass, so it broke nothing — it just made the suite unrunnable for them.
-# `core.hooksPath` pointing at a failing pre-commit hook is the same class and is NOT
-# neutralized here.
+# The developer's own git configuration must not reach any git this file runs, because
+# `build-skill.sh` asks git questions whose ANSWERS a global setting can change. Two
+# layers, and they do different jobs.
+#
+# GIT_SANDBOX removes what must not be inherited. `--exclude-standard` (build-skill.sh:22)
+# consults `core.excludesFile`, so a contributor whose global ignore file happens to match
+# a fixture filename gets an untracked guard that never fires and two RED tests that say
+# nothing about this repository. That is not hypothetical: `core.excludesFile` is set on
+# the machine this was written on, and the suite passed only because `~/.gitignore` did not
+# happen to name `newthing.py`. Reproduced 2026-08-27 by pointing a global excludes file at
+# the fixture filenames — 2 failed, 6 passed — and closed by the two variables below.
+# The same lever also covers `core.attributesFile` (which `git archive` at build-skill.sh:31
+# consults for `export-ignore`), `core.hooksPath` (a global pre-commit hook that rejects the
+# fixture's commit), and `commit.gpgsign` (no key exists for the identity below, so every
+# case ERRORS at setup with `exit status 128`).
+#
+# It has to be the ENVIRONMENT and not more `-c` flags: `_git()` below is only used for
+# init/add/commit, while the two commands that actually consult these settings are run by
+# build-skill.sh as its own bare `git` invocations. A `-c` flag on `_git()` cannot reach
+# them; an inherited environment variable can. Requires git 2.32+.
+#
+# GIT_IDENTITY then supplies what an empty config lacks — a committer. `commit.gpgsign` is
+# kept here too, redundantly with the sandbox, because it is the one setting whose absence
+# turns a green run into an error rather than a wrong answer.
+#
+# NOT closed: a `.gitconfig` inside the repository being archived, and anything that changes
+# git's behaviour through PATH rather than through config.
+GIT_SANDBOX = {
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+}
 GIT_IDENTITY = (
     "-c", "user.email=tests@example.invalid",
     "-c", "user.name=moviola tests",
     "-c", "commit.gpgsign=false",
 )
+
+
+def _sandboxed_env() -> dict[str, str]:
+    return {**os.environ, **GIT_SANDBOX}
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -81,6 +116,7 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         check=True,
         timeout=60,
+        env=_sandboxed_env(),
     )
 
 
@@ -119,6 +155,7 @@ def _build(root: Path) -> subprocess.CompletedProcess[str]:
         text=True,
         timeout=120,
         cwd=str(root.parent),
+        env=_sandboxed_env(),
     )
 
 

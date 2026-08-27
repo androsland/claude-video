@@ -1197,6 +1197,39 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   and a race — and closing it means creating the chain by hand rather than with
   `parents=True`. Nothing here fires on it.
 
+- **Six `.gitattributes` `export-ignore` patterns match nothing this repository
+  tracks, and two of them name files it has never held.** (forgeward gate,
+  chore/packaging-and-docs, 2026-08-27) Measured by enumerating all 17 patterns against
+  `git ls-files`, not sampled. Four are prophylactic by design and correct as they are —
+  `__pycache__/`, `node_modules/`, `*.pyc`, `.DS_Store` mirror Anthropic's canonical
+  packaging excludes and name things that are untracked by nature. The other six divide:
+  `docs/`, `fixtures/`, `assets/` and `examples/` are placeholders for conventional
+  directories this repo has not needed yet, which is cheap and harmless; `V2_PLAN.md`
+  and `V2_CONCERNS.md` (lines 21-22) are two SPECIFIC filenames from a plan that has
+  never existed here. They arrived in upstream's own commit `429f314` and appear in no
+  tree of any of the 124 commits reachable from every local and remote-tracking ref,
+  `upstream/main` included. Non-goals: this is dead config, not a defect — no archive
+  differs either way, and nothing about the shipped bundle changes if all six are
+  deleted. The scope limit is that upstream branches never fetched into this checkout
+  could still hold those two files; the claim is about what is reachable here. Deleting
+  the two named ones is a one-line diff whose only argument is that a reader currently
+  infers a V2 planning tier that this repository does not have.
+
+- **`TODOS.md` — this file, ~196 KB and an index of every known-unfixed gap — ships to
+  every `/plugin install`.** (forgeward gate, chore/packaging-and-docs, 2026-08-27)
+  Verified by `git archive --format=tar HEAD | tar -t`: `TODOS.md` is present, alongside
+  README, CHANGELOG, AGENTS and CLAUDE. It is NOT in the claude.ai `.skill` bundle, which
+  is built from `HEAD:skills/moviola` and never sees the repository root. The security
+  reviewer was asked and declined to file it as a security matter, and that judgement is
+  recorded rather than re-argued: the repository is public, every entry is derivable from
+  the source and history that ship beside it, and no secret is exposed. What is left is a
+  relevance-and-size question — the same question the `.skillignore` fix answered one file
+  over, and answered by keeping the file for a surface that genuinely reads it while
+  `export-ignore`-ing it out of the archives that do not. Non-goals: nothing here claims
+  a user is harmed, and an `export-ignore` on `TODOS.md` would be a behaviour change to
+  the install surface that belongs in its own commit with its own test, not folded into a
+  test-only branch. CHANGELOG.md and README.md ship deliberately and are not in scope.
+
 - **`build-skill.sh`'s 200-file cap is not driven by any test.**
   (chore/packaging-and-docs, 2026-08-27)
   `tests/test_the_bundle_refuses_an_incomplete_tree.py` now runs the real script against

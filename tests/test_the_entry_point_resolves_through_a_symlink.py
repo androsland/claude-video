@@ -29,9 +29,12 @@ written:
     arbitrary code execution against anyone who installs the skill the ordinary way
     — a symlink from a directory on PATH into the skill folder.
 
-  * **`SCRIPT_DIR / "setup.py"` points at nothing.** `moviola.py:547` and `:693`
+  * **`SCRIPT_DIR / "setup.py"` points at nothing.** `moviola.py:552` and `:698`
     build the installer path from `SCRIPT_DIR`, so through a symlink they addressed
-    a `setup.py` beside the symlink, which does not exist.
+    a `setup.py` beside the symlink, which does not exist. (These two numbers have
+    been wrong twice: 539/685 shipped in the commit whose own new comment moved them,
+    and the correction to 547/693 was stale before it was committed for the same
+    reason. Re-read from the file, not recomputed from a diff.)
 
 The fix is the one-line spelling change. It does NOT make the insert redundant, and
 the insert is deliberately kept: under `-P` or `PYTHONSAFEPATH=1` (3.11+) CPython
@@ -104,6 +107,20 @@ DECOY_CONFIG = f'raise SystemExit("{DECOY_SENTINEL}")\n'
 # and `parent` — all four of which appear in both.
 GOOD_FORM = "Path(__file__).resolve().parent"
 SCRIPT_DIR_ASSIGNMENT = re.compile(r"^SCRIPT_DIR\s*=\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _expression(captured: str) -> str:
+    """The assignment's right-hand side, without a trailing comment.
+
+    The comparison against GOOD_FORM is an exact string match, so `SCRIPT_DIR =
+    Path(__file__).resolve().parent  # noqa` would fail it while being the correct
+    spelling — a false failure, not a missed regression. No site carries a trailing
+    comment today; this keeps a future one from reading as a defect. Splitting on the
+    first `#` is safe HERE and nowhere near general: every real right-hand side is a
+    `Path(...)` expression with no string literal in it, so there is no `#` to be inside
+    quotes. A site that ever used one would need a tokenizer instead.
+    """
+    return captured.split("#", 1)[0].strip()
 
 
 def _clean_env() -> dict[str, str]:
@@ -205,7 +222,9 @@ class TestEverySiteComputesItsDirectoryTheSameWay:
             for match in SCRIPT_DIR_ASSIGNMENT.finditer(
                 script.read_text(encoding="utf-8")
             ):
-                assignments.setdefault(script.name, []).append(match.group(1))
+                assignments.setdefault(script.name, []).append(
+                    _expression(match.group(1))
+                )
 
         assert assignments, (
             f"no SCRIPT_DIR assignment was found under {SCRIPTS}. Every assertion "
