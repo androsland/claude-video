@@ -1493,6 +1493,25 @@ Deferred work and known issues. Anything not done lives here, not in a PR body.
   how a line was written, not which list it is on. Open the file before a claim lands
   here.
 
+### `sk-test` is used where the file's own `FILLER` constant is declared
+
+  **`tests/test_check_setup_hook.py` declares `FILLER = "placeholder-value-not-a-credential"`
+  at :25 with a comment saying why — "deliberately not shaped like a provider key, so
+  neither a secret scanner nor a human skimming the diff has to stop and check" — and then
+  writes the literal `sk-test` in 9 places, using `FILLER` once.** (code review,
+  fix/two-messages-that-disagree, 2026-08-28) Measured at the branch's merge-base and at
+  its tip: 9 occurrences in both, so every one of them predates this branch and none was
+  added by it. Nothing here is a real credential and there is no leak, but `sk-test` is
+  shaped exactly like the thing the constant exists to avoid looking like, in the one file
+  that states the convention out loud. The fix is a mechanical substitution in that file
+  and nothing else; `test_consent_oracles.py` shows the shape for the cases that need
+  distinct values (`FILLER` plus a suffix).
+
+  **Not bundled into the branch that found it**, which touched this file to add a class and
+  had no reason to rewrite nine pre-existing lines in it — that is a separate, reviewable
+  change and it is not urgent.
+
+
 ## Completed
 
 ### The work directory reached stderr with no fence at all

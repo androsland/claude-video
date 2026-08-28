@@ -102,6 +102,26 @@ FILE_OPENAI="$(have_file_key OPENAI_API_KEY)"
 SETUP_COMPLETE="$(read_flag SETUP_COMPLETE)"
 WHISPER_PIN="$(read_flag MOVIOLA_WHISPER)"
 WHISPER_PIN="${WHISPER_PIN:-auto}"
+# Everything below echoes this value into a `/moviola: ` line, and every one of
+# those lines lands verbatim in an agent's context. `read_flag` reads the process
+# ENVIRONMENT before the config file, and an environment variable may hold line
+# breaks — so without this, MOVIOLA_WHISPER could end the line it sits in and
+# start one indistinguishable from something moviola said. This mirrors the
+# line-break half of untrusted.stderr_line's rule once, in shell, because bash
+# cannot import it: every character Python's splitlines() recognises becomes a
+# space. tests/test_check_setup_hook.py cross-pins this literal list to
+# untrusted.LINE_BREAKS so a new canonical break cannot leave the hook behind.
+for line_break in $'\n' $'\r' $'\v' $'\f' $'\x1c' $'\x1d' $'\x1e' $'\u0085' $'\u2028' $'\u2029'; do
+  WHISPER_PIN="${WHISPER_PIN//$line_break/ }"
+done
+unset line_break
+
+# The spelling the user actually used, kept for the messages. config.py holds
+# the same pair for the same reason ("the value as the user wrote it, not the
+# lowercased copy — they have to find this string in their own config file to
+# fix it"), and the two surfaces have to agree on the string or the advice on
+# one of them sends the user looking for something that is not there.
+WHISPER_PIN_DISPLAY="$WHISPER_PIN"
 # config.get_config lowercases this before validating it, so MOVIOLA_WHISPER=LOCAL
 # is a real pin to every Python caller. Reading it case-sensitively here sent it
 # to the *) arm below — the UNPINNED resolution — so a machine with a config-file
@@ -121,7 +141,7 @@ case "$WHISPER_PIN" in
   auto|local|groq|openai) WHISPER_KNOWN="yes" ;;
 esac
 if [[ -z "$WHISPER_KNOWN" ]]; then
-  echo "/moviola: MOVIOLA_WHISPER=$WHISPER_PIN is not a backend name, so it is ignored and moviola resolves as if nothing were pinned. Recognised values: auto, local, groq, openai."
+  echo "/moviola: MOVIOLA_WHISPER=$WHISPER_PIN_DISPLAY is not a backend name, so it is ignored and moviola resolves as if nothing were pinned. Recognised values: auto, local, groq, openai."
 fi
 
 # Fully configured → silent (Claude can surface status on demand via --check).
@@ -182,7 +202,7 @@ elif [[ "$BACKEND" == "local" ]]; then
 elif [[ -n "$BACKEND" ]]; then
   echo "/moviola: ready — transcription via the $BACKEND API."
 elif [[ -n "$WHISPER_KNOWN" && "$WHISPER_PIN" != "auto" ]]; then
-  echo "/moviola: MOVIOLA_WHISPER=$WHISPER_PIN is pinned but that backend is not usable here, so videos without captions get frames only. Either install it (\`pip install \"faster-whisper>=1.0\"\` for local, or set the matching API key in ~/.config/moviola/.env) or unset the pin."
+  echo "/moviola: MOVIOLA_WHISPER=$WHISPER_PIN_DISPLAY is pinned but that backend is not usable here, so videos without captions get frames only. Either install it (\`pip install \"faster-whisper>=1.0\"\` for local, or set the matching API key in ~/.config/moviola/.env) or unset the pin."
 elif [[ -n "$HAS_GROQ" || -n "$HAS_OPENAI" ]]; then
   ambient="groq"; [[ -n "$HAS_OPENAI" && -z "$HAS_GROQ" ]] && ambient="openai"
   echo "/moviola: ready for videos with native captions. An API key is set in this environment, but an unpinned run will not upload audio on the strength of an environment variable alone — set MOVIOLA_WHISPER=$ambient in ~/.config/moviola/.env to opt in, or \`pip install \"faster-whisper>=1.0\"\` to transcribe on this machine."
