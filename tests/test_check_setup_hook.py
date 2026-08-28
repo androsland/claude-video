@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import config
+import untrusted
 from untrusted import LINE_BREAKS
 
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "scripts" / "check-setup.sh"
@@ -336,8 +337,8 @@ class TestTheSettingCannotForgeAMoviolaLine:
     closes on the Python side with `untrusted.stderr_line`; bash cannot import
     that module, so the hook applies the line-break half of the same rule — all
     of `untrusted.LINE_BREAKS` become spaces — in shell, once, immediately after
-    the value is read. The Python helper also balances bidi scopes; this hook
-    does not claim or test that separate half.
+    the value is read — and appends the same bidi terminators as
+    `untrusted.balance_bidi`.
 
     The two ways in are not equally dangerous and only one of them was ever
     reachable. `read_flag` consults the process ENVIRONMENT before the config
@@ -360,6 +361,10 @@ class TestTheSettingCannotForgeAMoviolaLine:
       * **It fences line breaks, not markdown.** The hook's output is a plain
         status line, not a report, so there is no backtick rule here and none is
         asserted — that half is `md_inline`'s and belongs to stdout.
+      * **Balancing a bidi scope is not stripping bidi controls.** The value can
+        still reorder itself, and implicit directional marks have no scope to
+        close. This confines an opened scope to the value, exactly as the
+        canonical helper does; it does not make the value visually honest.
       * **The legitimate configuration it must not fire on** is an ordinary
         unrecognised value, which must still be shown back in full and in the
         user's own spelling. A fix that stripped or escaped characters would
@@ -423,6 +428,41 @@ class TestTheSettingCannotForgeAMoviolaLine:
             f"a fully-configured install grew a forgeable line.\nstdout:\n{out.stdout}"
         )
         assert out.returncode == 0
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            *("mlx" + opener for opener in untrusted._BIDI_OPENERS),
+            "mlx\u202eb\u2066c",
+            "mlx\u202eb\u202cc",
+            "mlx\u202cb\u2069c",
+            "mlx\u202e\u2066\u202c",
+            "mlx\u2066\u202e\u2069",
+        ],
+        ids=[
+            *(f"opener-U+{ord(opener):04X}" for opener in untrusted._BIDI_OPENERS),
+            "nested-unclosed",
+            "already-balanced",
+            "unmatched-closers",
+            "pdf-closes-through-isolate",
+            "pdi-closes-through-override",
+        ],
+    )
+    def test_bidi_balancing_matches_the_canonical_python_fence(self, value, tmp_path):
+        out = _run(
+            tmp_path,
+            local_whisper=False,
+            extra_env={"MOVIOLA_WHISPER": value},
+        )
+
+        prefix = "/moviola: MOVIOLA_WHISPER="
+        suffix = " is not a backend name"
+        notice = next(line for line in out.stdout.splitlines() if prefix in line)
+        displayed = notice.partition(prefix)[2].partition(suffix)[0]
+        assert displayed == untrusted.stderr_line(value), (
+            "the shell hook and the canonical Python fence disagree:\n"
+            f"shell:  {displayed!r}\npython: {untrusted.stderr_line(value)!r}"
+        )
 
     def test_an_ordinary_unrecognised_value_is_shown_back_whole(self, tmp_path):
         """The legitimate configuration a fence must not disturb."""

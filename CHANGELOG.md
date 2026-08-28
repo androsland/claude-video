@@ -2,6 +2,12 @@
 
 All notable changes to `/moviola` are documented here.
 
+## [0.3.2] — 2026-08-28
+
+### Security
+
+- Claude Code's SessionStart hook now closes unclosed bidirectional-text scopes in an environment-controlled `MOVIOLA_WHISPER` value before trusted status text is appended. Its byte-oriented shell implementation is cross-tested against the canonical Python fence and takes a no-process fast path for ordinary settings.
+
 ## [0.3.1] — 2026-08-28
 
 ### Fixed
