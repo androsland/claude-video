@@ -8,7 +8,13 @@ Claude Code (recommended — auto-updates via marketplace):
 /plugin install moviola@moviola
 ```
 
-Codex, Cursor, Copilot, Gemini CLI, or any of 50+ [Agent Skills](https://agentskills.io) hosts:
+Codex (full plugin):
+```bash
+codex plugin marketplace add androsland/moviola --ref main
+codex plugin add moviola@moviola
+```
+
+Cursor, Copilot, Gemini CLI, or any of 50+ [Agent Skills](https://agentskills.io) hosts:
 ```bash
 npx skills add androsland/moviola -g
 ```
@@ -106,7 +112,8 @@ are not tested.
 | Surface | Install |
 |---------|---------|
 | **Claude Code** | `/plugin marketplace add androsland/moviola` then `/plugin install moviola@moviola` |
-| **Codex, Cursor, Copilot, Gemini CLI, +50 more** | `npx skills add androsland/moviola -g` |
+| **Codex** | `codex plugin marketplace add androsland/moviola --ref main` then `codex plugin add moviola@moviola` |
+| **Cursor, Copilot, Gemini CLI, +50 more** | `npx skills add androsland/moviola -g` |
 | **claude.ai** (web) | [Download `moviola.skill`](https://github.com/androsland/moviola/releases/latest) → Settings → Capabilities → Skills → `+` |
 | **Manual / dev** | `git clone` then symlink `skills/moviola` into your host's skills dir (see below) |
 
@@ -119,7 +126,25 @@ are not tested.
 
 Update later with `/plugin update moviola@moviola`.
 
-### Codex, Cursor, Copilot, Gemini CLI, and 50+ other hosts
+### Codex
+
+Install the full plugin from its GitHub marketplace:
+
+```bash
+codex plugin marketplace add androsland/moviola --ref main
+codex plugin add moviola@moviola
+```
+
+After installing, start a new Codex thread so it loads the skill. Update later with:
+
+```bash
+codex plugin marketplace upgrade moviola
+codex plugin add moviola@moviola
+```
+
+For a skill-only Codex install, the Agent Skills command below also works.
+
+### Cursor, Copilot, Gemini CLI, and 50+ other hosts
 
 The [Agent Skills](https://agentskills.io) CLI installs the skill into whatever agents it detects:
 
@@ -127,9 +152,9 @@ The [Agent Skills](https://agentskills.io) CLI installs the skill into whatever 
 npx skills add androsland/moviola -g
 ```
 
-`-g` installs globally for your user (`~/.codex/skills`, `~/.cursor/skills`, etc.); drop it to install into the current project instead. Useful flags:
+`-g` installs globally for your user (`~/.cursor/skills`, `~/.copilot/skills`, etc.); drop it to install into the current project instead. Useful flags:
 
-- `-a, --agent <names…>` — target specific hosts, e.g. `-a codex -a cursor`
+- `-a, --agent <names…>` — target specific hosts, e.g. `-a cursor -a github-copilot`
 - `-l, --list` — list the skills in this repo without installing
 - `--copy` — copy files instead of symlinking (for filesystems without symlink support)
 
