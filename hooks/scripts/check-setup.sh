@@ -80,6 +80,68 @@ read_flag() {
   fi
 }
 
+# Append the terminators needed to keep a bidi scope opened by one untrusted
+# value from reordering the trusted text after it. This is the shell twin of
+# untrusted.balance_bidi: PDF closes embeddings/overrides, PDI closes isolates,
+# and a closer matches the nearest still-open scope of its own kind. The scan
+# runs under the C locale and compares exact UTF-8 byte sequences, so its result
+# does not depend on the user's locale. Ordinary settings take the fast path and
+# do not start another process at SessionStart.
+balance_bidi_setting() {
+  local value="$1"
+  local pdf=$'\xE2\x80\xAC'
+  local pdi=$'\xE2\x81\xA9'
+  local suffix=""
+
+  case "$value" in
+    *$'\xE2\x80\xAA'*|*$'\xE2\x80\xAB'*|*$'\xE2\x80\xAD'*|*$'\xE2\x80\xAE'*|\
+    *$'\xE2\x81\xA6'*|*$'\xE2\x81\xA7'*|*$'\xE2\x81\xA8'*) ;;
+    *) BIDI_BALANCED_SETTING="$value"; return ;;
+  esac
+
+  suffix="$(
+    printf '%s\n' "$value" | LC_ALL=C awk \
+      -v lre=$'\xE2\x80\xAA' -v rle=$'\xE2\x80\xAB' \
+      -v lro=$'\xE2\x80\xAD' -v rlo=$'\xE2\x80\xAE' \
+      -v lri=$'\xE2\x81\xA6' -v rli=$'\xE2\x81\xA7' \
+      -v fsi=$'\xE2\x81\xA8' -v pdf="$pdf" -v pdi="$pdi" '
+        {
+          value = $0
+          for (i = 1; i <= length(value); i++) {
+            control = substr(value, i, 3)
+            if (control == lre || control == rle ||
+                control == lro || control == rlo) {
+              expected[++top] = "P"
+              pdf_stack[++pdf_top] = top
+              i += 2
+            } else if (control == lri || control == rli || control == fsi) {
+              expected[++top] = "I"
+              pdi_stack[++pdi_top] = top
+              i += 2
+            } else if (control == pdf) {
+              if (pdf_top) {
+                delete expected[pdf_stack[pdf_top]]
+                delete pdf_stack[pdf_top--]
+              }
+              i += 2
+            } else if (control == pdi) {
+              if (pdi_top) {
+                delete expected[pdi_stack[pdi_top]]
+                delete pdi_stack[pdi_top--]
+              }
+              i += 2
+            }
+          }
+        }
+        END {
+          for (i = top; i > 0; i--)
+            if (expected[i] != "") printf "%s", expected[i] == "P" ? pdf : pdi
+        }
+      '
+  )"
+  BIDI_BALANCED_SETTING="${value}${suffix}"
+}
+
 # find_spec rather than a real import: this runs at every SessionStart, and
 # importing faster-whisper pulls in CTranslate2 and its CUDA bindings. The
 # trade-off is that find_spec answers "the module is on the path", not "it
@@ -116,12 +178,16 @@ for line_break in $'\n' $'\r' $'\v' $'\f' $'\x1c' $'\x1d' $'\x1e' $'\u0085' $'\u
 done
 unset line_break
 
-# The spelling the user actually used, kept for the messages. config.py holds
+# The spelling the user actually used, structurally fenced for the messages.
+# `balance_bidi_setting` preserves every input character and only appends the
+# terminators an open bidi scope needs. config.py holds
 # the same pair for the same reason ("the value as the user wrote it, not the
 # lowercased copy — they have to find this string in their own config file to
 # fix it"), and the two surfaces have to agree on the string or the advice on
 # one of them sends the user looking for something that is not there.
-WHISPER_PIN_DISPLAY="$WHISPER_PIN"
+balance_bidi_setting "$WHISPER_PIN"
+WHISPER_PIN_DISPLAY="$BIDI_BALANCED_SETTING"
+unset BIDI_BALANCED_SETTING
 # config.get_config lowercases this before validating it, so MOVIOLA_WHISPER=LOCAL
 # is a real pin to every Python caller. Reading it case-sensitively here sent it
 # to the *) arm below — the UNPINNED resolution — so a machine with a config-file

@@ -1,6 +1,6 @@
 ---
 name: moviola
-version: "0.3.1"
+version: "0.3.2"
 description: Watch a video (URL or local path). Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls the transcript from captions (or a Whisper fallback that runs locally or via API), and hands the result to Claude so it can answer questions about what's in the video.
 argument-hint: "<video-url-or-path> [question]"
 allowed-tools: Bash, Read, AskUserQuestion
