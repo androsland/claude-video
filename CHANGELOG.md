@@ -2,6 +2,13 @@
 
 All notable changes to `/moviola` are documented here.
 
+## [0.3.1] — 2026-08-28
+
+### Fixed
+
+- Agent-readable diagnostics now fence untrusted work-directory and backend-setting values before interpolating them into Markdown or status lines. The shell hook covers every line separator recognized by the Python runtime, and invalid `MOVIOLA_WHISPER` values retain the user's original spelling while resolving consistently as unpinned.
+- The Codex marketplace now uses the current repo-relative plugin source schema. Codex has a documented full-plugin install path alongside the portable Agent Skills install used by Cursor, Copilot, Gemini CLI, and other hosts.
+
 ## [0.3.0] — 2026-08-27
 
 ### Added

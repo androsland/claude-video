@@ -1,7 +1,7 @@
 {
   "name": "moviola",
-  "version": "0.3.0",
-  "description": "Let Claude watch a video. Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls captions or transcribes with Whisper on your own machine, and hands frames + transcript to Claude so it can answer questions about the video.",
+  "version": "0.3.1",
+  "description": "Give an agent a video input. Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls captions or transcribes with Whisper on your own machine, and hands frames + transcript to the model so it can answer questions about the video.",
   "author": {
     "name": "Andreas Demetriou"
   },
@@ -28,7 +28,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "moviola",
-    "shortDescription": "Give Claude a video input \u2014 paste a URL or path and ask about it.",
+    "shortDescription": "Give Codex a video input \u2014 paste a URL or path and ask about it.",
     "longDescription": "moviola adds a skill that lets the agent watch any video: it downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls a timestamped transcript from native captions (or transcribes with Whisper \u2014 on-device via faster-whisper by default, no API key needed), and hands frames + transcript to the model so it can answer questions grounded in what's actually on screen and in the audio.",
     "developerName": "Andreas Demetriou",
     "category": "Productivity",

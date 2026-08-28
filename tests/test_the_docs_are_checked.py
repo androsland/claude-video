@@ -571,6 +571,24 @@ class TestEverySelfReferenceNamesTheSameRepository:
             data = json.loads((REPO / rel).read_text(encoding="utf-8"))
             assert data["name"] == name, rel
 
+    def test_the_codex_marketplace_points_at_the_repo_root_plugin(self) -> None:
+        """Codex registers the repository as the marketplace source.
+
+        Plugin entries inside that snapshot are local paths, relative to the
+        marketplace root. An older `source: url` entry repeated the repository
+        URL at the plugin level, a shape the current Codex marketplace schema
+        does not accept and the manifest-only validator cannot see.
+        """
+        data = json.loads(
+            (REPO / ".agents" / "plugins" / "marketplace.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        [plugin] = data["plugins"]
+        assert plugin["source"] == {"source": "local", "path": "./"}
+        manifest = REPO / plugin["source"]["path"] / ".codex-plugin" / "plugin.json"
+        assert manifest.is_file()
+
     def test_every_install_key_matches_the_plugin_and_the_marketplace(self) -> None:
         plugin = json.loads(MANIFESTS[0].read_text(encoding="utf-8"))["name"]
         marketplace = json.loads(
@@ -984,4 +1002,3 @@ class TestNoDocstringIsWrittenWhereNothingReadsIt:
             encoding="utf-8",
         )
         assert self._orphans(module) == []
-

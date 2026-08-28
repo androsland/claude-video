@@ -12,8 +12,8 @@ Agent Skills package that gives an agent a video input. Installable across Claud
 - `skills/moviola/scripts/build-skill.sh` — builds `dist/moviola.skill` for claude.ai upload (dev-only).
 - `hooks/` — Claude Code SessionStart setup-status hook (Claude Code only).
 - `.claude-plugin/` — `plugin.json` + `marketplace.json` (Claude Code plugin + local marketplace).
-- `.codex-plugin/plugin.json` — Codex/agents manifest; `"skills": "./skills/"` points the Agent Skills CLI at the self-contained skill folder.
-- `.agents/plugins/marketplace.json` — agents marketplace listing pointing at the repo-root plugin.
+- `.codex-plugin/plugin.json` — Codex plugin manifest; `"skills": "./skills/"` points Codex at the self-contained skill folder.
+- `.agents/plugins/marketplace.json` — Codex marketplace listing whose repo-relative `source.path` points at the repo-root plugin.
 - `CLAUDE.md` → `@AGENTS.md` — generic-agent entry point.
 - `tests/` — pytest suite (ffmpeg-synthesized clips; no network).
 - `requirements-ci.txt` — the hash-pinned test toolchain CI installs. Not a
@@ -34,7 +34,8 @@ Agent Skills package that gives an agent a video input. Installable across Claud
 | Surface | Install |
 |---------|---------|
 | Claude Code | `/plugin marketplace add androsland/moviola` then `/plugin install moviola@moviola` |
-| Codex / Cursor / Copilot / +50 | `npx skills add androsland/moviola -g` |
+| Codex | `codex plugin marketplace add androsland/moviola --ref main` then `codex plugin add moviola@moviola` |
+| Cursor / Copilot / +50 | `npx skills add androsland/moviola -g` |
 | claude.ai (web) | upload `dist/moviola.skill` (built by `skills/moviola/scripts/build-skill.sh`) |
 
 ## Commands
