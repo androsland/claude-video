@@ -35,6 +35,11 @@ def test_get_config_keys(monkeypatch, tmp_path):
         "whisper_language",
         "whisper_offline",
         "config_file",
+        # What get_config discarded, so a caller can say so. Empty here — this
+        # case sets nothing. What it CONTAINS is pinned in
+        # test_an_unrecognised_setting_is_reported.py; this line only pins that
+        # the key exists, which is the shape assertion this function is for.
+        "rejected",
     }
 
 
